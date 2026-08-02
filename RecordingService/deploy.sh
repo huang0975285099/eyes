@@ -11,12 +11,14 @@ set -e
 IMAGE_NAME="recording-service"
 TAG="latest"
 SRS_IMAGE="ossrs/srs:5"
+MYSQL_IMAGE="mysql:8.1.0"
 TAR_FILE="${IMAGE_NAME}-${TAG}.tar"
 SRS_TAR="srs-5.tar"
+MYSQL_TAR="mysql-8.1.0.tar"
 # 录像存储目录（4T 硬盘挂载点，按需修改）
 # docker-compose.yml 中 volumes.device 指向此目录
 # 注意：非 root 用户需要在有权限的目录下创建
-RECORDING_DIR="/home/administrator/recordings"
+RECORDING_DIR="/home/test/recordingservice/"
 
 # docker / docker compose 命令前缀（自动检测是否需要 sudo）
 if docker info > /dev/null 2>&1; then
@@ -57,9 +59,9 @@ echo "  ✓ 录像目录已就绪: ${RECORDING_DIR}"
 echo "  ℹ️  请确认 4T 硬盘已挂载到该目录：df -h ${RECORDING_DIR}"
 echo "     若挂载点不同，请修改 docker-compose.yml 中 volumes.device 后重新执行"
 
-# 加载 SRS 镜像
+# 加载依赖镜像
 echo ""
-echo "[3/6] 加载 SRS 镜像..."
+echo "[3/6] 加载 SRS、MySQL 镜像..."
 if ! ${DOCKER} images "${SRS_IMAGE}" | grep -q "srs"; then
     if [ -f "${SRS_TAR}" ]; then
         ${DOCKER} load -i "${SRS_TAR}"
@@ -70,6 +72,18 @@ if ! ${DOCKER} images "${SRS_IMAGE}" | grep -q "srs"; then
     fi
 else
     echo "  SRS 镜像已存在，跳过加载"
+fi
+
+if ! ${DOCKER} images "${MYSQL_IMAGE}" | grep -q "mysql"; then
+    if [ -f "${MYSQL_TAR}" ]; then
+        ${DOCKER} load -i "${MYSQL_TAR}"
+        echo "  ✓ MySQL 镜像加载完成"
+    else
+        echo "  ✗ 未找到 ${MYSQL_TAR}，无法离线部署"
+        exit 1
+    fi
+else
+    echo "  MySQL 镜像已存在，跳过加载"
 fi
 
 # 加载应用镜像（始终加载，确保覆盖旧版本）
@@ -88,19 +102,21 @@ echo ""
 echo "[5/6] 验证镜像..."
 APP_SIZE=$(${DOCKER} images "${IMAGE_NAME}:${TAG}" --format "{{.Size}}" 2>/dev/null)
 SRS_SIZE=$(${DOCKER} images "${SRS_IMAGE}" --format "{{.Size}}" 2>/dev/null)
+MYSQL_SIZE=$(${DOCKER} images "${MYSQL_IMAGE}" --format "{{.Size}}" 2>/dev/null)
 echo "  ✓ recording-service:${TAG} → ${APP_SIZE}"
 echo "  ✓ ${SRS_IMAGE} → ${SRS_SIZE}"
+echo "  ✓ ${MYSQL_IMAGE} → ${MYSQL_SIZE}"
 
 # 启动服务
 echo ""
-echo "[6/6] 启动服务（recording-service + SRS）..."
+echo "[6/6] 启动服务（recording-service + SRS + MySQL）..."
 ${COMPOSE} down 2>/dev/null || true
 ${COMPOSE} up -d
 
 # 等待服务启动
 echo ""
 echo "  等待服务启动..."
-MAX_WAIT=60
+MAX_WAIT=120
 WAIT_INTERVAL=3
 ELAPSED=0
 
@@ -109,7 +125,7 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     ELAPSED=$((ELAPSED + WAIT_INTERVAL))
 
     RUNNING=$(${COMPOSE} ps | grep -c "Up" || echo "0")
-    TOTAL=$(${COMPOSE} ps -a | grep -cE "recording|srs" || echo "0")
+    TOTAL=$(${COMPOSE} ps -a | grep -cE "recording|srs|mysql" || echo "0")
 
     if [ "$RUNNING" -ge "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
         echo ""
@@ -146,6 +162,7 @@ echo "    - 录像回放 Web: http://${REMOTE_IP}:52350"
 echo "    - RTMP 推流:     rtmp://${REMOTE_IP}:21935/live/{流名}"
 echo "    - HTTP-FLV:      http://${REMOTE_IP}:28080/live/{流名}.flv"
 echo "    - SRS HTTP API:  仅 Docker 内部 http://srs:1985"
+echo "    - MySQL:         仅 Docker 内部 mysql:3306（数据库 eyes）"
 echo "    - 录像存储目录:   ${RECORDING_DIR}"
 echo "=========================================="
 echo ""

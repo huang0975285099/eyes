@@ -42,7 +42,14 @@ func main() {
 		log.Printf("[main] 环境变量 ZoneIDs=%v", envZoneIDs)
 	}
 
-	database.Init(cfg)
+	if err := database.Init(cfg); err != nil {
+		log.Fatalf("[main] 数据库初始化失败: %v", err)
+	}
+	defer func() {
+		if err := database.Close(); err != nil {
+			log.Printf("[main] 关闭数据库连接失败: %v", err)
+		}
+	}()
 
 	// 启动后尝试从 DB 加载车间分配，覆盖环境变量
 	var initZoneIDs []uint

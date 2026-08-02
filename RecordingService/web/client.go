@@ -32,7 +32,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "time": time.Now()})
+	if database.DB == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "database": "not initialized", "time": time.Now()})
+		return
+	}
+	sqlDB, err := database.DB.DB()
+	if err != nil || sqlDB.PingContext(r.Context()) != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "database": "disconnected", "time": time.Now()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "database": "connected", "time": time.Now()})
 }
 
 func (s *Server) handleClientRegister(w http.ResponseWriter, r *http.Request) {

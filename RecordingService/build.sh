@@ -5,7 +5,7 @@
 #
 # 离线部署流程：
 #   1. 本脚本在有网络的机器上构建 recording-service 镜像并导出 tar
-#   2. 连同 ossrs/srs:5 镜像一起 scp 到目标服务器
+#   2. 连同 SRS、MySQL 镜像一起 scp 到目标服务器
 #   3. 远程执行 deploy.sh 完成 load + 启动
 
 set -e
@@ -17,15 +17,17 @@ BUILD_NO_CACHE=false
 
 # ================= 目标服务器配置 =================
 # 服务器无网络，需离线打包上传
-REMOTE_USER="administrator"
+REMOTE_USER="test"
 REMOTE_IP="112.18.238.6"
 REMOTE_PORT="22"
-REMOTE_DIR="/home/administrator/recordingservice/"
+REMOTE_DIR="/home/test/recordingservice/"
 # =================================================
 
 # SRS 镜像（与 docker-compose.yml 中一致）
 SRS_IMAGE="ossrs/srs:5"
 SRS_TAR="srs-5.tar"
+MYSQL_IMAGE="mysql:8.1.0"
+MYSQL_TAR="mysql-8.1.0.tar"
 
 # 解析参数
 while [[ $# -gt 0 ]]; do
@@ -97,6 +99,9 @@ fi
 if [ -f "${SRS_TAR}" ]; then
     rm -f "${SRS_TAR}"
 fi
+if [ -f "${MYSQL_TAR}" ]; then
+    rm -f "${MYSQL_TAR}"
+fi
 
 echo ""
 echo "[2/5] 构建新镜像..."
@@ -121,9 +126,9 @@ echo "  镜像大小: ${IMAGE_SIZE}"
 docker save -o "${TAR_FILE}" "${FULL_IMAGE_NAME}"
 echo "  ✓ 应用镜像已导出: ${TAR_FILE}"
 
-# 拉取并导出 SRS 镜像
+# 拉取并导出依赖镜像
 echo ""
-echo "[4/5] 拉取并导出 SRS 镜像..."
+echo "[4/5] 拉取并导出 SRS、MySQL 镜像..."
 if [ -z "$(docker images -q ${SRS_IMAGE})" ]; then
     echo "  本地不存在 ${SRS_IMAGE}，开始拉取..."
     docker pull "${SRS_IMAGE}"
@@ -132,6 +137,15 @@ else
 fi
 docker save -o "${SRS_TAR}" "${SRS_IMAGE}"
 echo "  ✓ SRS 镜像已导出: ${SRS_TAR} ($(du -h ${SRS_TAR} | cut -f1))"
+
+if [ -z "$(docker images -q ${MYSQL_IMAGE})" ]; then
+    echo "  本地不存在 ${MYSQL_IMAGE}，开始拉取..."
+    docker pull "${MYSQL_IMAGE}"
+else
+    echo "  本地已存在 ${MYSQL_IMAGE}，跳过拉取"
+fi
+docker save -o "${MYSQL_TAR}" "${MYSQL_IMAGE}"
+echo "  ✓ MySQL 镜像已导出: ${MYSQL_TAR} ($(du -h ${MYSQL_TAR} | cut -f1))"
 
 echo ""
 echo "[5/5] 上传到目标服务器..."
@@ -143,6 +157,8 @@ echo "  上传 ${TAR_FILE}..."
 scp -P ${REMOTE_PORT} -C "${TAR_FILE}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
 echo "  上传 ${SRS_TAR}..."
 scp -P ${REMOTE_PORT} -C "${SRS_TAR}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
+echo "  上传 ${MYSQL_TAR}..."
+scp -P ${REMOTE_PORT} -C "${MYSQL_TAR}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
 
 # 上传部署脚本和配置文件
 echo "  上传 deploy.sh, docker-compose.yml, srs.conf..."

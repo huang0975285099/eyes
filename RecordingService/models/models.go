@@ -11,7 +11,7 @@ type Region struct {
 	Name      string    `gorm:"size:100;not null" json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	// DeletedAt 与 ukeysystem 端保持一致，使 GORM 自动过滤软删除的 Region。
+	// DeletedAt 使 GORM 自动过滤软删除的 Region。
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 }
 
@@ -22,7 +22,7 @@ type Area struct {
 	Region    Region    `gorm:"foreignKey:RegionID" json:"region,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	// DeletedAt 与 ukeysystem 端保持一致，使 GORM 自动过滤软删除的 Area。
+	// DeletedAt 使 GORM 自动过滤软删除的 Area。
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 }
 
@@ -36,7 +36,7 @@ type Zone struct {
 	RecordEnabled bool      `gorm:"not null;default:true" json:"record_enabled"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
-	// DeletedAt 与 ukeysystem 端保持一致，使 GORM 自动过滤软删除的 Zone。
+	// DeletedAt 使 GORM 自动过滤软删除的 Zone。
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
 }
 
@@ -91,7 +91,7 @@ type RecordingSegment struct {
 	StreamName string `gorm:"size:64;not null;index" json:"stream_name"`
 	MAC        string `gorm:"size:64;index" json:"mac"`
 	// 索引器每周期按 file_path 批量查重，必须建索引否则全表扫描。191 前缀、非唯一。
-	// 索引名须与 ukeysystem 端一致（共用同一张表），保证 AutoMigrate 幂等。
+	// 使用固定索引名，保证 AutoMigrate 幂等。
 	FilePath   string         `gorm:"size:500;not null;index:idx_recording_segments_file_path,length:191" json:"file_path"`
 	FileSize   int64          `json:"file_size"`
 	StartedAt  time.Time      `json:"started_at"`

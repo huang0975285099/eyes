@@ -61,8 +61,8 @@ func Load() *Config {
 			Host:     getEnv("DB_HOST", "localhost"),
 			Port:     atoi("DB_PORT", "3306"),
 			User:     getEnv("DB_USER", "root"),
-			Password: getEnv("DB_PASSWORD", ""),
-			DBName:   getEnv("DB_NAME", "user_management"),
+			Password: getEnv("DB_PASSWORD", "all_seeing_eyes"),
+			DBName:   getEnv("DB_NAME", "eyes"),
 			Charset:  getEnv("DB_CHARSET", "utf8mb4"),
 		},
 		Recording: RecordingConfig{

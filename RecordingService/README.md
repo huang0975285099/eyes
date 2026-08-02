@@ -1,37 +1,50 @@
 # RecordingService
 
-数据链路：
+本项目使用独立的 `eyes` 数据库，不依赖任何外部业务数据库。
 
 ```text
-Electron -> screen-helper -> FFmpeg -> RTMP :21935 -> SRS
-                                                     |-> HLS/HTTP-FLV :28080
-                                                     |-> RecordingService -> FFmpeg 分片 -> /var/recordings
-Electron -> HTTP :52350 /api/clients/register -> RecordingService -> MySQL computers
-Electron -> HTTP :52350 /api/streams/publish-config -> 带 token 的 RTMP URL
+Electron -> FFmpeg -> RTMP :21935 -> SRS
+                                      |-> HLS/HTTP-FLV :28080
+                                      |-> RecordingService -> 录像文件
+Electron -> HTTP :52350 -> RecordingService -> MySQL 8.1.0 / eyes
 ```
 
-RecordingService 通过 Docker 内部地址 `srs:1985` 发现流，通过 `srs:1935` 拉流录制。SRS 的公网端口只供客户端推流和管理页面播放。
+## 数据库
+
+Docker Compose 会启动 `mysql:8.1.0`，配置如下：
+
+- 地址：`mysql:3306`（仅 Docker 内网，不开放公网端口）
+- 用户：`root`
+- 密码：`all_seeing_eyes`
+- 数据库：`eyes`
+- 数据卷：`mysql_data`
+
+RecordingService 启动时会等待 MySQL 就绪，并自动创建或更新这些表：
+
+`regions`、`areas`、`zones`、`users`、`computers`、`zone_assignments`、`node_settings`、`recording_segments`、`recording_frames`。
+
+健康检查 `GET /api/health` 会同时检查数据库连接；数据库断开时返回 HTTP 503。
 
 ## 部署
 
-1. 复制 `.env.example` 为 `.env` 并填写数据库和密钥。
-2. 确保 MySQL 的 `recorder` 用户至少拥有：
+1. 将 `.env.example` 复制为 `.env`，填写 `CLIENT_API_KEY` 和 `STREAM_TOKEN_SECRET`。
+2. 启动：`docker compose up -d --build`。
+3. 检查：`docker compose ps` 和 `docker compose logs -f recording-service`。
 
-```sql
-GRANT SELECT ON ukeysystem.regions TO 'recorder'@'%';
-GRANT SELECT ON ukeysystem.areas TO 'recorder'@'%';
-GRANT SELECT ON ukeysystem.zones TO 'recorder'@'%';
-GRANT SELECT ON ukeysystem.users TO 'recorder'@'%';
-GRANT SELECT, INSERT, UPDATE ON ukeysystem.computers TO 'recorder'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE ON ukeysystem.recording_segments TO 'recorder'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE ON ukeysystem.recording_frames TO 'recorder'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE ON ukeysystem.zone_assignments TO 'recorder'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE ON ukeysystem.node_settings TO 'recorder'@'%';
-FLUSH PRIVILEGES;
+公网端口：RTMP `21935`、播放 `28080`、API/管理页 `52350`。MySQL 和 SRS API 均只在 Docker 内部网络开放。
+
+## 备份与恢复
+
+备份：
+
+```bash
+docker compose exec -T mysql mysqldump -uroot -pall_seeing_eyes --single-transaction eyes > eyes-backup.sql
 ```
 
-3. 启动：`docker compose up -d --build`。
+恢复：
 
-公网端口：RTMP `21935`，播放 `28080`，RecordingService API/管理页 `52350`。SRS API `1985` 仅在 Docker 内部网络开放。
+```bash
+docker compose exec -T mysql mysql -uroot -pall_seeing_eyes eyes < eyes-backup.sql
+```
 
-生产环境应通过防火墙限制 `52350` 和 `28080` 的来源，并为管理 API 配置 HTTPS 反向代理。
+生产环境应限制 `52350` 和 `28080` 的访问来源，并通过 HTTPS 反向代理保护管理接口。
