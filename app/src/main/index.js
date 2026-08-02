@@ -19,6 +19,24 @@ let tray
 let screenController
 let registerTimer
 let lastRegistration = { ok: false, message: '尚未登记', at: null }
+let startHidden = false
+
+function configureAutoLaunch() {
+    // 仅对安装后的正式版本启用，开发环境不应修改用户的登录启动项。
+    if (process.platform !== 'win32' || !app.isPackaged) return
+    app.setLoginItemSettings({
+        openAtLogin: true,
+        openAsHidden: true,
+        args: ['--hidden']
+    })
+}
+
+function showMainWindow() {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+}
 
 function loadConfig() {
     const candidates =
@@ -209,7 +227,13 @@ function createWindow() {
             sandbox: false
         }
     })
-    mainWindow.once('ready-to-show', () => mainWindow.show())
+    mainWindow.once('ready-to-show', () => {
+        if (!startHidden) mainWindow.show()
+    })
+    mainWindow.on('minimize', (event) => {
+        event.preventDefault()
+        mainWindow.hide()
+    })
     mainWindow.on('close', (event) => {
         if (!app.isQuiting) {
             event.preventDefault()
@@ -227,10 +251,7 @@ function createTray() {
         Menu.buildFromTemplate([
             {
                 label: '打开状态',
-                click: () => {
-                    mainWindow.show()
-                    mainWindow.focus()
-                }
+                click: showMainWindow
             },
             { label: '重新推流', click: () => screenController?.restart('tray') }
             // { type: 'separator' },
@@ -243,7 +264,8 @@ function createTray() {
             // }
         ])
     )
-    tray.on('double-click', () => mainWindow.show())
+    tray.on('click', showMainWindow)
+    tray.on('double-click', showMainWindow)
 }
 
 ipcMain.handle('app:get-status', async () => ({
@@ -264,7 +286,12 @@ ipcMain.handle('update:check', () => checkClientUpdate())
 ipcMain.handle('update:install', (_event, update) => downloadAndInstallUpdate(update))
 
 app.whenReady().then(async () => {
+    configureAutoLaunch()
+    startHidden =
+        process.platform === 'win32' &&
+        (app.getLoginItemSettings().wasOpenedAtLogin || process.argv.includes('--hidden'))
     createWindow()
+    // Windows 登录启动时保持后台运行，用户可从托盘打开窗口。
     createTray()
     screenController = setupScreenHelper({
         recordingServiceURL: config.recordingServiceURL,

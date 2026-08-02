@@ -7,6 +7,11 @@ const status = ref({ system: {}, registration: {}, stream: {}, config: {} })
 const videoRef = ref(null)
 const playbackStatus = ref('等待推流')
 const playbackError = ref('')
+const editingUserName = ref(false)
+const userNameInput = ref('')
+const userNameError = ref('')
+const userNameSaving = ref(false)
+const userNameInputRef = ref(null)
 let offStream
 let offRegistration
 let flvPlayer
@@ -91,19 +96,39 @@ async function registerAgain() {
 }
 
 async function editUserName() {
-    const current = status.value.system.user_name || ''
-    const value = window.prompt('请输入姓名或者编号（不超过20个字符）', current)
-    if (value === null) return
-    const userName = value.trim()
-    if ([...userName].length > 20) {
-        window.alert('姓名或者编号不能超过20个字符')
+    userNameInput.value = status.value.system.user_name || ''
+    userNameError.value = ''
+    editingUserName.value = true
+    await nextTick()
+    userNameInputRef.value?.focus()
+    userNameInputRef.value?.select()
+}
+
+function cancelEditUserName() {
+    editingUserName.value = false
+    userNameError.value = ''
+}
+
+async function saveUserName() {
+    const userName = userNameInput.value.trim()
+    if (!userName) {
+        userNameError.value = '请输入姓名或者编号'
         return
     }
+    if ([...userName].length > 20) {
+        userNameError.value = '姓名或者编号不能超过20个字符'
+        return
+    }
+    userNameSaving.value = true
+    userNameError.value = ''
     try {
         await window.eyesAPI.setUserName(userName)
         await refresh()
+        editingUserName.value = false
     } catch (error) {
-        window.alert(`保存失败：${error.message}`)
+        userNameError.value = `保存失败：${error.message}`
+    } finally {
+        userNameSaving.value = false
     }
 }
 
@@ -191,9 +216,36 @@ onUnmounted(() => {
                     <p>{{ status.registration.message || '尚未登记' }}</p>
                     <small>{{ status.config.recordingServiceURL }}</small>
                     <div class="user-name-row">
-                        当前用户：<strong>{{ status.system.user_name || '无' }}</strong>
-                        <button class="link-button" @click="editUserName">修改</button>
+                        <template v-if="!editingUserName">
+                            当前用户：<strong>{{ status.system.user_name || '无' }}</strong>
+                            <button type="button" class="link-button" @click="editUserName">
+                                修改
+                            </button>
+                        </template>
+                        <form v-else class="user-name-form" @submit.prevent="saveUserName">
+                            <input
+                                ref="userNameInputRef"
+                                v-model="userNameInput"
+                                type="text"
+                                maxlength="20"
+                                placeholder="请输入姓名或者编号"
+                                :disabled="userNameSaving"
+                                @keydown.esc.prevent="cancelEditUserName"
+                            />
+                            <button type="submit" class="link-button" :disabled="userNameSaving">
+                                {{ userNameSaving ? '保存中…' : '保存' }}
+                            </button>
+                            <button
+                                type="button"
+                                class="link-button muted"
+                                :disabled="userNameSaving"
+                                @click="cancelEditUserName"
+                            >
+                                取消
+                            </button>
+                        </form>
                     </div>
+                    <small v-if="userNameError" class="field-error">{{ userNameError }}</small>
                     <small>请输入姓名或者编号，不超过20个字符。</small>
                     <button class="secondary" @click="registerAgain">重新登记</button>
                 </article>
