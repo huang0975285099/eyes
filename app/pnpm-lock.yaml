@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      flv.js:
+        specifier: ^1.6.2
+        version: 1.6.2
       vue:
         specifier: ^3.5.17
         version: 3.5.18(typescript@5.9.2)
@@ -1090,6 +1093,9 @@ packages:
   es6-error@4.1.1:
     resolution: {integrity: sha512-Um/+FxMr9CISWh0bi5Zv0iOD+4cFh5qLeks1qhAopKVAJw3drgKbKySikp7wGhDL0HPeaja0P5ULZrxLkniUVg==}
 
+  es6-promise@4.2.8:
+    resolution: {integrity: sha512-HJDGx5daxeIvxdBxvG2cb9g4tEvwIk3i8+nhX0yGrYmZUzbkdg8QbDevheDB8gd0//uPj4c1EQua8Q+MViT0/w==}
+
   esbuild@0.25.8:
     resolution: {integrity: sha512-vVC0USHGtMi8+R4Kz8rt6JhEWLxsv9Rnu/lGYbPR8u47B+DCBksq9JarW0zOO7bs37hyOK1l2/oqtbciutL5+Q==}
     engines: {node: '>=18'}
@@ -1231,6 +1237,9 @@ packages:
 
   flatted@3.3.3:
     resolution: {integrity: sha512-GX+ysw4PBCz0PzosHDepZGANEuFCMLrnRTiEy9McGjmkCQYwRq4A/X786G/fjM/+OjsWSU1ZrY5qyARZmO/uwg==}
+
+  flv.js@1.6.2:
+    resolution: {integrity: sha512-xre4gUbX1MPtgQRKj2pxJENp/RnaHaxYvy3YToVVCrSmAWUu85b9mug6pTXF6zakUjNP2lFWZ1rkSX7gxhB/2A==}
 
   foreground-child@3.3.1:
     resolution: {integrity: sha512-gIXjKqtFuWEgzFRJA9WCQeSJLZDjgJUOMCMzxtvFq/37KojM1BFGufqsCy0r4qSQmYLsZYMeyRqzIWOMup03sw==}
@@ -2180,6 +2189,9 @@ packages:
 
   wcwidth@1.0.1:
     resolution: {integrity: sha1-8LDc+RW8X/FSivrbLA4XtTLaL+g=}
+
+  webworkify-webpack@2.1.5:
+    resolution: {integrity: sha512-2akF8FIyUvbiBBdD+RoHpoTbHMQF2HwjcxfDvgztAX5YwbZNyrtfUMgvfgFVsgDhDPVTlkbb5vyasqDHfIDPQw==}
 
   which@2.0.2:
     resolution: {integrity: sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==}
@@ -3377,6 +3389,8 @@ snapshots:
   es6-error@4.1.1:
     optional: true
 
+  es6-promise@4.2.8: {}
+
   esbuild@0.25.8:
     optionalDependencies:
       '@esbuild/aix-ppc64': 0.25.8
@@ -3553,6 +3567,11 @@ snapshots:
       keyv: 4.5.4
 
   flatted@3.3.3: {}
+
+  flv.js@1.6.2:
+    dependencies:
+      es6-promise: 4.2.8
+      webworkify-webpack: 2.1.5
 
   foreground-child@3.3.1:
     dependencies:
@@ -4539,6 +4558,8 @@ snapshots:
   wcwidth@1.0.1:
     dependencies:
       defaults: 1.0.4
+
+  webworkify-webpack@2.1.5: {}
 
   which@2.0.2:
     dependencies:

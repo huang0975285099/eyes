@@ -16,6 +16,7 @@
         "build:win": "pnpm build && electron-builder --win"
     },
     "dependencies": {
+        "flv.js": "^1.6.2",
         "vue": "^3.5.17"
     },
     "devDependencies": {

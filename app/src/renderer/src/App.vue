@@ -1,10 +1,85 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import flvjs from 'flv.js'
 
 const loading = ref(true)
 const status = ref({ system: {}, registration: {}, stream: {}, config: {} })
+const videoRef = ref(null)
+const playbackStatus = ref('等待推流')
+const playbackError = ref('')
 let offStream
 let offRegistration
+let flvPlayer
+let retryTimer
+
+function destroyPlayer() {
+    clearTimeout(retryTimer)
+    retryTimer = undefined
+    if (!flvPlayer) return
+    try {
+        flvPlayer.pause()
+        flvPlayer.unload()
+        flvPlayer.detachMediaElement()
+        flvPlayer.destroy()
+    } catch (error) {
+        console.warn('[monitor] 销毁播放器失败:', error)
+    }
+    flvPlayer = undefined
+}
+
+function playbackURL() {
+    const rtmpURL = status.value.stream.url
+    if (!rtmpURL) return ''
+    try {
+        const parsed = new URL(rtmpURL)
+        const streamName = parsed.pathname.split('/').filter(Boolean).pop()
+        if (!streamName) return ''
+        return `http://${parsed.hostname}:28080/live/${streamName}.flv`
+    } catch {
+        return ''
+    }
+}
+
+async function startPlayback() {
+    destroyPlayer()
+    playbackError.value = ''
+    if (!status.value.stream.running) {
+        playbackStatus.value = '推流未启动'
+        return
+    }
+    const url = playbackURL()
+    if (!url) {
+        playbackStatus.value = '播放地址不可用'
+        return
+    }
+    await nextTick()
+    if (!videoRef.value || !flvjs.isSupported()) {
+        playbackStatus.value = '当前环境不支持 FLV 播放'
+        return
+    }
+    playbackStatus.value = '正在连接监控画面…'
+    const player = flvjs.createPlayer(
+        { type: 'flv', isLive: true, url },
+        { enableWorker: false, enableStashBuffer: false, stashInitialSize: 128 }
+    )
+    flvPlayer = player
+    player.attachMediaElement(videoRef.value)
+    player.on(flvjs.Events.ERROR, (_type, detail) => {
+        if (flvPlayer !== player) return
+        playbackStatus.value = '画面连接中断'
+        playbackError.value = String(detail || '播放失败')
+        retryTimer = setTimeout(startPlayback, 3000)
+    })
+    videoRef.value.addEventListener(
+        'playing',
+        () => {
+            if (flvPlayer === player) playbackStatus.value = '实时画面'
+        },
+        { once: true }
+    )
+    player.load()
+    player.play().catch(() => {})
+}
 
 async function refresh() {
     status.value = await window.eyesAPI.getStatus()
@@ -17,7 +92,10 @@ async function registerAgain() {
 
 async function restartStream() {
     await window.eyesAPI.restartStream()
-    setTimeout(refresh, 1200)
+    setTimeout(async () => {
+        await refresh()
+        startPlayback()
+    }, 1200)
 }
 
 function memory(bytes) {
@@ -26,8 +104,10 @@ function memory(bytes) {
 
 onMounted(async () => {
     await refresh()
+    startPlayback()
     offStream = window.eyesAPI.onStreamStatus((value) => {
         status.value.stream = value
+        startPlayback()
     })
     offRegistration = window.eyesAPI.onRegistration((value) => {
         status.value.registration = value
@@ -35,6 +115,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+    destroyPlayer()
     offStream?.()
     offRegistration?.()
 })
@@ -62,6 +143,26 @@ onUnmounted(() => {
                     <p v-if="status.stream.error" class="error">{{ status.stream.error }}</p>
                 </div>
                 <button @click="restartStream">重新推流</button>
+            </section>
+
+            <section class="card monitor-card">
+                <div class="monitor-heading">
+                    <div>
+                        <span class="label">MY LIVE VIEW</span>
+                        <h2>我的监控画面</h2>
+                    </div>
+                    <span :class="['badge', playbackStatus === '实时画面' ? 'online' : 'offline']">
+                        {{ playbackStatus }}
+                    </span>
+                </div>
+                <div class="video-wrap">
+                    <video ref="videoRef" muted autoplay playsinline controls></video>
+                    <div v-if="playbackStatus !== '实时画面'" class="video-placeholder">
+                        <strong>{{ playbackStatus }}</strong>
+                        <small v-if="playbackError">{{ playbackError }}</small>
+                    </div>
+                </div>
+                <p class="monitor-note">仅显示本机当前正在推送的实时画面，播放异常时会自动重连。</p>
             </section>
 
             <section class="grid">
