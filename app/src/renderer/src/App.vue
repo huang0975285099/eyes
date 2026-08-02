@@ -202,8 +202,10 @@ onUnmounted(() => {
                     <dl>
                         <dt>主机名</dt>
                         <dd>{{ status.system.hostname || '-' }}</dd>
-                        <dt>IP 地址</dt>
-                        <dd>{{ status.system.ip || '-' }}</dd>
+                        <dt>公网 IP - 内网 IP</dt>
+                        <dd>
+                            {{ status.system.public_ip || '-' }} - {{ status.system.ip || '-' }}
+                        </dd>
                         <dt>MAC 地址</dt>
                         <dd>{{ status.system.mac || '-' }}</dd>
                         <dt>操作系统</dt>

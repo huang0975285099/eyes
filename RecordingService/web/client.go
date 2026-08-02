@@ -94,7 +94,7 @@ func (s *Server) handleClientRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "设备信息保存失败"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mac": input.MAC})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mac": input.MAC, "public_ip": publicIP})
 }
 
 func validMAC(value string) bool {

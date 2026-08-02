@@ -110,6 +110,7 @@ async function registerDevice() {
         )
         const body = await response.json().catch(() => ({}))
         if (!response.ok) throw new Error(body.message || `HTTP ${response.status}`)
+        info.public_ip = body.public_ip || ''
         lastRegistration = {
             ok: true,
             message: '设备信息已登记',
