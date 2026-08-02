@@ -1,0 +1,38 @@
+appId: all-seeing.eyes.system
+productName: 千里眼
+directories:
+    buildResources: build
+files:
+    - '!**/.vscode/*'
+    - '!src/*'
+    - '!helper/*'
+    - '!resources/screen-helper.exe'
+    - '!resources/ffmpeg.exe'
+    - '!electron.vite.config.{js,ts,mjs,cjs}'
+    - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+    - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+    - '!node_modules/*'
+extraResources:
+    - from: resources/screen-helper.exe
+      to: screen-helper.exe
+    - from: resources/ffmpeg.exe
+      to: ffmpeg.exe
+    - from: config.json
+      to: config.json
+electronLanguages:
+    - zh-CN
+win:
+    executableName: all-seeing-eyes
+    # requestedExecutionLevel: requireAdministrator
+    # icon: "./assets/favicon.ico"
+    target: [{ target: 'nsis', 'arch': ['x64'] }]
+nsis:
+    oneClick: false
+    artifactName: ${name}-${version}-setup.${ext}
+    shortcutName: ${productName}
+    uninstallDisplayName: ${productName}
+    createDesktopShortcut: always
+    perMachine: true
+    allowToChangeInstallationDirectory: true
+    include: build/installer.nsh
+npmRebuild: false

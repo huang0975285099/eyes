@@ -1,0 +1,15 @@
+# Workspace-local files
+.DS_Store
+Thumbs.db
+*.log
+
+# Secrets and local deployment overrides
+**/.env
+**/.env.*
+!**/.env.example
+
+# Generated dependencies and build outputs
+**/node_modules/
+**/out/
+**/dist/
+**/*.tar

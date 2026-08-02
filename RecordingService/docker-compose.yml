@@ -1,0 +1,108 @@
+services:
+  srs:
+    image: ossrs/srs:5
+    restart: always
+    ports:
+      - "21935:1935"   # RTMP 推流
+      - "28080:8080"   # HTTP-FLV 拉流（管理员看实时画面）
+      - "21985:1985"   # SRS HTTP API（供 recording-service 查询流列表）
+    volumes:
+      - ./srs.conf:/usr/local/srs/conf/docker.conf:ro
+    networks:
+      - rec-net
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo >/dev/tcp/127.0.0.1/1985"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  recording-service:
+    build: .
+    image: recording-service:latest
+    restart: always
+    environment:
+      # ── 数据库（主服务 节点 MySQL）──────────────────────
+      # 需先在 主服务 节点执行：
+      #   1. 在 主服务 节点 docker-compose.yml 的 mysql 服务加端口绑定：
+      #   2. 进入 MySQL 容器执行以下 SQL：
+      #      docker exec -it ukeysystemv2-mysql-1 mysql -uroot -p
+      #
+      #   CREATE USER 'recorder'@'%' IDENTIFIED BY '<strong-password>';
+      #   -- 业务表只读（判断流属于哪个节点）
+      #   GRANT SELECT ON ukeysystem.regions   TO 'recorder'@'%';
+      #   GRANT SELECT ON ukeysystem.areas     TO 'recorder'@'%';
+      #   GRANT SELECT ON ukeysystem.zones     TO 'recorder'@'%';
+      #   GRANT SELECT ON ukeysystem.users     TO 'recorder'@'%';
+      #   GRANT SELECT, INSERT, UPDATE ON ukeysystem.computers TO 'recorder'@'%';
+      #
+      #   -- 录像表增删改查（写索引 + 抽帧记录 + 过期清理）
+      #   GRANT SELECT, INSERT, UPDATE, DELETE ON ukeysystem.recording_segments TO 'recorder'@'%';
+      #   GRANT SELECT, INSERT, UPDATE, DELETE ON ukeysystem.recording_frames   TO 'recorder'@'%';
+      #
+      #   -- 录像zone表 & 节点配置表
+      #   GRANT SELECT, INSERT, UPDATE, DELETE ON ukeysystem.zone_assignments TO 'recorder'@'%';
+      #   GRANT SELECT, INSERT, UPDATE, DELETE ON ukeysystem.node_settings    TO 'recorder'@'%';
+      #   FLUSH PRIVILEGES;
+      DB_HOST: "${DB_HOST}"
+      DB_PORT: "${DB_PORT:-3306}"
+      DB_USER: "${DB_USER:-recorder}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_NAME: "${DB_NAME:-ukeysystem}"
+      DB_CHARSET: "utf8mb4"
+      CLIENT_API_KEY: "${CLIENT_API_KEY}"
+      # ── 本节点 SRS ────────────────────────────────────────────────────────────
+      RECORDING_SRS_API: "http://srs:1985"
+      RECORDING_RTMP_HOST: "srs:1935"
+      # ── 录像存储 ──────────────────────────────────────────────────────────────
+      RECORDING_OUTPUT_DIR: "/var/recordings"
+      RECORDING_FFMPEG_PATH: "ffmpeg"
+      # ── 录像策略 ──────────────────────────────────────────────────────────────
+      RECORDING_SEGMENT_DURATION: "600"
+      RECORDING_CHECK_INTERVAL: "30"
+      RECORDING_RETAIN_DAYS: "2"
+      RECORDING_FRAME_RETAIN_DAYS: "30"
+      # ── 本节点录制的车间 ID（逗号分隔；0 = 录制所有车间）──────────────────────
+      # 示例："0" 录制所有车间；"1,2" 只录制三车间和八车间；"3" 只录制一车间
+      # 注意：此值为初始默认值。启动后台 http://<本机IP>:8089/ 的「车间分配」页面
+      #       可在线维护本节点录制的车间，修改后立即生效、无需重启，并覆盖此环境变量。
+      RECORDING_NODE_ZONE_ID: "0"
+      # ── 本节点标识（可选；为空则自动使用 hostname）──────────────────────────
+      # 用于 zone_assignments 表关联。两个节点不要使用相同的 NodeID。
+      # 建议填写有意义的名称，如 "mzjy-219"（眉州监狱-219节点）。
+      RECORDING_NODE_ID: "${RECORDING_NODE_ID:-recording-node-1}"
+      # ── 本节点可读名称（可选；仅用于后台展示车间分配）──────────────────────────────
+      # 如 "四川省眉山市-眉州监狱-内网节点"
+      RECORDING_NODE_NAME: "${RECORDING_NODE_NAME:-录像节点}"
+      # ── 抽帧推送到 主服务 节点（取消注释并填写后启用）────────────────────────────
+      RECORDING_CENTER_URL: "${RECORDING_CENTER_URL:-http://112.18.238.6:52351}"
+      RECORDING_CENTER_KEY: "${RECORDING_CENTER_KEY}"
+      # ── 内网管理后台 Web 页面（0 = 不启动）──────────────────────────────────
+      RECORDING_WEB_PORT: "8089"
+      RECORDING_SRS_HTTP_HOST: "${RECORDING_SRS_HTTP_HOST:-10.0.20.219:28080}"
+    ports:
+      - "8089:8089"
+    networks:
+      - rec-net
+    volumes:
+      - recordings:/var/recordings
+    depends_on:
+      srs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8089/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  recordings:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/administrator/recordings   # 宿主机录像目录，按需修改
+
+networks:
+  rec-net:
+    driver: bridge

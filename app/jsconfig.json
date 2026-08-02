@@ -1,0 +1,23 @@
+{
+    "compilerOptions": {
+        "target": "ESNext",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "strict": false,
+        "checkJs": false,
+        "allowJs": true,
+        "noEmit": true,
+        "paths": {
+            "@renderer/*": ["./src/renderer/src/*"]
+        }
+    },
+    "include": [
+        "src/**/*",
+        "electron.vite.config.mjs"
+    ],
+    "exclude": [
+        "node_modules",
+        "dist",
+        "out"
+    ]
+}

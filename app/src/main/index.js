@@ -1,0 +1,202 @@
+import { app, BrowserWindow, ipcMain, Tray, Menu } from 'electron'
+import { execFile } from 'child_process'
+import { existsSync, readFileSync } from 'fs'
+import os from 'os'
+import { join } from 'path'
+import icon from '../../resources/icon.png?asset'
+import { setupScreenHelper } from './screen-helper-main'
+import { getPreferredNICAsync } from './network-util'
+
+const DEFAULT_CONFIG = {
+    hostURL: 'http://112.18.238.6:52351',
+    recordingServiceURL: 'http://10.0.20.219:8089',
+    srsHost: '10.0.20.219:21935',
+    apiKey: ''
+}
+
+let mainWindow
+let tray
+let screenController
+let registerTimer
+let lastRegistration = { ok: false, message: '尚未登记', at: null }
+
+function loadConfig() {
+    const candidates =
+        process.env.NODE_ENV === 'development'
+            ? [join(app.getAppPath(), 'config.json')]
+            : [
+                  join(app.getPath('exe'), '..', 'config.json'),
+                  join(process.resourcesPath, 'config.json')
+              ]
+    for (const file of candidates) {
+        try {
+            if (existsSync(file))
+                return { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(file, 'utf8')) }
+        } catch (error) {
+            console.error(`[config] 读取失败 ${file}:`, error.message)
+        }
+    }
+    return { ...DEFAULT_CONFIG }
+}
+
+const config = loadConfig()
+
+function getDiskSerial() {
+    if (process.platform !== 'win32') return Promise.resolve('')
+    return new Promise((resolve) => {
+        execFile(
+            'powershell.exe',
+            [
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                '(Get-Partition -DriveLetter C | Get-Disk).SerialNumber'
+            ],
+            { windowsHide: true, timeout: 5000 },
+            (_error, stdout) => resolve((stdout || '').trim().split(/\r?\n/)[0] || '')
+        )
+    })
+}
+
+async function collectSystemInfo() {
+    const nic = await getPreferredNICAsync(config.recordingServiceURL)
+    const cpus = os.cpus()
+    return {
+        ip: nic.ip,
+        mac: nic.mac,
+        hostname: os.hostname(),
+        os: `${os.type()} ${os.release()} ${os.arch()}`,
+        cpu: cpus[0]?.model?.trim() || '',
+        cpu_cores: cpus.length,
+        total_memory: os.totalmem(),
+        disk_serial: await getDiskSerial(),
+        username: os.userInfo().username,
+        app_version: app.getVersion()
+    }
+}
+
+async function registerDevice() {
+    if (!config.recordingServiceURL) {
+        lastRegistration = {
+            ok: false,
+            message: '未配置 recordingServiceURL',
+            at: new Date().toISOString()
+        }
+        return lastRegistration
+    }
+    try {
+        const info = await collectSystemInfo()
+        if (!info.mac) throw new Error('未找到可用网卡 MAC 地址')
+        const response = await fetch(
+            `${config.recordingServiceURL.replace(/\/$/, '')}/api/clients/register`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Client-Key': config.apiKey || ''
+                },
+                body: JSON.stringify(info),
+                signal: AbortSignal.timeout(8000)
+            }
+        )
+        const body = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(body.message || `HTTP ${response.status}`)
+        lastRegistration = {
+            ok: true,
+            message: '设备信息已登记',
+            at: new Date().toISOString(),
+            info
+        }
+    } catch (error) {
+        lastRegistration = { ok: false, message: error.message, at: new Date().toISOString() }
+        console.error('[device] 登记失败:', error.message)
+    }
+    mainWindow?.webContents.send('device:registration-changed', lastRegistration)
+    return lastRegistration
+}
+
+function createWindow() {
+    mainWindow = new BrowserWindow({
+        width: 760,
+        height: 620,
+        minWidth: 680,
+        minHeight: 520,
+        show: false,
+        autoHideMenuBar: true,
+        icon,
+        webPreferences: {
+            preload: join(__dirname, '../preload/index.js'),
+            contextIsolation: true,
+            sandbox: false
+        }
+    })
+    mainWindow.once('ready-to-show', () => mainWindow.show())
+    mainWindow.on('close', (event) => {
+        if (!app.isQuiting) {
+            event.preventDefault()
+            mainWindow.hide()
+        }
+    })
+    if (process.env.ELECTRON_RENDERER_URL) mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+    else mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+}
+
+function createTray() {
+    tray = new Tray(icon)
+    tray.setToolTip('千里眼')
+    tray.setContextMenu(
+        Menu.buildFromTemplate([
+            {
+                label: '打开状态',
+                click: () => {
+                    mainWindow.show()
+                    mainWindow.focus()
+                }
+            },
+            { label: '重新推流', click: () => screenController?.restart('tray') },
+            { type: 'separator' },
+            {
+                label: '退出',
+                click: () => {
+                    app.isQuiting = true
+                    app.quit()
+                }
+            }
+        ])
+    )
+    tray.on('double-click', () => mainWindow.show())
+}
+
+ipcMain.handle('app:get-status', async () => ({
+    config: {
+        recordingServiceURL: config.recordingServiceURL,
+        srsHost: config.srsHost
+    },
+    system: await collectSystemInfo(),
+    registration: lastRegistration,
+    stream: screenController?.status() || { running: false, url: '', error: '' }
+}))
+ipcMain.handle('device:register', () => registerDevice())
+ipcMain.handle('stream:restart', () => screenController?.restart('ipc'))
+
+app.whenReady().then(async () => {
+    createWindow()
+    createTray()
+    screenController = setupScreenHelper({
+        hostUrl: config.hostURL,
+        srsHost: config.srsHost,
+        clientApiKey: config.apiKey,
+        onStatus: (status) => mainWindow?.webContents.send('stream:status-changed', status)
+    })
+    await registerDevice()
+    await screenController.start('app_boot')
+    registerTimer = setInterval(registerDevice, 5 * 60 * 1000)
+})
+
+app.on('before-quit', () => {
+    app.isQuiting = true
+    if (registerTimer) clearInterval(registerTimer)
+    screenController?.stop('app_quit')
+})
+
+app.on('window-all-closed', () => {})
