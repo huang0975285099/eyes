@@ -25,8 +25,8 @@ services:
     image: ossrs/srs:5
     restart: always
     ports:
-      - "21935:1935"   # RTMP 推流
-      - "28080:8080"   # HTTP-FLV 拉流（管理员看实时画面）
+      - "1935:1935"   # RTMP 推流
+      - "8090:8080"   # HTTP-FLV 拉流（宿主机 8090 -> SRS 8080）
     volumes:
       - ./srs.conf:/usr/local/srs/conf/docker.conf:ro
     networks:
@@ -52,7 +52,7 @@ services:
       STREAM_TOKEN_SECRET: "${STREAM_TOKEN_SECRET:-}"
       RECORDING_SRS_API: "http://srs:1985"
       RECORDING_RTMP_HOST: "srs:1935"
-      PUBLIC_RTMP_HOST: "${PUBLIC_RTMP_HOST:-112.18.238.6:21935}"
+      PUBLIC_RTMP_HOST: "${PUBLIC_RTMP_HOST:-112.18.238.6:1935}"
       RECORDING_OUTPUT_DIR: "/var/recordings"
       RECORDING_FFMPEG_PATH: "ffmpeg"
       RECORDING_SEGMENT_DURATION: "600"
@@ -60,7 +60,7 @@ services:
       RECORDING_RETAIN_DAYS: "2"
       RECORDING_FRAME_RETAIN_DAYS: "30"
       RECORDING_WEB_PORT: "52350"
-      RECORDING_SRS_HTTP_HOST: "${RECORDING_SRS_HTTP_HOST:-112.18.238.6:28080}"
+      RECORDING_SRS_HTTP_HOST: "${RECORDING_SRS_HTTP_HOST:-112.18.238.6:8090}"
     ports:
       - "52350:52350"
     networks:

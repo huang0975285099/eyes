@@ -34,7 +34,7 @@ function playbackURL() {
         const parsed = new URL(rtmpURL)
         const streamName = parsed.pathname.split('/').filter(Boolean).pop()
         if (!streamName) return ''
-        return `http://${parsed.hostname}:28080/live/${streamName}.flv`
+        return `http://${parsed.hostname}:8090/live/${streamName}.flv`
     } catch {
         return ''
     }

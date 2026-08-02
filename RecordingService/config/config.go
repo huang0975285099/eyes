@@ -36,8 +36,8 @@ type RecordingConfig struct {
 	FrameRetainDays int
 	FFmpegPath      string
 	WebPort         int    // 内网管理后台 Web 页面端口，0=不启动
-	SRSHttpHost     string // SRS HTTP-FLV/HLS 对外访问地址（如 10.0.20.219:28080）
-	PublicRTMPHost  string // 客户端推流使用的公网 RTMP 地址（如 112.18.238.6:21935）
+	SRSHttpHost     string // SRS HTTP-FLV/HLS 对外访问地址（如 10.0.20.219:8090）
+	PublicRTMPHost  string // 客户端推流使用的公网 RTMP 地址（如 112.18.238.6:1935）
 }
 
 func Load() *Config {
@@ -56,7 +56,7 @@ func Load() *Config {
 			Charset:  getEnv("DB_CHARSET", "utf8mb4"),
 		},
 		Recording: RecordingConfig{
-			SRSApiBase:      getEnv("RECORDING_SRS_API", "http://localhost:21985"),
+			SRSApiBase:      getEnv("RECORDING_SRS_API", "http://localhost:1985"),
 			RTMPHost:        getEnv("RECORDING_RTMP_HOST", "localhost"),
 			OutputDir:       getEnv("RECORDING_OUTPUT_DIR", "/var/recordings"),
 			SegmentDuration: atoi("RECORDING_SEGMENT_DURATION", "600"),
@@ -66,7 +66,7 @@ func Load() *Config {
 			FFmpegPath:      getEnv("RECORDING_FFMPEG_PATH", "ffmpeg"),
 			WebPort:         atoi("RECORDING_WEB_PORT", "52350"),
 			SRSHttpHost:     getEnv("RECORDING_SRS_HTTP_HOST", ""),
-			PublicRTMPHost:  getEnv("PUBLIC_RTMP_HOST", "112.18.238.6:21935"),
+			PublicRTMPHost:  getEnv("PUBLIC_RTMP_HOST", "112.18.238.6:1935"),
 		},
 		Security: SecurityConfig{
 			ClientAPIKey:      clientAPIKey,

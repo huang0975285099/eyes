@@ -282,7 +282,7 @@ const isCapturing = ref(false)
 const loading = ref(false)
 const rtmpPushActive = ref(false)
 const rtmpPushUrl = ref('')
-const srsHttpPort = ref('28080')
+const srsHttpPort = ref('8090')
 
 const assistStatus = ref('待机中')
 const monitorReconnecting = ref(false)

@@ -22,8 +22,8 @@ var indexHTML []byte
 var hlsJS []byte
 
 type Server struct {
-	SRSApiBase          string     // SRS HTTP API 地址（如 http://127.0.0.1:21985）
-	SRSHttpHost         string     // SRS HTTP-FLV/HLS 对外地址（如 10.0.20.219:28080）
+	SRSApiBase          string     // SRS HTTP API 地址（如 http://127.0.0.1:1985）
+	SRSHttpHost         string     // SRS HTTP-FLV/HLS 对外地址（如 10.0.20.219:8090）
 	RetainDays          int        // 录像保留天数（可被后台修改）
 	EnvRetainDays       int        // 环境变量初始值，DB 无配置时回退
 	RecordEnabled       bool       // 全局录制开关

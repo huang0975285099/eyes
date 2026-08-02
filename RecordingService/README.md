@@ -3,8 +3,8 @@
 本项目使用独立的 `eyes` 数据库，不依赖任何外部业务数据库。
 
 ```text
-Electron -> FFmpeg -> RTMP :21935 -> SRS
-                                      |-> HLS/HTTP-FLV :28080
+Electron -> FFmpeg -> RTMP :1935 -> SRS
+                                      |-> HLS/HTTP-FLV :8090
                                       |-> RecordingService -> 录像文件
 Electron -> HTTP :52350 -> RecordingService -> MySQL 8.1.0 / eyes
 ```
@@ -31,7 +31,7 @@ RecordingService 启动时会等待 MySQL 就绪，并自动创建或更新这�
 2. 启动：`docker compose up -d --build`。
 3. 检查：`docker compose ps` 和 `docker compose logs -f recording-service`。
 
-公网端口：RTMP `21935`、播放 `28080`、API/管理页 `52350`。MySQL 和 SRS API 均只在 Docker 内部网络开放。
+公网端口：RTMP `1935`、播放 `8090`、API/管理页 `52350`。SRS API 使用内部端口 `1985`，MySQL 和 SRS API 均只在 Docker 内部网络开放。
 
 ## 备份与恢复
 
@@ -47,4 +47,4 @@ docker compose exec -T mysql mysqldump -uroot -pall_seeing_eyes --single-transac
 docker compose exec -T mysql mysql -uroot -pall_seeing_eyes eyes < eyes-backup.sql
 ```
 
-生产环境应限制 `52350` 和 `28080` 的访问来源，并通过 HTTPS 反向代理保护管理接口。
+生产环境应限制 `52350` 和 `8090` 的访问来源，并通过 HTTPS 反向代理保护管理接口。
