@@ -13,5 +13,5 @@ ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=builder /app/recording-service .
 VOLUME ["/var/recordings"]
-EXPOSE 8089
+EXPOSE 52350
 CMD ["./recording-service"]

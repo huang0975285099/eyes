@@ -58,7 +58,7 @@
 
     /* 筛选栏 */
     .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-    .filters select, .filters input[type=date] { padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; height: 32px; background: white; }
+    .filters select, .filters input { padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; height: 32px; background: white; }
 
     /* 统计卡片 */
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
@@ -83,6 +83,12 @@
     .monitor-info .name { font-weight: 600; color: #333; }
     .monitor-info .mac { font-family: monospace; color: #999; }
 
+    /* 抽帧网格 */
+    .frame-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+    .frame-card { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+    .frame-card img { width: 100%; height: 160px; object-fit: cover; display: block; background: #eee; cursor: zoom-in; }
+    .frame-info { padding: 9px 12px; font-size: 12px; line-height: 1.6; }
+
     /* 播放器 */
     #playerSection { display: none; background: #000; border-radius: 8px; overflow: hidden; margin-bottom: 16px; }
     #player { display: block; width: 100%; max-height: 55vh; background: #000; }
@@ -102,8 +108,8 @@
     <div class="tab active" onclick="switchTab('monitor')">实时监控</div>
     <div class="tab" onclick="switchTab('streams')">推流状态</div>
     <div class="tab" onclick="switchTab('recordings')">录像列表</div>
+    <div class="tab" onclick="switchTab('frames')">抽帧</div>
     <div class="tab" onclick="switchTab('manage')">录制管理</div>
-    <div class="tab" onclick="switchTab('zones')">车间分配</div>
   </div>
   <div class="header-info" id="headerInfo"></div>
 </header>
@@ -160,6 +166,20 @@
   </div>
 </div>
 
+<!-- ========== 抽帧 ========== -->
+<div id="page-frames" class="page">
+  <div class="content">
+    <div class="filters">
+      <input type="date" id="frameDateInput">
+      <input type="text" id="frameMacInput" placeholder="MAC 地址（可选）">
+      <button class="btn btn-primary" onclick="loadFrames()">查询</button>
+      <span style="font-size:12px;color:#999" id="frameCountTag"></span>
+    </div>
+    <div id="frameGrid" class="frame-grid"></div>
+    <div id="frameEmpty" class="empty">请选择日期后点击「查询」</div>
+  </div>
+</div>
+
 <!-- ========== 录制管理 ========== -->
 <div id="page-manage" class="page">
   <div class="content">
@@ -173,11 +193,7 @@
         </label>
         <span id="recordLabel">加载中...</span>
       </div>
-      <p style="font-size:12px;color:#999;margin-top:8px">关闭后该车间设备推流照常、可实时监控，但服务端不录制、不落盘。</p>
-      <div id="zoneListRow" style="margin-top:12px;display:none">
-        <div style="font-size:12px;color:#666;margin-bottom:4px">各车间状态（点击切换）：</div>
-        <div id="zoneList"></div>
-      </div>
+      <p style="font-size:12px;color:#999;margin-top:8px">关闭后推流和实时监控保持正常，服务端停止录制新录像。</p>
     </div>
     <div class="card">
       <div class="card-title">录像保留策略</div>
@@ -192,30 +208,9 @@
   </div>
 </div>
 
-<!-- ========== 车间分配（后台维护 RECORDING_NODE_ZONE_ID） ========== -->
-<div id="page-zones" class="page">
-  <div class="content">
-    <div class="card">
-      <div class="card-title">本节点信息</div>
-      <div id="nodeInfo" style="font-size:13px;line-height:1.8">加载中...</div>
-    </div>
-    <div class="card">
-      <div class="card-title">已分配车间 <button class="btn btn-primary btn-sm" style="float:right" onclick="loadZoneAssignments()">刷新</button></div>
-      <div id="assignedZones" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">加载中...</div>
-      <p style="font-size:12px;color:#999;margin-top:10px">点击车间标签可移除分配。移除后该车间设备推流照常，但本节点不再录制。</p>
-    </div>
-    <div class="card">
-      <div class="card-title">添加车间</div>
-      <p style="font-size:12px;color:#999;margin-bottom:8px">点击下方车间可将其分配到本节点。新增车间需先在主服务后台创建。</p>
-      <div id="allZonesList" style="display:flex;flex-wrap:wrap;gap:8px">加载中...</div>
-    </div>
-  </div>
-</div>
-
 <script>
   // ========== 全局状态 ==========
   let srsHttpHost = '';
-  let cfg_nodeZoneId = '';
   let monitorRefreshTimer = null;
   let streamRefreshTimer = null;
   const monitorPlayers = {}; // streamName -> Hls instance
@@ -223,7 +218,7 @@
   // ========== Tab 切换 ==========
   function switchTab(name) {
     document.querySelectorAll('.tab').forEach((t, i) => {
-      t.classList.toggle('active', ['monitor','streams','recordings','manage','zones'][i] === name);
+      t.classList.toggle('active', ['monitor','streams','recordings','frames','manage'][i] === name);
     });
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.getElementById('page-' + name).classList.add('active');
@@ -237,8 +232,8 @@
     if (name === 'monitor') loadStreamsForMonitor();
     if (name === 'streams') loadStreamStatus();
     if (name === 'recordings') { loadMACs(); loadSegments(); }
-    if (name === 'manage') { loadManageData(); loadNodeSettings(); }
-    if (name === 'zones') loadZoneAssignments();
+    if (name === 'frames') loadFrames();
+    if (name === 'manage') { loadManageData(); loadRecordingSettings(); }
   }
 
   // ========== 实时监控 ==========
@@ -424,6 +419,52 @@
     section.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
+  // ========== 抽帧 ==========
+  async function loadFrames() {
+    const date = document.getElementById('frameDateInput').value;
+    const mac = document.getElementById('frameMacInput').value.trim();
+    const grid = document.getElementById('frameGrid');
+    const empty = document.getElementById('frameEmpty');
+    const count = document.getElementById('frameCountTag');
+    if (!date) {
+      grid.innerHTML = '';
+      empty.style.display = '';
+      return;
+    }
+    empty.textContent = '加载中...';
+    empty.style.display = '';
+    try {
+      const params = new URLSearchParams({ date });
+      if (mac) params.set('mac', mac.toLowerCase());
+      const res = await fetch('/api/frames?' + params.toString());
+      if (!res.ok) throw new Error(await res.text());
+      const frames = await res.json();
+      count.textContent = `共 ${frames.length} 张`;
+      if (!frames.length) {
+        grid.innerHTML = '';
+        empty.textContent = '该日期暂无抽帧图片';
+        return;
+      }
+      empty.style.display = 'none';
+      grid.innerHTML = frames.map(frame => `
+        <div class="frame-card">
+          <a href="/frames/${frame.id}/image" target="_blank" title="点击查看原图">
+            <img src="/frames/${frame.id}/image" loading="lazy" alt="${frame.stream_name || frame.mac || '抽帧'}">
+          </a>
+          <div class="frame-info">
+            <div><b>${new Date(frame.captured_at).toLocaleString()}</b></div>
+            <div class="mac">${frame.mac || frame.stream_name || '-'}</div>
+            <div style="color:#999">第 ${frame.frame_index || '-'} 帧 · ${formatSize(frame.file_size)}</div>
+          </div>
+        </div>
+      `).join('');
+    } catch (e) {
+      grid.innerHTML = '';
+      count.textContent = '';
+      empty.textContent = '加载失败：' + e.message;
+    }
+  }
+
   // ========== 录制管理 ==========
   async function loadManageData() {
     // 统计
@@ -442,71 +483,18 @@
       }
     } catch {}
 
-    // 区域配置
-    try {
-      const res = await fetch('/api/zone-config');
-      if (res.ok) {
-        const cfg = await res.json();
-        const toggle = document.getElementById('recordToggle');
-        toggle.checked = cfg.record_enabled;
-        toggle.disabled = false;
-        document.getElementById('recordLabel').textContent = cfg.record_enabled ? '已开启录制' : '已关闭录制';
-
-        // 如果有多个车间，显示各车间状态
-        if (cfg.zones && cfg.zones.length > 0) {
-          const zoneList = cfg.zones.map(z =>
-            `<span class="badge ${z.record_enabled ? 'badge-on' : 'badge-off'}" style="cursor:pointer;margin:2px" onclick="toggleZone(${z.id}, ${!z.record_enabled})">${z.name}：${z.record_enabled ? '录制中' : '已关闭'}</span>`
-          ).join('');
-          document.getElementById('zoneList').innerHTML = zoneList;
-          document.getElementById('zoneListRow').style.display = '';
-        }
-      } else if (res.status === 404) {
-        document.getElementById('recordLabel').innerHTML = '<span style="color:#dc3545">数据库中未找到车间，请先在主服务创建车间</span>';
-        document.getElementById('recordToggle').disabled = true;
-      }
-    } catch {
-      document.getElementById('recordLabel').textContent = '加载失败';
-    }
   }
 
-  async function toggleRecord() {
-    const enabled = document.getElementById('recordToggle').checked;
+  async function loadRecordingSettings() {
     try {
-      const res = await fetch('/api/zone-config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ record_enabled: enabled })
-      });
-      if (res.ok) {
-        document.getElementById('recordLabel').textContent = enabled ? '已开启录制' : '已关闭录制';
-        setTimeout(loadManageData, 500);
-      } else {
-        document.getElementById('recordToggle').checked = !enabled;
-      }
-    } catch {
-      document.getElementById('recordToggle').checked = !enabled;
-    }
-  }
-
-  async function toggleZone(zoneId, enabled) {
-    try {
-      const res = await fetch('/api/zone-config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ record_enabled: enabled, zone_id: zoneId })
-      });
-      if (res.ok) {
-        setTimeout(loadManageData, 500);
-      }
-    } catch {}
-  }
-
-  async function loadNodeSettings() {
-    try {
-      const res = await fetch('/api/node-settings');
+      const res = await fetch('/api/recording-settings');
       if (!res.ok) return;
       const cfg = await res.json();
       document.getElementById('retainDays').value = cfg.retain_days;
+      const toggle = document.getElementById('recordToggle');
+      toggle.checked = cfg.record_enabled;
+      toggle.disabled = false;
+      document.getElementById('recordLabel').textContent = cfg.record_enabled ? '已开启录制' : '已关闭录制';
       const hint = document.getElementById('retainDaysHint');
       if (cfg.using_db_config) {
         hint.textContent = `当前值由后台配置（环境变量默认值：${cfg.env_retain_days} 天）。修改后立即生效，无需重启。`;
@@ -516,6 +504,26 @@
     } catch {}
   }
 
+  async function toggleRecord() {
+    const toggle = document.getElementById('recordToggle');
+    const enabled = toggle.checked;
+    toggle.disabled = true;
+    try {
+      const res = await fetch('/api/recording-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ record_enabled: enabled })
+      });
+      if (!res.ok) throw new Error(await res.text());
+      document.getElementById('recordLabel').textContent = enabled ? '已开启录制' : '已关闭录制';
+    } catch (e) {
+      toggle.checked = !enabled;
+      alert('切换录制状态失败：' + e.message);
+    } finally {
+      toggle.disabled = false;
+    }
+  }
+
   async function saveRetainDays() {
     const days = parseInt(document.getElementById('retainDays').value);
     if (!days || days <= 0) {
@@ -523,115 +531,19 @@
       return;
     }
     try {
-      const res = await fetch('/api/node-settings', {
+      const res = await fetch('/api/recording-settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ retain_days: days })
       });
       if (res.ok) {
-        loadNodeSettings();
+        loadRecordingSettings();
       } else {
         const text = await res.text();
         alert('保存失败: ' + text);
       }
     } catch (e) {
       alert('保存失败: ' + e.message);
-    }
-  }
-
-  // ========== 车间分配管理 ==========
-  async function loadZoneAssignments() {
-    const nodeInfoEl = document.getElementById('nodeInfo');
-    const assignedEl = document.getElementById('assignedZones');
-    const allZonesEl = document.getElementById('allZonesList');
-
-    let data = null;
-    try {
-      const res = await fetch('/api/zone-assignments');
-      if (res.ok) data = await res.json();
-    } catch {}
-
-    if (!data) {
-      nodeInfoEl.textContent = '加载失败';
-      assignedEl.textContent = '加载失败';
-      allZonesEl.textContent = '加载失败';
-      return;
-    }
-
-    // 节点信息
-    const zoneIDsStr = (data.current_zone_ids || []).join(', ') || '(空)';
-    const modeText = data.is_all_zones
-      ? '<span class="badge badge-on">录制所有车间</span>'
-      : '<span class="badge badge-off">仅录制指定车间</span>';
-    const sourceText = data.using_db_config
-      ? '<span class="badge badge-on">数据库配置</span>'
-      : '<span class="badge badge-off">环境变量（未在后台分配车间）</span>';
-    nodeInfoEl.innerHTML = `
-      <div>节点标识：<b>${data.node_id || '-'}</b></div>
-      <div>节点名称：${data.node_name || '-'}</div>
-      <div>当前 ZoneIDs：<b>${zoneIDsStr}</b></div>
-      <div style="margin-top:6px">录制模式：${modeText}</div>
-      <div style="margin-top:4px">配置来源：${sourceText}</div>
-    `;
-
-    // 已分配车间
-    const assignedSet = new Set(data.assigned_zone_ids || []);
-    if (assignedSet.size === 0) {
-      assignedEl.innerHTML = '<span style="color:#999;font-size:13px">暂未分配车间（使用环境变量默认值）</span>';
-    } else {
-      assignedEl.innerHTML = (data.assigned || []).map(a => {
-        const z = a.zone || {};
-        const areaName = z.area ? z.area.name : '';
-        const regionName = z.area && z.area.region ? z.area.region.name : '';
-        const fullName = [regionName, areaName, z.name].filter(Boolean).join('-');
-        return `<span class="badge badge-on" style="cursor:pointer;padding:6px 12px;font-size:13px" title="点击移除" onclick="removeZoneAssignment(${a.zone_id})">${fullName}（ZoneID:${a.zone_id}） ✕</span>`;
-      }).join('');
-    }
-
-    // 所有车间（排除已分配的）
-    const unassigned = (data.all_zones || []).filter(z => !assignedSet.has(z.id));
-    if (unassigned.length === 0) {
-      allZonesEl.innerHTML = '<span style="color:#999;font-size:13px">所有车间均已分配</span>';
-    } else {
-      allZonesEl.innerHTML = unassigned.map(z => {
-        const areaName = z.area ? z.area.name : '';
-        const regionName = z.area && z.area.region ? z.area.region.name : '';
-        const fullName = [regionName, areaName, z.name].filter(Boolean).join('-');
-        return `<span class="badge badge-off" style="cursor:pointer;padding:6px 12px;font-size:13px" title="点击添加" onclick="addZoneAssignment(${z.id})">${fullName}（ZoneID:${z.id}） ＋</span>`;
-      }).join('');
-    }
-  }
-
-  async function addZoneAssignment(zoneId) {
-    try {
-      const res = await fetch('/api/zone-assignments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ zone_id: zoneId })
-      });
-      if (res.ok) {
-        loadZoneAssignments();
-      } else {
-        const txt = await res.text();
-        alert('添加失败：' + txt);
-      }
-    } catch (e) {
-      alert('添加失败：' + e.message);
-    }
-  }
-
-  async function removeZoneAssignment(zoneId) {
-    if (!confirm('确定移除该车间分配？移除后本节点将不再录制此车间的推流。')) return;
-    try {
-      const res = await fetch('/api/zone-assignments?zone_id=' + zoneId, { method: 'DELETE' });
-      if (res.ok) {
-        loadZoneAssignments();
-      } else {
-        const txt = await res.text();
-        alert('移除失败：' + txt);
-      }
-    } catch (e) {
-      alert('移除失败：' + e.message);
     }
   }
 
@@ -651,11 +563,11 @@
 
   // ========== 初始化 ==========
   document.getElementById('dateInput').value = new Date().toLocaleDateString('sv');
+  document.getElementById('frameDateInput').value = new Date().toLocaleDateString('sv');
 
-  // 加载 SRS HTTP Host 和 ZoneID，完成后再加载监控画面
+  // 加载 SRS HTTP Host，完成后再加载监控画面
   fetch('/api/stats').then(r => r.json()).then(s => {
     srsHttpHost = s.srs_http_host || '';
-    cfg_nodeZoneId = s.node_zone_id || '';
   }).catch(() => {}).finally(() => {
     loadStreamsForMonitor();
   });

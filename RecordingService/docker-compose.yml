@@ -59,15 +59,10 @@ services:
       RECORDING_CHECK_INTERVAL: "30"
       RECORDING_RETAIN_DAYS: "2"
       RECORDING_FRAME_RETAIN_DAYS: "30"
-      RECORDING_NODE_ZONE_ID: "0"
-      RECORDING_NODE_ID: "${RECORDING_NODE_ID:-recording-node-1}"
-      RECORDING_NODE_NAME: "${RECORDING_NODE_NAME:-录像节点}"
-      RECORDING_CENTER_URL: "${RECORDING_CENTER_URL:-}"
-      RECORDING_CENTER_KEY: "${RECORDING_CENTER_KEY:-}"
-      RECORDING_WEB_PORT: "8089"
+      RECORDING_WEB_PORT: "52350"
       RECORDING_SRS_HTTP_HOST: "${RECORDING_SRS_HTTP_HOST:-112.18.238.6:28080}"
     ports:
-      - "52350:8089"
+      - "52350:52350"
     networks:
       - rec-net
     volumes:
@@ -78,7 +73,7 @@ services:
       srs:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8089/api/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:52350/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3

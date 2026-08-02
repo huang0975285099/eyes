@@ -1,14 +1,11 @@
 package recording
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
@@ -16,7 +13,6 @@ import (
 	"path/filepath"
 	"recording-service/database"
 	"recording-service/models"
-	"recording-service/nodeconfig"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,9 +42,7 @@ type Config struct {
 	RetainDays      int
 	FrameRetainDays int
 	FFmpegPath      string
-	NodeZoneIDs     []uint
-	CenterURL       string
-	CenterKey       string
+	RecordEnabled   bool
 }
 
 type srsStream struct {
@@ -78,9 +72,7 @@ type RecorderManager struct {
 	wg             sync.WaitGroup
 	active         map[string]*Recorder
 	cfg            Config
-	zoneCfg        *nodeconfig.ZoneConfig // 与 web Server 共享的 Zone 配置，支持热更新
-	client         *http.Client           // SRS API 查询，短超时
-	pushClient     *http.Client           // 帧推送到中心节点，长超时 + 连接池
+	client         *http.Client // SRS API 查询，短超时
 	extractSem     chan struct{}
 	corruptedPaths sync.Map // 已确认损坏的文件路径集合，避免每轮扫盘重复 ffprobe
 }
@@ -105,34 +97,10 @@ func NewRecorderManager(cfg Config) *RecorderManager {
 		cfg.OutputDir = "/var/recordings"
 	}
 	return &RecorderManager{
-		active:  make(map[string]*Recorder),
-		cfg:     cfg,
-		zoneCfg: nodeconfig.New(cfg.NodeZoneIDs),
-		client:  &http.Client{Timeout: 10 * time.Second},
-		pushClient: &http.Client{
-			Timeout: 60 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				MaxIdleConnsPerHost: 6,
-				IdleConnTimeout:     90 * time.Second,
-			},
-		},
+		active:     make(map[string]*Recorder),
+		cfg:        cfg,
+		client:     &http.Client{Timeout: 10 * time.Second},
 		extractSem: make(chan struct{}, extractConcurrency),
-	}
-}
-
-// ZoneConfig 返回共享的 Zone 配置实例，供 web Server 引用以实现热更新。
-func (m *RecorderManager) ZoneConfig() *nodeconfig.ZoneConfig {
-	return m.zoneCfg
-}
-
-// UpdateZoneIDs 运行时更新录制的 Zone ID 列表（后台修改车间分配后调用）。
-func (m *RecorderManager) UpdateZoneIDs(ids []uint) {
-	m.zoneCfg.Update(ids)
-	if m.zoneCfg.IsAllZones() {
-		log.Printf("[recording] ZoneIDs 已更新：录制所有车间")
-	} else {
-		log.Printf("[recording] ZoneIDs 已更新为 %v", ids)
 	}
 }
 
@@ -181,17 +149,37 @@ func (m *RecorderManager) UpdateRetainDays(days int) {
 	log.Printf("[recording] 录像保留天数已更新为 %d 天", days)
 }
 
+// UpdateRecordEnabled 热更新全局录制开关。
+func (m *RecorderManager) UpdateRecordEnabled(enabled bool) {
+	m.mu.Lock()
+	m.cfg.RecordEnabled = enabled
+	if !enabled {
+		for name, rec := range m.active {
+			m.stopRecording(name, rec)
+		}
+	}
+	m.mu.Unlock()
+	if enabled {
+		log.Println("[recording] 全局录制已开启")
+		go m.syncRecordings()
+	} else {
+		log.Println("[recording] 全局录制已关闭")
+	}
+}
+
 func (m *RecorderManager) syncRecordings() {
 	streams := m.fetchActiveStreams()
-	disabledZones := m.loadDisabledZones()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.cfg.RecordEnabled {
+		for name, rec := range m.active {
+			m.stopRecording(name, rec)
+		}
+		return
+	}
 
 	activeSet := make(map[string]struct{}, len(streams))
 	for _, s := range streams {
-		if !m.shouldRecord(s.Name, disabledZones) {
-			continue
-		}
 		activeSet[s.Name] = struct{}{}
 		if _, ok := m.active[s.Name]; !ok {
 			m.startRecording(s.Name)
@@ -203,55 +191,6 @@ func (m *RecorderManager) syncRecordings() {
 			m.stopRecording(name, rec)
 		}
 	}
-}
-
-// loadDisabledZones 返回当前关闭了服务端录制的车间 ID 集合（record_enabled=false）。
-func (m *RecorderManager) loadDisabledZones() map[uint]bool {
-	var ids []uint
-	database.DB.Model(&models.Zone{}).Where("record_enabled = ?", false).Pluck("id", &ids)
-	if len(ids) == 0 {
-		return nil
-	}
-	set := make(map[uint]bool, len(ids))
-	for _, id := range ids {
-		set[id] = true
-	}
-	return set
-}
-
-func (m *RecorderManager) shouldRecord(streamName string, disabledZones map[uint]bool) bool {
-	mac := streamNameToMAC(streamName)
-	var computer models.Computer
-	if err := database.DB.Preload("User").Where("mac = ?", mac).First(&computer).Error; err != nil {
-		// 全 Zone 模式时允许未注册设备录制；指定 Zone 时拒绝
-		return m.zoneCfg.IsAllZones()
-	}
-	if computer.UserID == nil || computer.User.ZoneID == nil {
-		return m.zoneCfg.IsAllZones()
-	}
-	zoneID := *computer.User.ZoneID
-	// 检查是否在配置的 Zone 范围内
-	if !m.zoneCfg.ZoneAllowed(zoneID) {
-		return false
-	}
-	// 车间录制开关：被关闭的车间不启动录制。
-	if disabledZones[zoneID] {
-		return false
-	}
-	return true
-}
-
-// lookupZoneID 返回设备所属的 Zone ID（始终查数据库获取实际值）。
-func (m *RecorderManager) lookupZoneID(streamName string) uint {
-	mac := streamNameToMAC(streamName)
-	var computer models.Computer
-	if err := database.DB.Preload("User").Where("mac = ?", mac).First(&computer).Error; err != nil {
-		return 0
-	}
-	if computer.UserID == nil || computer.User.ZoneID == nil {
-		return 0
-	}
-	return *computer.User.ZoneID
 }
 
 func (m *RecorderManager) fetchActiveStreams() []srsStream {
@@ -499,7 +438,6 @@ func (m *RecorderManager) indexDayDir(streamName, dayDir, dayStr string) {
 			EndedAt:    endedAt,
 			Duration:   actualDuration,
 			Storage:    "local",
-			NodeZoneID: m.lookupZoneID(streamName),
 		}
 		if err := database.DB.Create(&seg).Error; err != nil {
 			log.Printf("[recording] 写入索引失败 %s: %v", filePath, err)
@@ -548,7 +486,7 @@ func (m *RecorderManager) extractFrames(streamName, mac string, segmentID uint, 
 		)
 		framePath := filepath.Join(framesDir, frameName)
 
-		// 以 (segment_id, frame_index) 去重，兼容本地模式和推送模式
+		// 以 (segment_id, frame_index) 去重
 		var exist int64
 		database.DB.Model(&models.RecordingFrame{}).
 			Where("segment_id = ? AND frame_index = ?", segmentID, i+1).
@@ -557,16 +495,9 @@ func (m *RecorderManager) extractFrames(streamName, mac string, segmentID uint, 
 			continue
 		}
 
-		// 文件已存在（上次推送/保存成功但 DB 写入失败时重试）
+		// 文件已存在但 DB 写入失败时重新索引
 		if _, err := os.Stat(framePath); err == nil {
-			if m.cfg.CenterURL != "" {
-				if !m.pushFrameToCenter(streamName, mac, segmentID, framePath, capturedAt, i+1) {
-					// 推送失败且不会重试（extractFrames 对同一片段只调用一次），删除文件避免永久堆积
-					os.Remove(framePath)
-				}
-			} else {
-				m.indexFrame(streamName, mac, segmentID, framePath, capturedAt, i+1)
-			}
+			m.indexFrame(streamName, mac, segmentID, framePath, capturedAt, i+1)
 			continue
 		}
 
@@ -586,13 +517,7 @@ func (m *RecorderManager) extractFrames(streamName, mac string, segmentID uint, 
 			continue
 		}
 
-		if m.cfg.CenterURL != "" {
-			if !m.pushFrameToCenter(streamName, mac, segmentID, framePath, capturedAt, i+1) {
-				os.Remove(framePath)
-			}
-		} else {
-			m.indexFrame(streamName, mac, segmentID, framePath, capturedAt, i+1)
-		}
+		m.indexFrame(streamName, mac, segmentID, framePath, capturedAt, i+1)
 	}
 }
 
@@ -609,63 +534,10 @@ func (m *RecorderManager) indexFrame(streamName, mac string, segmentID uint, fra
 		FileSize:   fi.Size(),
 		CapturedAt: capturedAt,
 		FrameIndex: frameIndex,
-		NodeZoneID: m.lookupZoneID(streamName),
 	}
 	if err := database.DB.Create(&frame).Error; err != nil {
 		log.Printf("[recording] 写入帧索引失败 %s: %v", framePath, err)
 	}
-}
-
-// pushFrameToCenter 把本节点抽取的帧图片推送到中心节点（A节点）并在成功后删除本地临时文件。
-// 返回 true 表示推送成功。
-func (m *RecorderManager) pushFrameToCenter(streamName, mac string, segmentID uint, framePath string, capturedAt time.Time, frameIndex int) bool {
-	f, err := os.Open(framePath)
-	if err != nil {
-		log.Printf("[recording] 打开帧文件失败 %s: %v", framePath, err)
-		return false
-	}
-	defer f.Close()
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("file", filepath.Base(framePath))
-	if err != nil {
-		return false
-	}
-	if _, err := io.Copy(part, f); err != nil {
-		return false
-	}
-	writer.WriteField("stream_name", streamName)
-	writer.WriteField("mac", mac)
-	writer.WriteField("segment_id", strconv.FormatUint(uint64(segmentID), 10))
-	writer.WriteField("captured_at", capturedAt.Format(time.RFC3339))
-	writer.WriteField("frame_index", strconv.Itoa(frameIndex))
-	writer.WriteField("node_zone_id", strconv.FormatUint(uint64(m.lookupZoneID(streamName)), 10))
-	writer.Close()
-
-	url := strings.TrimRight(m.cfg.CenterURL, "/") + "/api/recording-frames/upload"
-	req, err := http.NewRequest("POST", url, body)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("X-Proxy-Key", m.cfg.CenterKey)
-
-	resp, err := m.pushClient.Do(req)
-	if err != nil {
-		log.Printf("[recording] 推送帧到中心节点失败 %s: %v", filepath.Base(framePath), err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		log.Printf("[recording] 推送帧失败 status=%d %s", resp.StatusCode, filepath.Base(framePath))
-		return false
-	}
-
-	os.Remove(framePath)
-	log.Printf("[recording] 帧已推送到中心节点并删除本地文件 %s", filepath.Base(framePath))
-	return true
 }
 
 func (m *RecorderManager) cleanupExpired() {
@@ -673,15 +545,8 @@ func (m *RecorderManager) cleanupExpired() {
 	retainDays := m.cfg.RetainDays
 	m.mu.Unlock()
 	mainCutoff := time.Now().AddDate(0, 0, -retainDays)
-	zCond, zArgs := m.zoneCfg.ZoneCond()
-
-	// 只清理本节点产生的 local 片段（node_zone_id 匹配）
 	segWhere := "storage = ? AND started_at < ?"
 	segArgs := []interface{}{"local", mainCutoff}
-	if zCond != "" {
-		segWhere += " AND " + zCond
-		segArgs = append(segArgs, zArgs...)
-	}
 	var localSegments []models.RecordingSegment
 	database.DB.Unscoped().Where(segWhere, segArgs...).Find(&localSegments)
 	for _, seg := range localSegments {
@@ -695,28 +560,21 @@ func (m *RecorderManager) cleanupExpired() {
 	// 清理过期的损坏文件：损坏文件不入库，上面基于 DB 的清理覆盖不到，会永久占盘
 	m.cleanupCorruptedFiles(mainCutoff)
 
-	// 推送模式下帧文件已在 A 节点，由 A 节点负责生命周期，本节点不清理帧
-	if m.cfg.CenterURL == "" {
-		frameCutoff := time.Now().AddDate(0, 0, -m.cfg.FrameRetainDays)
-		frameWhere := "captured_at < ?"
-		frameArgs := []interface{}{frameCutoff}
-		if zCond != "" {
-			frameWhere += " AND " + zCond
-			frameArgs = append(frameArgs, zArgs...)
-		}
-		var expiredFrames []models.RecordingFrame
-		database.DB.Unscoped().Where(frameWhere, frameArgs...).Find(&expiredFrames)
-		for _, f := range expiredFrames {
-			if f.FilePath != "" {
-				if err := os.Remove(f.FilePath); err != nil && !os.IsNotExist(err) {
-					log.Printf("[recording] 删除过期帧文件失败 %s: %v", f.FilePath, err)
-				}
+	frameCutoff := time.Now().AddDate(0, 0, -m.cfg.FrameRetainDays)
+	frameWhere := "captured_at < ?"
+	frameArgs := []interface{}{frameCutoff}
+	var expiredFrames []models.RecordingFrame
+	database.DB.Unscoped().Where(frameWhere, frameArgs...).Find(&expiredFrames)
+	for _, f := range expiredFrames {
+		if f.FilePath != "" {
+			if err := os.Remove(f.FilePath); err != nil && !os.IsNotExist(err) {
+				log.Printf("[recording] 删除过期帧文件失败 %s: %v", f.FilePath, err)
 			}
 		}
-		if len(expiredFrames) > 0 {
-			database.DB.Unscoped().Where(frameWhere, frameArgs...).Delete(&models.RecordingFrame{})
-			log.Printf("[recording] 清理过期帧 %d 条", len(expiredFrames))
-		}
+	}
+	if len(expiredFrames) > 0 {
+		database.DB.Unscoped().Where(frameWhere, frameArgs...).Delete(&models.RecordingFrame{})
+		log.Printf("[recording] 清理过期帧 %d 条", len(expiredFrames))
 	}
 
 	result := database.DB.Unscoped().Where(segWhere, segArgs...).Delete(&models.RecordingSegment{})
@@ -761,13 +619,8 @@ func (m *RecorderManager) cleanupCorruptedFiles(cutoff time.Time) {
 }
 
 func (m *RecorderManager) cleanupZeroByteSegments() {
-	zCond, zArgs := m.zoneCfg.ZoneCond()
 	where := "file_size = 0"
 	args := []interface{}{}
-	if zCond != "" {
-		where += " AND " + zCond
-		args = append(args, zArgs...)
-	}
 	var zeroSegs []models.RecordingSegment
 	database.DB.Unscoped().Where(where, args...).Find(&zeroSegs)
 	for _, seg := range zeroSegs {

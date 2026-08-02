@@ -21,7 +21,7 @@ Docker Compose 会启动 `mysql:8.1.0`，配置如下：
 
 RecordingService 启动时会等待 MySQL 就绪，并自动创建或更新这些表：
 
-`regions`、`areas`、`zones`、`users`、`computers`、`zone_assignments`、`node_settings`、`recording_segments`、`recording_frames`。
+`users`、`computers`、`recording_settings`、`recording_segments`、`recording_frames`。
 
 健康检查 `GET /api/health` 会同时检查数据库连接；数据库断开时返回 HTTP 503。
 
