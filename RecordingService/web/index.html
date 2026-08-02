@@ -135,7 +135,7 @@
     </div>
     <table id="streamTable" style="display:none">
       <thead>
-        <tr><th>状态</th><th>设备名称</th><th>MAC 地址</th><th>IP 地址</th><th>用户</th><th>流名称</th></tr>
+        <tr><th>状态</th><th>设备名称</th><th>MAC 地址</th><th>公网 IP - 内网 IP</th><th>用户</th><th>流名称</th></tr>
       </thead>
       <tbody id="streamTbody"></tbody>
     </table>
@@ -326,7 +326,7 @@
         <td><span class="badge badge-online">在线</span></td>
         <td>${s.hostname || '-'}</td>
         <td class="mac">${s.mac || '-'}</td>
-        <td>${s.ip || '-'}</td>
+        <td>${s.public_ip || '-'} - ${s.ip || '-'}</td>
         <td>${s.user_name || '-'}</td>
         <td class="mac">${s.stream_name}</td>
       </tr>

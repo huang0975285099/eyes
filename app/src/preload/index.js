@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 contextBridge.exposeInMainWorld('eyesAPI', {
     getStatus: () => ipcRenderer.invoke('app:get-status'),
     registerDevice: () => ipcRenderer.invoke('device:register'),
+    setUserName: (value) => ipcRenderer.invoke('device:set-user-name', value),
     restartStream: () => ipcRenderer.invoke('stream:restart'),
     onStreamStatus: (callback) => {
         const listener = (_event, value) => callback(value)

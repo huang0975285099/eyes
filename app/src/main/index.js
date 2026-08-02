@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu } from 'electron'
 import { execFile } from 'child_process'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
 import os from 'os'
 import { join } from 'path'
 import icon from '../../resources/icon.png?asset'
@@ -9,7 +9,8 @@ import { getPreferredNICAsync } from './network-util'
 
 const DEFAULT_CONFIG = {
     recordingServiceURL: 'http://112.18.238.6:52350',
-    apiKey: ''
+    apiKey: 'Yx7pK4vN9mQ2tR8wF6cH3sD5jL1aZ0eB',
+    userName: ''
 }
 
 let mainWindow
@@ -26,15 +27,15 @@ function loadConfig() {
                   join(app.getPath('exe'), '..', 'config.json'),
                   join(process.resourcesPath, 'config.json')
               ]
-    for (const file of candidates) {
+    let loaded = { ...DEFAULT_CONFIG }
+    for (const file of [...candidates, join(app.getPath('userData'), 'config.json')]) {
         try {
-            if (existsSync(file))
-                return { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(file, 'utf8')) }
+            if (existsSync(file)) loaded = { ...loaded, ...JSON.parse(readFileSync(file, 'utf8')) }
         } catch (error) {
             console.error(`[config] 读取失败 ${file}:`, error.message)
         }
     }
-    return { ...DEFAULT_CONFIG }
+    return loaded
 }
 
 const config = loadConfig()
@@ -69,8 +70,18 @@ async function collectSystemInfo() {
         total_memory: os.totalmem(),
         disk_serial: await getDiskSerial(),
         username: os.userInfo().username,
+        user_name: config.userName || '',
         app_version: app.getVersion()
     }
+}
+
+function saveUserName(value) {
+    const userName = String(value || '').trim()
+    if ([...userName].length > 20) throw new Error('姓名或编号不能超过20个字符')
+    config.userName = userName
+    const file = join(app.getPath('userData'), 'config.json')
+    writeFileSync(file, JSON.stringify({ userName }, null, 2), 'utf8')
+    return userName
 }
 
 async function registerDevice() {
@@ -151,15 +162,15 @@ function createTray() {
                     mainWindow.focus()
                 }
             },
-            { label: '重新推流', click: () => screenController?.restart('tray') },
-            { type: 'separator' },
-            {
-                label: '退出',
-                click: () => {
-                    app.isQuiting = true
-                    app.quit()
-                }
-            }
+            { label: '重新推流', click: () => screenController?.restart('tray') }
+            // { type: 'separator' },
+            // {
+            //     label: '退出',
+            //     click: () => {
+            //         app.isQuiting = true
+            //         app.quit()
+            //     }
+            // }
         ])
     )
     tray.on('double-click', () => mainWindow.show())
@@ -174,6 +185,10 @@ ipcMain.handle('app:get-status', async () => ({
     stream: screenController?.status() || { running: false, url: '', error: '' }
 }))
 ipcMain.handle('device:register', () => registerDevice())
+ipcMain.handle('device:set-user-name', (_event, value) => {
+    const userName = saveUserName(value)
+    return registerDevice().then(() => userName)
+})
 ipcMain.handle('stream:restart', () => screenController?.restart('ipc'))
 
 app.whenReady().then(async () => {

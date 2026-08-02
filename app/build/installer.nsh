@@ -25,7 +25,7 @@ Function configPageCreate
 
     ${NSD_CreateLabel} 0 54u 100% 12u "客户端 API Key："
     Pop $0
-    ${NSD_CreatePassword} 0 70u 100% 14u ""
+    ${NSD_CreatePassword} 0 70u 100% 14u "Yx7pK4vN9mQ2tR8wF6cH3sD5jL1aZ0eB"
     Pop $ApiKeyInput
 
     ${NSD_CreateLabel} 0 100u 100% 30u "客户端将从 RecordingService 自动获取 RTMP 推流地址；API Key 必须与服务端 CLIENT_API_KEY 一致。"

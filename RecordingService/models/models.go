@@ -27,6 +27,8 @@ type Computer struct {
 	MAC         string `gorm:"size:50;uniqueIndex"`
 	OS          string `gorm:"size:200"`
 	Hostname    string `gorm:"size:100"`
+	UserName    string `gorm:"size:20"`
+	PublicIP    string `gorm:"size:50"`
 	CPU         string `gorm:"size:200"`
 	TotalMemory int64
 	DiskSerial  string `gorm:"size:200"`

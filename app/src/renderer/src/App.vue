@@ -90,6 +90,23 @@ async function registerAgain() {
     status.value.registration = await window.eyesAPI.registerDevice()
 }
 
+async function editUserName() {
+    const current = status.value.system.user_name || ''
+    const value = window.prompt('请输入姓名或者编号（不超过20个字符）', current)
+    if (value === null) return
+    const userName = value.trim()
+    if ([...userName].length > 20) {
+        window.alert('姓名或者编号不能超过20个字符')
+        return
+    }
+    try {
+        await window.eyesAPI.setUserName(userName)
+        await refresh()
+    } catch (error) {
+        window.alert(`保存失败：${error.message}`)
+    }
+}
+
 async function restartStream() {
     await window.eyesAPI.restartStream()
     setTimeout(async () => {
@@ -173,6 +190,11 @@ onUnmounted(() => {
                     </div>
                     <p>{{ status.registration.message || '尚未登记' }}</p>
                     <small>{{ status.config.recordingServiceURL }}</small>
+                    <div class="user-name-row">
+                        当前用户：<strong>{{ status.system.user_name || '无' }}</strong>
+                        <button class="link-button" @click="editUserName">修改</button>
+                    </div>
+                    <small>请输入姓名或者编号，不超过20个字符。</small>
                     <button class="secondary" @click="registerAgain">重新登记</button>
                 </article>
                 <article class="card details">

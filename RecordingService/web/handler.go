@@ -99,6 +99,7 @@ type streamStatusRow struct {
 	StreamName string `json:"stream_name"`
 	MAC        string `json:"mac"`
 	IP         string `json:"ip"`
+	PublicIP   string `json:"public_ip"`
 	Hostname   string `json:"hostname"`
 	UserName   string `json:"user_name"`
 	Active     bool   `json:"active"`
@@ -125,8 +126,9 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 	type compRow struct {
 		MAC      string
 		IP       string
+		PublicIP string
 		Hostname string
-		Name     string
+		UserName string
 	}
 	compMap := map[string]compRow{}
 	if len(macSet) > 0 {
@@ -136,8 +138,7 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 		}
 		var comps []compRow
 		database.DB.Table("computers").
-			Select("computers.mac, computers.ip, computers.hostname, users.name").
-			Joins("LEFT JOIN users ON users.id = computers.user_id").
+			Select("computers.mac, computers.ip, computers.public_ip, computers.hostname, computers.user_name").
 			Where("computers.mac IN ?", macs).
 			Scan(&comps)
 		for _, c := range comps {
@@ -155,8 +156,9 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 		}
 		if c, ok := compMap[mac]; ok {
 			row.IP = c.IP
+			row.PublicIP = c.PublicIP
 			row.Hostname = c.Hostname
-			row.UserName = c.Name
+			row.UserName = c.UserName
 		}
 		rows = append(rows, row)
 	}
