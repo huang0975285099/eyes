@@ -39,7 +39,7 @@ services:
 
   recording-service:
     build: .
-    image: recording-service:latest
+    image: "${RECORDING_IMAGE:-recording-service:latest}"
     restart: always
     environment:
       DB_HOST: "mysql"
@@ -91,7 +91,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /home/administrator/recordings
+      device: "${RECORDING_DIR:-/home/test/recordings}"
 
 networks:
   rec-net:

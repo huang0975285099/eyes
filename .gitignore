@@ -13,3 +13,4 @@ Thumbs.db
 **/out/
 **/dist/
 **/*.tar
+.tmp-go-cache/

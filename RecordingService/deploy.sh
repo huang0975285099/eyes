@@ -12,13 +12,27 @@ IMAGE_NAME="recording-service"
 TAG="latest"
 SRS_IMAGE="ossrs/srs:5"
 MYSQL_IMAGE="mysql:8.1.0"
-TAR_FILE="${IMAGE_NAME}-${TAG}.tar"
 SRS_TAR="srs-5.tar"
 MYSQL_TAR="mysql-8.1.0.tar"
 # 录像存储目录（4T 硬盘挂载点，按需修改）
 # docker-compose.yml 中 volumes.device 指向此目录
 # 注意：非 root 用户需要在有权限的目录下创建
-RECORDING_DIR="/home/test/recordingservice/"
+RECORDING_DIR="/home/test/recordings"
+export RECORDING_DIR
+
+if [ "${1:-}" = "-t" ] || [ "${1:-}" = "--tag" ]; then
+    if [ $# -lt 2 ] || [[ ! "$2" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        echo "✗ 错误: 镜像标签无效"
+        exit 1
+    fi
+    TAG="$2"
+elif [ $# -gt 0 ]; then
+    echo "用法: $0 [-t tag]"
+    exit 1
+fi
+
+TAR_FILE="${IMAGE_NAME}-${TAG}.tar"
+export RECORDING_IMAGE="${IMAGE_NAME}:${TAG}"
 
 # docker / docker compose 命令前缀（自动检测是否需要 sudo）
 if docker info > /dev/null 2>&1; then
@@ -51,6 +65,31 @@ if ! ${COMPOSE} version > /dev/null 2>&1; then
 fi
 echo "  ✓ docker compose 可用"
 
+# 验证生产环境密钥。build.sh 只上传示例文件，不覆盖服务器上的 .env。
+if [ ! -f ".env" ]; then
+    echo "✗ 错误: 当前目录缺少 .env"
+    echo "  请执行: cp .env.example .env，然后填写 CLIENT_API_KEY 和 STREAM_TOKEN_SECRET"
+    exit 1
+fi
+
+CLIENT_API_KEY_VALUE=$(sed -n 's/^CLIENT_API_KEY=//p' .env | tail -n 1 | tr -d '\r')
+STREAM_TOKEN_SECRET_VALUE=$(sed -n 's/^STREAM_TOKEN_SECRET=//p' .env | tail -n 1 | tr -d '\r')
+if [ -z "${CLIENT_API_KEY_VALUE}" ] || [ "${CLIENT_API_KEY_VALUE}" = "replace-me" ]; then
+    echo "✗ 错误: .env 中 CLIENT_API_KEY 未配置"
+    exit 1
+fi
+if [ -z "${STREAM_TOKEN_SECRET_VALUE}" ] || [[ "${STREAM_TOKEN_SECRET_VALUE}" == replace-* ]]; then
+    echo "✗ 错误: .env 中 STREAM_TOKEN_SECRET 未配置"
+    exit 1
+fi
+echo "  ✓ 生产环境密钥已配置"
+
+if ! ${COMPOSE} config -q; then
+    echo "✗ 错误: docker-compose.yml 或 .env 配置无效"
+    exit 1
+fi
+echo "  ✓ Compose 配置校验通过"
+
 # 创建录像存储目录
 echo ""
 echo "[2/6] 创建录像存储目录..."
@@ -62,7 +101,7 @@ echo "     若挂载点不同，请修改 docker-compose.yml 中 volumes.device 
 # 加载依赖镜像
 echo ""
 echo "[3/6] 加载 SRS、MySQL 镜像..."
-if ! ${DOCKER} images "${SRS_IMAGE}" | grep -q "srs"; then
+if ! ${DOCKER} image inspect "${SRS_IMAGE}" > /dev/null 2>&1; then
     if [ -f "${SRS_TAR}" ]; then
         ${DOCKER} load -i "${SRS_TAR}"
         echo "  ✓ SRS 镜像加载完成"
@@ -74,7 +113,7 @@ else
     echo "  SRS 镜像已存在，跳过加载"
 fi
 
-if ! ${DOCKER} images "${MYSQL_IMAGE}" | grep -q "mysql"; then
+if ! ${DOCKER} image inspect "${MYSQL_IMAGE}" > /dev/null 2>&1; then
     if [ -f "${MYSQL_TAR}" ]; then
         ${DOCKER} load -i "${MYSQL_TAR}"
         echo "  ✓ MySQL 镜像加载完成"
@@ -110,8 +149,7 @@ echo "  ✓ ${MYSQL_IMAGE} → ${MYSQL_SIZE}"
 # 启动服务
 echo ""
 echo "[6/6] 启动服务（recording-service + SRS + MySQL）..."
-${COMPOSE} down 2>/dev/null || true
-${COMPOSE} up -d
+${COMPOSE} up -d --no-build
 
 # 等待服务启动
 echo ""
@@ -124,10 +162,26 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     sleep $WAIT_INTERVAL
     ELAPSED=$((ELAPSED + WAIT_INTERVAL))
 
-    RUNNING=$(${COMPOSE} ps | grep -c "Up" || echo "0")
-    TOTAL=$(${COMPOSE} ps -a | grep -cE "recording|srs|mysql" || echo "0")
+    ALL_HEALTHY=true
+    for SERVICE in mysql srs recording-service; do
+        CONTAINER_ID=$(${COMPOSE} ps -a -q "${SERVICE}")
+        if [ -z "${CONTAINER_ID}" ]; then
+            ALL_HEALTHY=false
+            continue
+        fi
+        STATE=$(${DOCKER} inspect --format='{{.State.Status}}' "${CONTAINER_ID}")
+        HEALTH=$(${DOCKER} inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "${CONTAINER_ID}")
+        if [ "${STATE}" = "exited" ] || [ "${STATE}" = "dead" ]; then
+            echo "✗ ${SERVICE} 已退出（状态: ${STATE}）"
+            ${COMPOSE} logs --tail=100 "${SERVICE}"
+            exit 1
+        fi
+        if [ "${STATE}" != "running" ] || [ "${HEALTH}" != "healthy" ]; then
+            ALL_HEALTHY=false
+        fi
+    done
 
-    if [ "$RUNNING" -ge "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+    if [ "${ALL_HEALTHY}" = true ]; then
         echo ""
         echo "=========================================="
         echo "  ✓ 所有服务启动成功！"
@@ -137,7 +191,10 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
 
     if [ $ELAPSED -ge $MAX_WAIT ]; then
         echo ""
-        echo "  ⚠️ 服务启动超时，请检查日志：${COMPOSE} logs -f"
+        echo "✗ 服务启动超时"
+        ${COMPOSE} ps
+        ${COMPOSE} logs --tail=100
+        exit 1
     fi
 done
 

@@ -19,7 +19,7 @@ BUILD_NO_CACHE=false
 # 服务器无网络，需离线打包上传
 REMOTE_USER="test"
 REMOTE_IP="112.18.238.6"
-REMOTE_PORT="22"
+REMOTE_PORT="2202"
 REMOTE_DIR="/home/test/recordingservice/"
 # =================================================
 
@@ -33,6 +33,10 @@ MYSQL_TAR="mysql-8.1.0.tar"
 while [[ $# -gt 0 ]]; do
     case $1 in
         -t|--tag)
+            if [ $# -lt 2 ] || [[ ! "$2" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+                echo "错误: 镜像标签只能包含字母、数字、点、下划线和连字符"
+                exit 1
+            fi
             TAG="$2"
             shift 2
             ;;
@@ -49,7 +53,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "参数:"
             echo "  -t, --tag     指定镜像标签 (默认: latest)"
-            echo "  --no-cache    不使用缓存，强制重新构建（默认）"
+            echo "  --no-cache    不使用缓存，强制重新构建"
             echo "  --cache       使用缓存构建"
             echo "  -h, --help    显示帮助信息"
             echo ""
@@ -150,27 +154,27 @@ echo "  ✓ MySQL 镜像已导出: ${MYSQL_TAR} ($(du -h ${MYSQL_TAR} | cut -f1)
 echo ""
 echo "[5/5] 上传到目标服务器..."
 # 确保远程目录存在
-ssh -p ${REMOTE_PORT} "${REMOTE_USER}@${REMOTE_IP}" "mkdir -p ${REMOTE_DIR}srs ${REMOTE_DIR}"
+ssh -p "${REMOTE_PORT}" "${REMOTE_USER}@${REMOTE_IP}" "mkdir -p '${REMOTE_DIR}'"
 
 # 上传镜像 tar
 echo "  上传 ${TAR_FILE}..."
-scp -P ${REMOTE_PORT} -C "${TAR_FILE}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
+scp -P "${REMOTE_PORT}" -C "${TAR_FILE}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
 echo "  上传 ${SRS_TAR}..."
-scp -P ${REMOTE_PORT} -C "${SRS_TAR}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
+scp -P "${REMOTE_PORT}" -C "${SRS_TAR}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
 echo "  上传 ${MYSQL_TAR}..."
-scp -P ${REMOTE_PORT} -C "${MYSQL_TAR}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
+scp -P "${REMOTE_PORT}" -C "${MYSQL_TAR}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
 
 # 上传部署脚本和配置文件
-echo "  上传 deploy.sh, docker-compose.yml, srs.conf..."
-scp -P ${REMOTE_PORT} -C deploy.sh docker-compose.yml srs.conf "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
-ssh -p ${REMOTE_PORT} "${REMOTE_USER}@${REMOTE_IP}" "chmod +x ${REMOTE_DIR}deploy.sh && mkdir -p ${REMOTE_DIR}srs"
+echo "  上传 deploy.sh, docker-compose.yml, srs.conf, .env.example..."
+scp -P "${REMOTE_PORT}" -C deploy.sh docker-compose.yml srs.conf .env.example "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
+ssh -p "${REMOTE_PORT}" "${REMOTE_USER}@${REMOTE_IP}" "chmod +x '${REMOTE_DIR}deploy.sh'"
 
 # srs.conf 在 docker-compose 中挂载到 ./srs.conf，上传到远程根目录即可
 echo "  ✓ 上传完成"
 
 echo ""
 echo "  在服务器上执行 deploy.sh..."
-ssh -p ${REMOTE_PORT} "${REMOTE_USER}@${REMOTE_IP}" "cd ${REMOTE_DIR} && ./deploy.sh"
+ssh -p "${REMOTE_PORT}" "${REMOTE_USER}@${REMOTE_IP}" "cd '${REMOTE_DIR}' && ./deploy.sh -t '${TAG}'"
 
 echo ""
 echo "=========================================="
