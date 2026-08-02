@@ -497,7 +497,7 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 	type compRow struct {
 		MAC      string
 		Hostname string
-		Name     string
+		UserName string
 	}
 	compMap := map[string]compRow{}
 	if len(macSet) > 0 {
@@ -507,8 +507,7 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 		}
 		var comps []compRow
 		database.DB.Table("computers").
-			Select("computers.mac, computers.hostname, users.name").
-			Joins("LEFT JOIN users ON users.id = computers.user_id").
+			Select("computers.mac, computers.hostname, computers.user_name").
 			Where("computers.mac IN ?", macs).
 			Scan(&comps)
 		for _, c := range comps {
@@ -529,7 +528,7 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 		}
 		if c, ok := compMap[seg.MAC]; ok {
 			row.Hostname = c.Hostname
-			row.UserName = c.Name
+			row.UserName = c.UserName
 		}
 		rows = append(rows, row)
 	}
@@ -559,18 +558,17 @@ func (s *Server) handleMACs(w http.ResponseWriter, r *http.Request) {
 		type compRow struct {
 			MAC      string
 			Hostname string
-			Name     string
+			UserName string
 		}
 		var comps []compRow
 		database.DB.Table("computers").
-			Select("computers.mac, computers.hostname, users.name").
-			Joins("LEFT JOIN users ON users.id = computers.user_id").
+			Select("computers.mac, computers.hostname, computers.user_name").
 			Where("computers.mac IN ?", macs).
 			Scan(&comps)
 
 		found := map[string]bool{}
 		for _, c := range comps {
-			result = append(result, macInfo{MAC: c.MAC, Hostname: c.Hostname, UserName: c.Name})
+			result = append(result, macInfo{MAC: c.MAC, Hostname: c.Hostname, UserName: c.UserName})
 			found[c.MAC] = true
 		}
 		for _, m := range macs {

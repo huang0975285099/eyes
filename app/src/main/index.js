@@ -20,6 +20,7 @@ let screenController
 let registerTimer
 let lastRegistration = { ok: false, message: '尚未登记', at: null }
 let startHidden = false
+let publicIP = ''
 
 function configureAutoLaunch() {
     // 仅对安装后的正式版本启用，开发环境不应修改用户的登录启动项。
@@ -90,6 +91,7 @@ async function collectSystemInfo() {
         disk_serial: await getDiskSerial(),
         username: os.userInfo().username,
         user_name: config.userName || '',
+        public_ip: publicIP,
         app_version: app.getVersion()
     }
 }
@@ -197,7 +199,8 @@ async function registerDevice() {
         )
         const body = await response.json().catch(() => ({}))
         if (!response.ok) throw new Error(body.message || `HTTP ${response.status}`)
-        info.public_ip = body.public_ip || ''
+        publicIP = body.public_ip || ''
+        info.public_ip = publicIP
         lastRegistration = {
             ok: true,
             message: '设备信息已登记',
