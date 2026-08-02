@@ -18,7 +18,7 @@ BUILD_NO_CACHE=false
 # ================= 目标服务器配置 =================
 # 服务器无网络，需离线打包上传
 REMOTE_USER="administrator"
-REMOTE_IP="10.0.20.219"
+REMOTE_IP="112.18.238.6"
 REMOTE_PORT="22"
 REMOTE_DIR="/home/administrator/recordingservice/"
 # =================================================

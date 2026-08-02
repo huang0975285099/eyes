@@ -29,12 +29,12 @@ Function configPageCreate
 
     ${NSD_CreateLabel} 0 36u 100% 12u "RecordingService 地址："
     Pop $0
-    ${NSD_CreateText} 0 50u 100% 14u "http://10.0.20.219:8089"
+    ${NSD_CreateText} 0 50u 100% 14u "http://112.18.238.6:52350"
     Pop $RecordingInput
 
     ${NSD_CreateLabel} 0 72u 100% 12u "SRS RTMP 地址："
     Pop $0
-    ${NSD_CreateText} 0 86u 100% 14u "10.0.20.219:21935"
+    ${NSD_CreateText} 0 86u 100% 14u "112.18.238.6:21935"
     Pop $SrsInput
 
     ${NSD_CreateLabel} 0 108u 100% 12u "客户端 API Key："

@@ -7,7 +7,7 @@
                 </template>
                 <el-descriptions :column="2" border>
                     <el-descriptions-item label="本机 IP/MAC">
-                        <span class="ip-text">{{ ipAddress }}<br/>{{ macAddress }}</span>
+                        <span class="ip-text">{{ ipAddress }}<br />{{ macAddress }}</span>
                     </el-descriptions-item>
                     <el-descriptions-item label="监控状态">
                         <el-tag
@@ -282,7 +282,7 @@ const isCapturing = ref(false)
 const loading = ref(false)
 const rtmpPushActive = ref(false)
 const rtmpPushUrl = ref('')
-const srsHttpPort = ref('8088')
+const srsHttpPort = ref('28080')
 
 const assistStatus = ref('待机中')
 const monitorReconnecting = ref(false)
@@ -337,7 +337,9 @@ async function loadPushStatus() {
         const { running, rtmpUrl } = await window.electronAPI.screenHelperMonitorStatus()
         rtmpPushActive.value = running
         rtmpPushUrl.value = rtmpUrl || ''
-    } catch {}
+    } catch (error) {
+        console.warn('[control-panel] 读取推流状态失败:', error)
+    }
 }
 
 function destroyFlvPlayer() {
@@ -347,7 +349,9 @@ function destroyFlvPlayer() {
         flvPlayer.unload()
         flvPlayer.detachMediaElement()
         flvPlayer.destroy()
-    } catch {}
+    } catch (error) {
+        console.warn('[control-panel] 销毁播放器失败:', error)
+    }
     flvPlayer = null
 }
 
@@ -721,7 +725,11 @@ onMounted(async () => {
         // 用户主动停止 / 解锁强制重启 / 旧进程被新进程接管：不是崩溃，紧跟会有 assist-started
         if (info && info.intended) {
             assistStatus.value = '已停止'
-            logAssistStatus('已停止', 'assist_stopped', `收到主进程 assist-died 事件（intended=${info.reason || true}）`)
+            logAssistStatus(
+                '已停止',
+                'assist_stopped',
+                `收到主进程 assist-died 事件（intended=${info.reason || true}）`
+            )
             return
         }
         assistStatus.value = '异常'

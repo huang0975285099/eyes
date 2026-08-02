@@ -6,7 +6,7 @@
 Electron -> screen-helper -> FFmpeg -> RTMP :21935 -> SRS
                                                      |-> HLS/HTTP-FLV :28080
                                                      |-> RecordingService -> FFmpeg 分片 -> /var/recordings
-Electron -> HTTP :8089 /api/clients/register -> RecordingService -> MySQL computers
+Electron -> HTTP :52350 /api/clients/register -> RecordingService -> MySQL computers
 ```
 
 RecordingService 通过 Docker 内部地址 `srs:1985` 发现流，通过 `srs:1935` 拉流录制。SRS 的公网端口只供客户端推流和管理页面播放。
@@ -31,6 +31,6 @@ FLUSH PRIVILEGES;
 
 3. 启动：`docker compose up -d --build`。
 
-端口：RTMP `21935`，播放 `28080`，SRS API `21985`，RecordingService API/管理页 `8089`。
+公网端口：RTMP `21935`，播放 `28080`，RecordingService API/管理页 `52350`。SRS API `1985` 仅在 Docker 内部网络开放。
 
-生产环境应通过防火墙限制 `21985` 和 `8089` 的来源，并为管理 API 配置 HTTPS 反向代理。
+生产环境应通过防火墙限制 `52350` 和 `28080` 的来源，并为管理 API 配置 HTTPS 反向代理。

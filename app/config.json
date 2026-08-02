@@ -1,6 +1,6 @@
 {
     "hostURL": "http://112.18.238.6:52351",
-    "recordingServiceURL": "http://10.0.20.219:8089",
-    "srsHost": "10.0.20.219:21935",
+    "recordingServiceURL": "http://112.18.238.6:52350",
+    "srsHost": "112.18.238.6:21935",
     "apiKey": "replace-me"
 }

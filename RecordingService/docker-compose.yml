@@ -5,7 +5,6 @@ services:
     ports:
       - "21935:1935"   # RTMP 推流
       - "28080:8080"   # HTTP-FLV 拉流（管理员看实时画面）
-      - "21985:1985"   # SRS HTTP API（供 recording-service 查询流列表）
     volumes:
       - ./srs.conf:/usr/local/srs/conf/docker.conf:ro
     networks:
@@ -63,7 +62,7 @@ services:
       RECORDING_FRAME_RETAIN_DAYS: "30"
       # ── 本节点录制的车间 ID（逗号分隔；0 = 录制所有车间）──────────────────────
       # 示例："0" 录制所有车间；"1,2" 只录制三车间和八车间；"3" 只录制一车间
-      # 注意：此值为初始默认值。启动后台 http://<本机IP>:8089/ 的「车间分配」页面
+      # 注意：此值为初始默认值。启动后台 http://112.18.238.6:52350/ 的「车间分配」页面
       #       可在线维护本节点录制的车间，修改后立即生效、无需重启，并覆盖此环境变量。
       RECORDING_NODE_ZONE_ID: "0"
       # ── 本节点标识（可选；为空则自动使用 hostname）──────────────────────────
@@ -78,9 +77,9 @@ services:
       RECORDING_CENTER_KEY: "${RECORDING_CENTER_KEY}"
       # ── 内网管理后台 Web 页面（0 = 不启动）──────────────────────────────────
       RECORDING_WEB_PORT: "8089"
-      RECORDING_SRS_HTTP_HOST: "${RECORDING_SRS_HTTP_HOST:-10.0.20.219:28080}"
+      RECORDING_SRS_HTTP_HOST: "${RECORDING_SRS_HTTP_HOST:-112.18.238.6:28080}"
     ports:
-      - "8089:8089"
+      - "52350:8089"
     networks:
       - rec-net
     volumes:
