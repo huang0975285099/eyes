@@ -169,6 +169,7 @@ onUnmounted(() => {
             <div>
                 <p class="eyebrow">ALL-SEEING EYES</p>
                 <h1>千里眼客户端</h1>
+                <p class="app-version">当前版本 v{{ status.system.app_version || '-' }}</p>
             </div>
             <span :class="['badge', status.stream.running ? 'online' : 'offline']">
                 {{ status.stream.running ? '正在推流' : '推流已停止' }}

@@ -185,6 +185,9 @@ async function registerDevice() {
     try {
         const info = await collectSystemInfo()
         if (!info.mac) throw new Error('未找到可用网卡 MAC 地址')
+        // public_ip 由服务端根据连接来源判定，只用于本地状态展示，不能随登记请求提交。
+        const registrationPayload = { ...info }
+        delete registrationPayload.public_ip
         const response = await fetch(
             `${config.recordingServiceURL.replace(/\/$/, '')}/api/clients/register`,
             {
@@ -193,7 +196,7 @@ async function registerDevice() {
                     'Content-Type': 'application/json',
                     'X-Client-Key': config.apiKey || ''
                 },
-                body: JSON.stringify(info),
+                body: JSON.stringify(registrationPayload),
                 signal: AbortSignal.timeout(8000)
             }
         )

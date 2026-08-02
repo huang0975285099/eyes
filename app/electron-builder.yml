@@ -1,5 +1,6 @@
 appId: all-seeing.eyes.system
 productName: 千里眼
+compression: maximum
 directories:
     buildResources: build
 files:

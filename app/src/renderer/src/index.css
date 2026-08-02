@@ -40,6 +40,11 @@ h1 {
     margin: 3px 0 0;
     font-size: 30px;
 }
+.app-version {
+    margin: 6px 0 0;
+    color: #7890ad;
+    font-size: 12px;
+}
 h2 {
     margin: 0 0 16px;
     font-size: 17px;
