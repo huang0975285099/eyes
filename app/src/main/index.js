@@ -8,9 +8,7 @@ import { setupScreenHelper } from './screen-helper-main'
 import { getPreferredNICAsync } from './network-util'
 
 const DEFAULT_CONFIG = {
-    hostURL: 'http://112.18.238.6:52351',
     recordingServiceURL: 'http://112.18.238.6:52350',
-    srsHost: '112.18.238.6:21935',
     apiKey: ''
 }
 
@@ -169,8 +167,7 @@ function createTray() {
 
 ipcMain.handle('app:get-status', async () => ({
     config: {
-        recordingServiceURL: config.recordingServiceURL,
-        srsHost: config.srsHost
+        recordingServiceURL: config.recordingServiceURL
     },
     system: await collectSystemInfo(),
     registration: lastRegistration,
@@ -183,8 +180,7 @@ app.whenReady().then(async () => {
     createWindow()
     createTray()
     screenController = setupScreenHelper({
-        hostUrl: config.hostURL,
-        srsHost: config.srsHost,
+        recordingServiceURL: config.recordingServiceURL,
         clientApiKey: config.apiKey,
         onStatus: (status) => mainWindow?.webContents.send('stream:status-changed', status)
     })

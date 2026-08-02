@@ -56,8 +56,8 @@ onUnmounted(() => {
         <template v-else>
             <section class="card hero">
                 <div>
-                    <span class="label">推流目标</span>
-                    <strong>{{ status.config.srsHost || '-' }}</strong>
+                    <span class="label">RecordingService</span>
+                    <strong>{{ status.config.recordingServiceURL || '-' }}</strong>
                     <code>{{ status.stream.url || '尚未建立 RTMP 连接' }}</code>
                     <p v-if="status.stream.error" class="error">{{ status.stream.error }}</p>
                 </div>

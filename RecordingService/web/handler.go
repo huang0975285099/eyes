@@ -33,9 +33,11 @@ type Server struct {
 	EnvRetainDays    int                    // 环境变量初始值，DB 无配置时回退
 	UpdateRetainDays func(int)              // 热更新 RecorderManager 的回调
 	ClientAPIKey     string                 // Electron 设备登记接口共享密钥
+	PublicRTMPHost   string                 // 下发给客户端的 RTMP 公网地址
+	StreamSecret     string                 // SRS 发布 token HMAC 密钥
 }
 
-func NewServer(zoneCfg *nodeconfig.ZoneConfig, nodeID, nodeName string, envZoneIDs []uint, srsApiBase, srsHttpHost string, retainDays int, updateRetainDays func(int), clientAPIKey string) *Server {
+func NewServer(zoneCfg *nodeconfig.ZoneConfig, nodeID, nodeName string, envZoneIDs []uint, srsApiBase, srsHttpHost, publicRTMPHost string, retainDays int, updateRetainDays func(int), clientAPIKey, streamSecret string) *Server {
 	return &Server{
 		ZoneCfg:          zoneCfg,
 		NodeID:           nodeID,
@@ -47,6 +49,8 @@ func NewServer(zoneCfg *nodeconfig.ZoneConfig, nodeID, nodeName string, envZoneI
 		EnvRetainDays:    retainDays,
 		UpdateRetainDays: updateRetainDays,
 		ClientAPIKey:     clientAPIKey,
+		PublicRTMPHost:   publicRTMPHost,
+		StreamSecret:     streamSecret,
 	}
 }
 
@@ -111,6 +115,11 @@ func (s *Server) Start(port int) {
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/clients/register", s.handleClientRegister)
+	mux.HandleFunc("/api/streams/publish-config", s.handlePublishConfig)
+	mux.HandleFunc("/api/srs/on-publish", s.handleSRSPublish)
+	mux.HandleFunc("/api/srs/on-unpublish", s.handleSRSLifecycle)
+	mux.HandleFunc("/api/srs/on-play", s.handleSRSLifecycle)
+	mux.HandleFunc("/api/srs/on-stop", s.handleSRSLifecycle)
 	mux.HandleFunc("/segments/", s.handleVideo)
 
 	addr := fmt.Sprintf(":%d", port)

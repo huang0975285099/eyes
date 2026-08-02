@@ -49,9 +49,11 @@ services:
       DB_NAME: "${DB_NAME:-ukeysystem}"
       DB_CHARSET: "utf8mb4"
       CLIENT_API_KEY: "${CLIENT_API_KEY}"
+      STREAM_TOKEN_SECRET: "${STREAM_TOKEN_SECRET:-}"
       # ── 本节点 SRS ────────────────────────────────────────────────────────────
       RECORDING_SRS_API: "http://srs:1985"
       RECORDING_RTMP_HOST: "srs:1935"
+      PUBLIC_RTMP_HOST: "${PUBLIC_RTMP_HOST:-112.18.238.6:21935}"
       # ── 录像存储 ──────────────────────────────────────────────────────────────
       RECORDING_OUTPUT_DIR: "/var/recordings"
       RECORDING_FFMPEG_PATH: "ffmpeg"

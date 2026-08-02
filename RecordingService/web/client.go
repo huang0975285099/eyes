@@ -57,7 +57,7 @@ func (s *Server) handleClientRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "请求数据无效: " + err.Error()})
 		return
 	}
-	input.MAC = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(input.MAC), "-", ":"))
+	input.MAC = normalizeMAC(input.MAC)
 	if !validMAC(input.MAC) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "MAC 地址无效"})
 		return

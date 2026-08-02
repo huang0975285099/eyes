@@ -14,7 +14,8 @@ type Config struct {
 }
 
 type SecurityConfig struct {
-	ClientAPIKey string
+	ClientAPIKey      string
+	StreamTokenSecret string
 }
 
 type DatabaseConfig struct {
@@ -40,6 +41,7 @@ type RecordingConfig struct {
 	CenterKey       string // A节点 X-Proxy-Key 值
 	WebPort         int    // 内网管理后台 Web 页面端口，0=不启动
 	SRSHttpHost     string // SRS HTTP-FLV/HLS 对外访问地址（如 10.0.20.219:28080）
+	PublicRTMPHost  string // 客户端推流使用的公网 RTMP 地址（如 112.18.238.6:21935）
 	// NodeID 本节点唯一标识，用于 zone_assignments 表关联。
 	// 优先读 RECORDING_NODE_ID 环境变量，为空则使用 hostname。
 	// 后台修改车间分配后，按 NodeID 匹配并热更新，无需重启。
@@ -49,6 +51,11 @@ type RecordingConfig struct {
 }
 
 func Load() *Config {
+	clientAPIKey := getEnv("CLIENT_API_KEY", "")
+	streamTokenSecret := getEnv("STREAM_TOKEN_SECRET", "")
+	if streamTokenSecret == "" {
+		streamTokenSecret = clientAPIKey
+	}
 	return &Config{
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
@@ -72,11 +79,13 @@ func Load() *Config {
 			CenterKey:       getEnv("RECORDING_CENTER_KEY", ""),
 			WebPort:         atoi("RECORDING_WEB_PORT", "8089"),
 			SRSHttpHost:     getEnv("RECORDING_SRS_HTTP_HOST", ""),
+			PublicRTMPHost:  getEnv("PUBLIC_RTMP_HOST", "112.18.238.6:21935"),
 			NodeID:          getEnv("RECORDING_NODE_ID", ""),
 			NodeName:        getEnv("RECORDING_NODE_NAME", ""),
 		},
 		Security: SecurityConfig{
-			ClientAPIKey: getEnv("CLIENT_API_KEY", ""),
+			ClientAPIKey:      clientAPIKey,
+			StreamTokenSecret: streamTokenSecret,
 		},
 	}
 }

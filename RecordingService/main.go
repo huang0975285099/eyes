@@ -100,9 +100,11 @@ func main() {
 			envZoneIDs, // 环境变量初始值，DB 无配置时回退
 			cfg.Recording.SRSApiBase,
 			cfg.Recording.SRSHttpHost,
+			cfg.Recording.PublicRTMPHost,
 			cfg.Recording.RetainDays,
 			mgr.UpdateRetainDays, // 热更新回调
 			cfg.Security.ClientAPIKey,
+			cfg.Security.StreamTokenSecret,
 		).Start(cfg.Recording.WebPort)
 	}
 

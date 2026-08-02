@@ -10,22 +10,11 @@ function helperPath() {
         : path.join(app.getAppPath(), 'resources', 'screen-helper.exe')
 }
 
-function parseHost(value) {
-    const raw = String(value || '').trim()
-    if (!raw) return { host: '', port: '1935' }
-    try {
-        const url = new URL(raw.includes('://') ? raw : `rtmp://${raw}`)
-        return { host: url.hostname, port: url.port || '1935' }
-    } catch {
-        return { host: '', port: '1935' }
-    }
-}
-
 function publicURL(url) {
     return String(url || '').replace(/([?&]token=)[^&]+/i, '$1***')
 }
 
-export function setupScreenHelper({ hostUrl, srsHost, clientApiKey, onStatus }) {
+export function setupScreenHelper({ recordingServiceURL, clientApiKey, onStatus }) {
     let proc = null
     let stopping = false
     let restartTimer = null
@@ -36,17 +25,21 @@ export function setupScreenHelper({ hostUrl, srsHost, clientApiKey, onStatus }) 
         onStatus?.({ ...state })
     }
 
-    async function token(mac) {
-        if (!hostUrl || !clientApiKey) return ''
-        const response = await fetch(`${hostUrl.replace(/\/$/, '')}/api/srs/stream-token`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Client-Key': clientApiKey },
-            body: JSON.stringify({ mac }),
-            signal: AbortSignal.timeout(5000)
-        })
+    async function getPublishConfig(mac) {
+        if (!recordingServiceURL || !clientApiKey) throw new Error('RecordingService 配置不完整')
+        const response = await fetch(
+            `${recordingServiceURL.replace(/\/$/, '')}/api/streams/publish-config`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Client-Key': clientApiKey },
+                body: JSON.stringify({ mac }),
+                signal: AbortSignal.timeout(5000)
+            }
+        )
         if (!response.ok) throw new Error(`申请推流令牌失败 HTTP ${response.status}`)
         const body = await response.json()
-        return body.token || body.data?.token || ''
+        if (!body.rtmp_url) throw new Error('RecordingService 未返回 rtmp_url')
+        return body
     }
 
     async function start(reason = 'manual') {
@@ -58,14 +51,10 @@ export function setupScreenHelper({ hostUrl, srsHost, clientApiKey, onStatus }) 
             return { ok: false, error: state.error }
         }
         try {
-            const nic = await getPreferredNICAsync(hostUrl)
+            const nic = await getPreferredNICAsync(recordingServiceURL)
             if (!nic.mac) throw new Error('未找到可用网卡 MAC 地址')
-            const endpoint = parseHost(srsHost)
-            if (!endpoint.host) throw new Error('未配置 srsHost')
-            const streamName = nic.mac.replace(/[:-]/g, '').toLowerCase()
-            const streamToken = await token(nic.mac)
-            const query = streamToken ? `?token=${encodeURIComponent(streamToken)}` : ''
-            const rtmp = `rtmp://${endpoint.host}:${endpoint.port}/live/${streamName}${query}`
+            const publishConfig = await getPublishConfig(nic.mac)
+            const rtmp = publishConfig.rtmp_url
             const args = [
                 '--electron-spawned',
                 '--mode',
@@ -73,7 +62,7 @@ export function setupScreenHelper({ hostUrl, srsHost, clientApiKey, onStatus }) 
                 '--fps',
                 '8',
                 '--server-url',
-                hostUrl,
+                recordingServiceURL,
                 '--rtmp',
                 rtmp
             ]

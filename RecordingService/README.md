@@ -7,6 +7,7 @@ Electron -> screen-helper -> FFmpeg -> RTMP :21935 -> SRS
                                                      |-> HLS/HTTP-FLV :28080
                                                      |-> RecordingService -> FFmpeg 分片 -> /var/recordings
 Electron -> HTTP :52350 /api/clients/register -> RecordingService -> MySQL computers
+Electron -> HTTP :52350 /api/streams/publish-config -> 带 token 的 RTMP URL
 ```
 
 RecordingService 通过 Docker 内部地址 `srs:1985` 发现流，通过 `srs:1935` 拉流录制。SRS 的公网端口只供客户端推流和管理页面播放。
