@@ -13,7 +13,9 @@
         "build": "electron-vite build",
         "postinstall": "electron-builder install-app-deps",
         "build:unpack": "pnpm build && electron-builder --dir",
-        "build:win": "pnpm build && electron-builder --win"
+        "build:win": "pnpm build && electron-builder --win",
+        "pack:update": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-update.ps1",
+        "build:update": "pnpm build:win && pnpm pack:update"
     },
     "dependencies": {
         "flv.js": "^1.6.2",

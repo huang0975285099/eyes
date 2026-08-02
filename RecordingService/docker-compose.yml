@@ -61,12 +61,15 @@ services:
       RECORDING_FRAME_RETAIN_DAYS: "30"
       RECORDING_WEB_PORT: "52350"
       RECORDING_SRS_HTTP_HOST: "${RECORDING_SRS_HTTP_HOST:-112.18.238.6:8090}"
+      UPDATE_ADMIN_KEY: "${UPDATE_ADMIN_KEY:-}"
+      CLIENT_UPDATE_DIR: "/var/client-updates"
     ports:
       - "52350:52350"
     networks:
       - rec-net
     volumes:
       - recordings:/var/recordings
+      - client_updates:/var/client-updates
     depends_on:
       mysql:
         condition: service_healthy
@@ -87,6 +90,8 @@ volumes:
       type: none
       o: bind
       device: "${RECORDING_DIR:-/home/test/recordings}"
+  client_updates:
+    driver: local
 
 networks:
   rec-net:

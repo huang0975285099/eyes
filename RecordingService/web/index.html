@@ -205,6 +205,16 @@
       </div>
       <p id="retainDaysHint" style="font-size:12px;color:#999;margin-top:8px"></p>
     </div>
+    <div class="card">
+      <div class="card-title">客户端更新包</div>
+      <div class="filters">
+        <input type="password" id="updateAdminKey" placeholder="更新管理密钥">
+        <input type="file" id="updateZipFile" accept=".zip">
+        <button class="btn btn-primary" id="updateUploadButton" onclick="uploadClientUpdate()">上传 ZIP</button>
+      </div>
+      <p style="font-size:12px;color:#999">ZIP 必须包含 latest.yml 和 latest.yml 指定的 *-setup.exe。</p>
+      <p id="updateUploadStatus" style="font-size:12px;margin-top:8px"></p>
+    </div>
   </div>
 </div>
 
@@ -544,6 +554,36 @@
       }
     } catch (e) {
       alert('保存失败: ' + e.message);
+    }
+  }
+
+  async function uploadClientUpdate() {
+    const key = document.getElementById('updateAdminKey').value.trim();
+    const file = document.getElementById('updateZipFile').files[0];
+    const status = document.getElementById('updateUploadStatus');
+    const button = document.getElementById('updateUploadButton');
+    if (!key || !file) {
+      alert('请输入更新管理密钥并选择 ZIP 文件');
+      return;
+    }
+    const form = new FormData();
+    form.append('file', file);
+    button.disabled = true;
+    status.style.color = '#666';
+    status.textContent = '正在上传并校验更新包...';
+    try {
+      const res = await fetch('/api/client-updates/upload', {
+        method: 'POST', headers: { 'X-Update-Key': key }, body: form
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
+      status.style.color = '#28a745';
+      status.textContent = `上传成功：版本 ${data.update.version}，安装包 ${data.update.path}`;
+    } catch (e) {
+      status.style.color = '#dc3545';
+      status.textContent = '上传失败：' + e.message;
+    } finally {
+      button.disabled = false;
     }
   }
 

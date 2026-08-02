@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu } from 'electron'
-import { execFile } from 'child_process'
+import { app, BrowserWindow, ipcMain, Tray, Menu, dialog } from 'electron'
+import { execFile, spawn } from 'child_process'
+import { createHash } from 'crypto'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import os from 'os'
 import { join } from 'path'
@@ -82,6 +83,74 @@ function saveUserName(value) {
     const file = join(app.getPath('userData'), 'config.json')
     writeFileSync(file, JSON.stringify({ userName }, null, 2), 'utf8')
     return userName
+}
+
+function compareVersions(left, right) {
+    const a = String(left)
+        .split('.')
+        .map((part) => Number.parseInt(part, 10) || 0)
+    const b = String(right)
+        .split('.')
+        .map((part) => Number.parseInt(part, 10) || 0)
+    const length = Math.max(a.length, b.length)
+    for (let index = 0; index < length; index += 1) {
+        if ((a[index] || 0) > (b[index] || 0)) return 1
+        if ((a[index] || 0) < (b[index] || 0)) return -1
+    }
+    return 0
+}
+
+async function checkClientUpdate() {
+    const baseURL = config.recordingServiceURL.replace(/\/$/, '')
+    const response = await fetch(`${baseURL}/api/client-updates/latest`, {
+        signal: AbortSignal.timeout(8000)
+    })
+    if (response.status === 404) return { available: false, currentVersion: app.getVersion() }
+    if (!response.ok) throw new Error(`检查更新失败 HTTP ${response.status}`)
+    const update = await response.json()
+    return {
+        ...update,
+        available: compareVersions(update.version, app.getVersion()) > 0,
+        currentVersion: app.getVersion()
+    }
+}
+
+async function downloadAndInstallUpdate(update) {
+    const baseURL = config.recordingServiceURL.replace(/\/$/, '')
+    const downloadURL = new URL(update.download_url, `${baseURL}/`).toString()
+    const response = await fetch(downloadURL, { signal: AbortSignal.timeout(10 * 60 * 1000) })
+    if (!response.ok) throw new Error(`下载安装包失败 HTTP ${response.status}`)
+    const bytes = Buffer.from(await response.arrayBuffer())
+    const actualSHA512 = createHash('sha512').update(bytes).digest('base64')
+    if (actualSHA512 !== update.sha512) throw new Error('安装包 SHA-512 校验失败')
+    const installerPath = join(app.getPath('temp'), update.path)
+    writeFileSync(installerPath, bytes)
+    const child = spawn(installerPath, [], { detached: true, stdio: 'ignore', windowsHide: false })
+    child.unref()
+    app.isQuiting = true
+    app.quit()
+}
+
+async function promptClientUpdate() {
+    try {
+        const update = await checkClientUpdate()
+        if (!update.available) return update
+        const result = await dialog.showMessageBox(mainWindow, {
+            type: 'info',
+            title: '发现新版本',
+            message: `千里眼 ${update.version} 已发布`,
+            detail: `当前版本：${update.currentVersion}\n是否立即下载并安装更新？`,
+            buttons: ['立即更新', '稍后提醒'],
+            defaultId: 0,
+            cancelId: 1,
+            noLink: true
+        })
+        if (result.response === 0) await downloadAndInstallUpdate(update)
+        return update
+    } catch (error) {
+        console.error('[update] 更新检查失败:', error.message)
+        return { available: false, error: error.message, currentVersion: app.getVersion() }
+    }
 }
 
 async function registerDevice() {
@@ -191,6 +260,8 @@ ipcMain.handle('device:set-user-name', (_event, value) => {
     return registerDevice().then(() => userName)
 })
 ipcMain.handle('stream:restart', () => screenController?.restart('ipc'))
+ipcMain.handle('update:check', () => checkClientUpdate())
+ipcMain.handle('update:install', (_event, update) => downloadAndInstallUpdate(update))
 
 app.whenReady().then(async () => {
     createWindow()
@@ -203,6 +274,7 @@ app.whenReady().then(async () => {
     await registerDevice()
     await screenController.start('app_boot')
     registerTimer = setInterval(registerDevice, 5 * 60 * 1000)
+    setTimeout(promptClientUpdate, 3000)
 })
 
 app.on('before-quit', () => {

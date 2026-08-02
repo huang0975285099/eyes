@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('eyesAPI', {
     registerDevice: () => ipcRenderer.invoke('device:register'),
     setUserName: (value) => ipcRenderer.invoke('device:set-user-name', value),
     restartStream: () => ipcRenderer.invoke('stream:restart'),
+    checkUpdate: () => ipcRenderer.invoke('update:check'),
+    installUpdate: (update) => ipcRenderer.invoke('update:install', update),
     onStreamStatus: (callback) => {
         const listener = (_event, value) => callback(value)
         ipcRenderer.on('stream:status-changed', listener)
