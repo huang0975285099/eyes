@@ -26,7 +26,7 @@ services:
     restart: always
     ports:
       - "1935:1935"   # RTMP 推流
-      - "8090:8080"   # HTTP-FLV 拉流（宿主机 8090 -> SRS 8080）
+      - "8080:8080"   # HTTP-FLV 拉流
     volumes:
       - ./srs.conf:/usr/local/srs/conf/docker.conf:ro
     networks:
