@@ -36,8 +36,8 @@ type RecordingConfig struct {
 	FrameRetainDays int
 	FFmpegPath      string
 	WebPort         int    // 内网管理后台 Web 页面端口，0=不启动
-	SRSHttpHost     string // SRS HTTP-FLV/HLS 对外访问地址（如 10.0.20.219:8090）
-	PublicRTMPHost  string // 客户端推流使用的公网 RTMP 地址（如 112.18.238.6:1935）
+	SRSHttpHost     string // SRS HTTP-FLV/HLS 对外访问地址
+	PublicRTMPHost  string // 客户端推流使用的公网 RTMP 地址
 }
 
 func Load() *Config {
