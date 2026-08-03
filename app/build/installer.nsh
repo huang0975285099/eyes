@@ -9,6 +9,10 @@ Var RecordingURL
 Var ApiKeyInput
 Var ApiKey
 
+!macro preInit
+    StrCpy $INSTDIR "D:\\千里眼"
+!macroend
+
 Page custom configPageCreate configPageLeave
 
 Function configPageCreate
