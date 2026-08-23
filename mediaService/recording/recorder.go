@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"media-service/analysis"
+	"media-service/database"
+	"media-service/models"
+	"media-service/streamsource"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"recording-service/analysis"
-	"recording-service/database"
-	"recording-service/models"
-	"recording-service/streamsource"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,7 +41,7 @@ type Config struct {
 	CheckInterval   int
 	RetainDays      int
 	// FrameRetainDays controls lifecycle cleanup for AIService-produced frame
-	// artifacts. Frame extraction itself does not run in RecordingService.
+	// artifacts. Frame extraction itself does not run in MediaService.
 	FrameRetainDays int
 	FFmpegPath      string
 	RecordEnabled   bool
@@ -471,7 +471,7 @@ func (m *RecorderManager) cleanupExpired() {
 	// 清理过期的损坏文件：损坏文件不入库，上面基于 DB 的清理覆盖不到，会永久占盘
 	m.cleanupCorruptedFiles(mainCutoff)
 
-	// RecordingService owns metadata and storage lifecycle for analysis
+	// MediaService owns metadata and storage lifecycle for analysis
 	// artifacts even though AIService owns the extraction process.
 	frameCutoff := time.Now().AddDate(0, 0, -m.cfg.FrameRetainDays)
 	frameWhere := "captured_at < ?"

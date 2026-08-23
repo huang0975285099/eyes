@@ -5,13 +5,13 @@ ENV GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o recording-service .
+RUN CGO_ENABLED=0 GOOS=linux go build -o media-service .
 
 FROM alpine:3.19
 RUN apk add --no-cache ffmpeg tzdata ca-certificates wget
 ENV TZ=Asia/Shanghai
 WORKDIR /app
-COPY --from=builder /app/recording-service .
+COPY --from=builder /app/media-service .
 VOLUME ["/var/recordings"]
-EXPOSE 52350
-CMD ["./recording-service"]
+EXPOSE 22222
+CMD ["./media-service"]

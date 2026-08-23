@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import __version__
-from .api_client import RecordingAPIClient, RecordingAPIError
+from .api_client import MediaAPIClient, MediaAPIError
 from .config import Settings
 from .modules import AnalysisError, AnalysisResult, AnalyzerRegistry
 from .state import ServiceState
@@ -21,7 +21,7 @@ class AnalysisWorker:
     def __init__(
         self,
         settings: Settings,
-        client: RecordingAPIClient,
+        client: MediaAPIClient,
         registry: AnalyzerRegistry,
         state: ServiceState,
     ) -> None:
@@ -72,7 +72,7 @@ class AnalysisWorker:
                 self._settings.job_lease_seconds,
             )
             self._state.update(last_error="", status="running" if jobs else "idle")
-        except RecordingAPIError as exc:
+        except MediaAPIError as exc:
             self._record_error(str(exc))
             return
 
@@ -117,8 +117,8 @@ class AnalysisWorker:
             self._client.report_failure(
                 self._settings.worker_id, job_id, message, retryable
             )
-        except RecordingAPIError as exc:
-            # The lease will expire and RecordingService will make the job
+        except MediaAPIError as exc:
+            # The lease will expire and MediaService will make the job
             # available again if the report cannot be delivered.
             self._record_error(str(exc))
 
@@ -143,7 +143,7 @@ class AnalysisWorker:
             self._state.update(
                 last_heartbeat_at=datetime.now(timezone.utc).isoformat()
             )
-        except RecordingAPIError as exc:
+        except MediaAPIError as exc:
             self._record_error(str(exc))
 
     def _record_error(self, message: str) -> None:

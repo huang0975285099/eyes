@@ -1,12 +1,12 @@
-# RecordingService
+# MediaService
 
-RecordingService 为千里眼客户端和品牌摄像头提供设备登记、永久 RTMP 推流地址、实时流查看、录像录制和客户端更新服务。数据保存在独立的 `eyes` MySQL 数据库中，不依赖其他业务数据库。
+MediaService 为千里眼客户端和品牌摄像头提供设备登记、永久 RTMP 推流地址、实时流查看、录像录制、AI控制面和客户端更新服务。数据保存在独立的 `eyes` MySQL 数据库中，不依赖其他业务数据库。
 
 ```text
-Electron -> HTTP :52350 -> RecordingService -> MySQL 8.1.0 / eyes
+Electron -> HTTP :22222 -> MediaService -> MySQL 8.1.0 / eyes
 Electron desktop/USB/IP camera -> FFmpeg -> RTMP :1935 -> SRS
                                       |-> HTTP-FLV/HLS :8090
-                                      |-> RecordingService -> 录像文件
+                                      |-> MediaService -> 录像文件
                                       |-> AIService -> 抽帧/后续实时AI
 ```
 
@@ -20,7 +20,7 @@ cp .env.example .env
 
 - `CLIENT_API_KEY`：客户端登记和推流配置接口的共享密钥，必须与 `app/config.json` 的 `apiKey` 一致。
 - `PUBLIC_RTMP_HOST`：客户端可访问的 RTMP 地址，例如 `example.com:1935`。
-- `RECORDING_SRS_HTTP_HOST`：客户端/管理页可访问的 SRS HTTP-FLV/HLS 地址，例如 `example.com:8090`。
+- `MEDIA_SRS_HTTP_HOST`：客户端/管理页可访问的SRS HTTP-FLV/HLS地址，例如`example.com:8090`。
 - `UPDATE_ADMIN_KEY`：客户端更新 ZIP 上传密钥；为空时禁用上传。
 - `RECORDING_DIR`：宿主机录像目录，默认 `/home/test/recordings`，应改为实际磁盘挂载点。
 
@@ -32,31 +32,60 @@ cp .env.example .env
 
 ```bash
 docker compose config -q
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
+docker compose restart srs
 docker compose ps
-docker compose logs -f recording-service ai-service
+docker compose logs -f media-service ai-service
 ```
+
+从旧RecordingService原地升级时，Compose会继续使用历史项目名和
+`recordingservice_mysql_data`、`recordingservice_recordings`数据卷，避免产生空数据库。
+首次启动必须保留`--remove-orphans`，用新的`media-service`容器替换旧
+`recording-service`容器。服务器原部署目录可以继续使用
+`/home/test/recordingservice`，目录名不会影响服务名称。
 
 也可以使用离线部署脚本（脚本会加载镜像 tar 并执行健康检查）：
 
 ```bash
 chmod +x deploy.sh
 ./deploy.sh                 # 使用默认 latest
-./deploy.sh --tag <标签>    # 使用指定 recording-service 镜像标签
+./deploy.sh --tag <标签>    # 使用指定 media-service 镜像标签
 ```
+
+日常发布统一从`mediaService/build.sh`执行。脚本会同时构建并部署MediaService和
+AIService；不传`--target`时会要求输入部署目标：
+
+```bash
+./build.sh                         # 交互选择：1=公网，2=内网
+./build.sh --target 1              # 公网 test@112.18.238.6:2202
+./build.sh --target 2              # 内网 test@10.0.20.219:20
+./build.sh --target 2 --tag v1.0.0 # 指定镜像标签
+```
+
+两个目标都沿用`/home/test/recordingservice`部署目录，但各自保留独立的`.env`，
+构建脚本只上传`.env.example`，不会覆盖生产密钥。内网服务器首次部署前应在该目录
+创建`.env`，并将`PUBLIC_RTMP_HOST`设为`10.0.20.219:1935`、
+`MEDIA_SRS_HTTP_HOST`设为`10.0.20.219:8090`；公网服务器继续使用公网地址。
 
 对外端口：
 
-- `52350`：管理后台和 API
+- `22222`：MediaService管理后台和API
+- `11111`：AIService健康状态和模块列表
 - `1935`：SRS RTMP 推流
 - `8090`：SRS HTTP-FLV/HLS 播放
 
-SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `52350`、`8090` 的来源，并通过 HTTPS 反向代理保护管理接口。
+SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `22222`、`11111`、`8090` 的来源，并通过 HTTPS 反向代理保护管理接口。
 
-录像抽帧已从 RecordingService 的录制进程迁移到独立 `AIService`。RecordingService
+录像抽帧已从 MediaService 的录制进程迁移到独立 `AIService`。MediaService
 在录像片段入库后创建持久化任务，AIService 领取任务、执行FFmpeg并回报图片；两个
 容器共享 `recordings` 卷。已有图片页面、保留期和访问地址保持不变。历史录像会在
 启动时自动补建幂等任务，因此升级时不会漏图或重复入库。
+
+两台目标服务器没有GPU不影响当前`frame_sampler`：抽帧由CPU上的FFmpeg完成。
+`.env`已经预留`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`和`QWEN_VL_MODEL`并传入
+AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合作为低频图片/视频片段
+复核与事件描述，不应直接代替多路实时检测、跟踪和时序模型。API Key、Base URL和模型
+必须属于同一百炼地域；密钥只能保存在服务器`.env`中。
 
 ## 常用接口
 
@@ -74,14 +103,14 @@ SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应
 - `GET /api/client-updates/latest`：客户端检查更新。
 - `POST /api/client-updates/upload`：上传更新 ZIP，必须提供 `X-Update-Key: <UPDATE_ADMIN_KEY>`。
 
-管理后台地址为 `http://<服务器地址>:52350`。更新 ZIP 必须包含 `latest.yml`、对应的 `*-setup.exe`，并且其中的版本、路径和 SHA-512 必须匹配；客户端侧 ZIP 可由 `app` 目录的 `pnpm run build:update` 生成。
+管理后台地址为 `http://<服务器地址>:22222`。更新 ZIP 必须包含 `latest.yml`、对应的 `*-setup.exe`，并且其中的版本、路径和 SHA-512 必须匹配；客户端侧 ZIP 可由 `app` 目录的 `pnpm run build:update` 生成。
 
-RTMP 发布不再使用 token。SRS 发布回调只接受 `video_sources` 中已登记的视频源，以及已经完成电脑登记的旧版桌面流。品牌摄像头后台填写的地址形如 `rtmp://<服务器>:1935/live/camera--<固定标识>`，配置一次即可长期使用。因为地址本身不再提供身份认证，生产环境应限制 1935 端口来源 IP，管理端口 52350 也应仅允许可信内网访问。
+RTMP 发布不再使用 token。SRS 发布回调只接受 `video_sources` 中已登记的视频源，以及已经完成电脑登记的旧版桌面流。品牌摄像头后台填写的地址形如 `rtmp://<服务器>:1935/live/camera--<固定标识>`，配置一次即可长期使用。因为地址本身不再提供身份认证，生产环境应限制1935端口来源IP，管理端口22222也应仅允许可信内网访问。
 
 部分摄像头后台提供一个“推流地址”输入框，直接填写接口返回的 `rtmp_url`；部分后台将其拆成两个输入框，则分别填写 `rtmp_server`（例如 `rtmp://example.com:1935/live`）和 `stream_key`。也可以通过接口登记：
 
 ```bash
-curl -X POST http://<服务器地址>:52350/api/video-sources \
+curl -X POST http://<服务器地址>:22222/api/video-sources \
   -H 'Content-Type: application/json' \
   -d '{"source_id":"north-gate","display_name":"北门摄像头","brand":"camera-brand"}'
 ```

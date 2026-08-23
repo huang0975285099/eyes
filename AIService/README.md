@@ -1,11 +1,11 @@
 # AIService
 
 统一的视频AI分析平台。当前第一个可用模块是 `frame_sampler`：从
-RecordingService 已完成的录像片段中抽取代表性图片，供现有管理后台人工查看。
+MediaService 已完成的录像片段中抽取代表性图片，供现有管理后台人工查看。
 
 ## 服务边界
 
-- RecordingService 管理视频源、录像、AI算法目录、持久化任务、Worker状态和分析结果。
+- MediaService 管理视频源、录像、AI算法目录、持久化任务、Worker状态和分析结果。
 - AIService 领取任务并执行算法，不直接访问 MySQL。
 - 两个服务共享 `/var/recordings` 卷；视频和图片写共享卷，数据库只保存索引。
 - SRS 仍然是实时视频的唯一入口。未来打架、安全帽和火灾模块由 AIService 从
@@ -25,12 +25,12 @@ RecordingService 已完成的录像片段中抽取代表性图片，供现有管
 
 ## 运行
 
-生产部署使用 `RecordingService/docker-compose.yml`，该 Compose 已加入
+生产部署使用 `mediaService/docker-compose.yml`，该 Compose 已加入
 `ai-service` 并共享 `recordings` 卷：
 
 ```bash
-cd RecordingService
-docker compose up -d --build
+cd mediaService
+docker compose up -d --build --remove-orphans
 ```
 
 检查状态：
@@ -38,19 +38,26 @@ docker compose up -d --build
 ```bash
 docker compose ps
 docker compose logs -f ai-service
-curl http://127.0.0.1:52350/api/ai/algorithms
-curl http://127.0.0.1:52350/api/ai/jobs/stats
+curl http://127.0.0.1:22222/api/ai/algorithms
+curl http://127.0.0.1:22222/api/ai/jobs/stats
+curl http://127.0.0.1:11111/health
 ```
 
-AIService 的52351端口仅在Compose内部提供 `/health` 和 `/api/modules`，默认不映射
-到宿主机。AI任务领取、结果和心跳接口也应仅允许Docker网络或可信局域网访问。
+AIService通过11111端口提供`/health`和`/api/modules`。AI任务领取、结果和心跳接口
+位于MediaService的22222端口，应仅允许Docker网络或可信局域网访问。
+
+当前抽帧模块使用CPU和FFmpeg，不要求GPU。Compose已把服务器`.env`中的
+`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`QWEN_VL_MODEL`传入容器，供后续
+Qwen视觉复核模块使用；`frame_sampler`当前不会消耗Qwen额度。Qwen适合对候选截图或
+短视频进行二次判断和生成说明，多路实时打架、安全帽、火灾、入侵检测仍需要专用模型、
+边缘计算或后续GPU Worker。
 
 ## 扩展一个算法
 
 1. 在 `ai_service/modules` 中实现 `Analyzer`。
 2. 为模块指定稳定的 `code`。
 3. 在 `__main__.py` 注册模块。
-4. 在 RecordingService 算法目录启用对应能力并配置视频源规则。
+4. 在 MediaService 算法目录启用对应能力并配置视频源规则。
 5. 图片和视频证据写共享存储，只把路径、时间、置信度和模型版本上报。
 
 实时算法下一阶段会增加共享拉流/解码和帧环形缓存。不要让每一个算法模块独立

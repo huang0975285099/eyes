@@ -40,7 +40,7 @@ type Computer struct {
 
 // VideoSource describes a logical video source belonging to a computer. It is
 // deliberately vendor-neutral: brand-specific connection details stay on the
-// client and never enter RecordingService.
+// client and never enter MediaService.
 type VideoSource struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
 	MAC         string    `gorm:"size:50;not null;uniqueIndex:idx_video_source_identity" json:"mac"`
@@ -93,7 +93,7 @@ type RecordingFrame struct {
 
 // AIAlgorithm is the catalog of analysis capabilities known by the platform.
 // Algorithms can be implemented by different AIService versions without
-// changing RecordingService's event and scheduling model.
+// changing MediaService's event and scheduling model.
 type AIAlgorithm struct {
 	Code              string    `gorm:"size:50;primaryKey" json:"code"`
 	Name              string    `gorm:"size:100;not null" json:"name"`

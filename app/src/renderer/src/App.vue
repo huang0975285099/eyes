@@ -213,8 +213,8 @@ onUnmounted(() => {
         <template v-else>
             <section class="card hero">
                 <div>
-                    <span class="label">RecordingService</span>
-                    <strong>{{ status.config.recordingServiceURL || '-' }}</strong>
+                    <span class="label">MediaService</span>
+                    <strong>{{ status.config.mediaServiceURL || '-' }}</strong>
                     <code>{{ selectedSource().url || '尚未建立 RTMP 连接' }}</code>
                     <p v-if="status.stream.error" class="error">{{ status.stream.error }}</p>
                     <div class="source-status-list">
@@ -274,7 +274,7 @@ onUnmounted(() => {
                         <span :class="['dot', status.registration.ok ? 'ok' : 'bad']"></span>
                     </div>
                     <p>{{ status.registration.message || '尚未登记' }}</p>
-                    <small>{{ status.config.recordingServiceURL }}</small>
+                    <small>{{ status.config.mediaServiceURL }}</small>
                     <div class="user-name-row">
                         <template v-if="!editingUserName">
                             当前用户：<strong>{{ status.system.user_name || '无' }}</strong>

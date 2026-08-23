@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import signal
 
-from .api_client import RecordingAPIClient
+from .api_client import MediaAPIClient
 from .config import Settings
 from .health import start_health_server
 from .modules import AnalyzerRegistry, FrameSamplerAnalyzer
@@ -28,8 +28,8 @@ def main() -> None:
     )
     state = ServiceState(settings.worker_id, registry.capabilities)
     health_server = start_health_server(state, settings.health_port)
-    client = RecordingAPIClient(
-        settings.recording_api, settings.request_timeout_seconds
+    client = MediaAPIClient(
+        settings.media_api, settings.request_timeout_seconds
     )
     worker = AnalysisWorker(settings, client, registry, state)
 

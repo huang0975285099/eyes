@@ -1,26 +1,34 @@
 #!/bin/bash
 
-# RecordingService - 本地构建并自动上传脚本（在有 Docker 的机器上使用）
-# 使用方法: ./build.sh [-t tag] [--no-cache] [-h]
+# MediaService - 本地构建并自动上传脚本（在有 Docker 的机器上使用）
+# 使用方法: ./build.sh [--target 1|2] [-t tag] [--no-cache] [-h]
 #
 # 离线部署流程：
-#   1. 本脚本在有网络的机器上构建 recording-service 镜像并导出 tar
+#   1. 本脚本在有网络的机器上构建 media-service 镜像并导出 tar
 #   2. 连同 SRS、MySQL 镜像一起 scp 到目标服务器
 #   3. 远程执行 deploy.sh 完成 load + 启动
 
 set -e
 
+# 无论从哪个目录调用，都以脚本所在目录作为构建上下文。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
 # 默认值
-IMAGE_NAME="recording-service"
+IMAGE_NAME="media-service"
 AI_IMAGE_NAME="eyes-ai-service"
 TAG="latest"
 BUILD_NO_CACHE=false
+DEPLOY_TARGET=""
 
 # ================= 目标服务器配置 =================
-# 服务器无网络，需离线打包上传
+# 两台服务器都使用同一部署用户和历史目录；生产 .env 只保存在各自服务器上。
 REMOTE_USER="test"
-REMOTE_IP="112.18.238.6"
-REMOTE_PORT="2202"
+PUBLIC_REMOTE_IP="112.18.238.6"
+PUBLIC_REMOTE_PORT="2202"
+INTRANET_REMOTE_IP="10.0.20.219"
+INTRANET_REMOTE_PORT="20"
+# 保留现有服务器目录，避免升级时丢失其中的生产 .env。
 REMOTE_DIR="/home/test/recordingservice/"
 # =================================================
 
@@ -33,6 +41,14 @@ MYSQL_TAR="mysql-8.1.0.tar"
 # 解析参数
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --target)
+            if [ $# -lt 2 ]; then
+                echo "错误: --target 后必须指定 1（公网）或 2（内网）"
+                exit 1
+            fi
+            DEPLOY_TARGET="$2"
+            shift 2
+            ;;
         -t|--tag)
             if [ $# -lt 2 ] || [[ ! "$2" =~ ^[A-Za-z0-9_.-]+$ ]]; then
                 echo "错误: 镜像标签只能包含字母、数字、点、下划线和连字符"
@@ -50,15 +66,19 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "用法: $0 [-t tag] [--no-cache]"
+            echo "用法: $0 [--target 1|2] [-t tag] [--no-cache]"
             echo ""
             echo "参数:"
+            echo "  --target      部署目标：1=公网，2=内网；不指定时交互选择"
             echo "  -t, --tag     指定镜像标签 (默认: latest)"
             echo "  --no-cache    不使用缓存，强制重新构建"
             echo "  --cache       使用缓存构建"
             echo "  -h, --help    显示帮助信息"
             echo ""
-            echo "目标服务器: ${REMOTE_USER}@${REMOTE_IP}:${REMOTE_PORT} -> ${REMOTE_DIR}"
+            echo "目标服务器:"
+            echo "  1) 公网 ${REMOTE_USER}@${PUBLIC_REMOTE_IP}:${PUBLIC_REMOTE_PORT}"
+            echo "  2) 内网 ${REMOTE_USER}@${INTRANET_REMOTE_IP}:${INTRANET_REMOTE_PORT}"
+            echo "远程目录: ${REMOTE_DIR}"
             exit 0
             ;;
         *)
@@ -68,16 +88,47 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ -z "${DEPLOY_TARGET}" ]; then
+    echo "请选择部署目标："
+    echo "  1) 公网 ${REMOTE_USER}@${PUBLIC_REMOTE_IP}:${PUBLIC_REMOTE_PORT}"
+    echo "  2) 内网 ${REMOTE_USER}@${INTRANET_REMOTE_IP}:${INTRANET_REMOTE_PORT}"
+    if ! read -r -p "请输入 1 或 2: " DEPLOY_TARGET; then
+        echo "错误: 无法读取部署目标；非交互执行请使用 --target 1 或 --target 2"
+        exit 1
+    fi
+fi
+
+# 兼容从Windows终端管道输入时可能携带的CR字符。
+DEPLOY_TARGET="${DEPLOY_TARGET//$'\r'/}"
+
+case "${DEPLOY_TARGET}" in
+    1)
+        TARGET_NAME="公网"
+        REMOTE_IP="${PUBLIC_REMOTE_IP}"
+        REMOTE_PORT="${PUBLIC_REMOTE_PORT}"
+        ;;
+    2)
+        TARGET_NAME="内网"
+        REMOTE_IP="${INTRANET_REMOTE_IP}"
+        REMOTE_PORT="${INTRANET_REMOTE_PORT}"
+        ;;
+    *)
+        echo "错误: 部署目标只能是 1（公网）或 2（内网），当前值: ${DEPLOY_TARGET}"
+        exit 1
+        ;;
+esac
+
 FULL_IMAGE_NAME="${IMAGE_NAME}:${TAG}"
 TAR_FILE="${IMAGE_NAME}-${TAG}.tar"
 AI_FULL_IMAGE_NAME="${AI_IMAGE_NAME}:${TAG}"
 AI_TAR_FILE="${AI_IMAGE_NAME}-${TAG}.tar"
 
 echo "=========================================="
-echo "  RecordingService - 构建应用镜像"
+echo "  MediaService - 构建应用镜像"
 echo "=========================================="
 echo "  镜像名称: ${FULL_IMAGE_NAME}"
 echo "  构建时间: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "  部署目标: ${TARGET_NAME}"
 echo "  目标服务器: ${REMOTE_USER}@${REMOTE_IP}:${REMOTE_PORT}"
 echo "  远程目录: ${REMOTE_DIR}"
 echo "=========================================="

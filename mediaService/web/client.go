@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"recording-service/database"
-	"recording-service/models"
+	"media-service/database"
+	"media-service/models"
 
 	"gorm.io/gorm/clause"
 )

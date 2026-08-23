@@ -3,8 +3,8 @@ package database
 import (
 	"fmt"
 	"log"
-	"recording-service/config"
-	"recording-service/models"
+	"media-service/config"
+	"media-service/models"
 	"time"
 
 	"gorm.io/driver/mysql"
@@ -20,7 +20,7 @@ const (
 )
 
 // Init waits for MySQL, configures the connection pool, and creates or updates
-// every table owned by RecordingService.
+// every table owned by MediaService.
 func Init(cfg *config.Config) error {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s&parseTime=True&loc=Local&timeout=5s&readTimeout=10s&writeTimeout=10s",
 		cfg.Database.User,

@@ -9,7 +9,7 @@ import { setupScreenHelper } from './screen-helper-main'
 import { getPreferredNICAsync } from './network-util'
 
 const DEFAULT_CONFIG = {
-    recordingServiceURL: 'http://112.18.238.6:52350',
+    mediaServiceURL: 'http://112.18.238.6:22222',
     apiKey: 'Yx7pK4vN9mQ2tR8wF6cH3sD5jL1aZ0eB',
     userName: '',
     videoSources: [{ id: 'desktop', type: 'screen', displayName: '电脑桌面', enabled: true }]
@@ -40,6 +40,16 @@ function showMainWindow() {
     mainWindow.focus()
 }
 
+function migrateLegacyMediaServiceURL(value) {
+    try {
+        const url = new URL(String(value || ''))
+        if (url.port === '52350') url.port = '22222'
+        return url.toString().replace(/\/$/, '')
+    } catch {
+        return String(value || '').trim()
+    }
+}
+
 function loadConfig() {
     const candidates =
         process.env.NODE_ENV === 'development'
@@ -51,7 +61,21 @@ function loadConfig() {
     let loaded = { ...DEFAULT_CONFIG }
     for (const file of [...candidates, join(app.getPath('userData'), 'config.json')]) {
         try {
-            if (existsSync(file)) loaded = { ...loaded, ...JSON.parse(readFileSync(file, 'utf8')) }
+            if (existsSync(file)) {
+                const fileConfig = JSON.parse(readFileSync(file, 'utf8'))
+                // 兼容升级前已经安装客户端的旧配置字段。
+                if (!fileConfig.mediaServiceURL && fileConfig.recordingServiceURL) {
+                    fileConfig.mediaServiceURL = migrateLegacyMediaServiceURL(
+                        fileConfig.recordingServiceURL
+                    )
+                }
+                if (fileConfig.mediaServiceURL) {
+                    fileConfig.mediaServiceURL = migrateLegacyMediaServiceURL(
+                        fileConfig.mediaServiceURL
+                    )
+                }
+                loaded = { ...loaded, ...fileConfig }
+            }
         } catch (error) {
             console.error(`[config] 读取失败 ${file}:`, error.message)
         }
@@ -79,7 +103,7 @@ function getDiskSerial() {
 }
 
 async function collectSystemInfo() {
-    const nic = await getPreferredNICAsync(config.recordingServiceURL)
+    const nic = await getPreferredNICAsync(config.mediaServiceURL)
     const cpus = os.cpus()
     return {
         ip: nic.ip,
@@ -128,7 +152,7 @@ function compareVersions(left, right) {
 }
 
 async function checkClientUpdate() {
-    const baseURL = config.recordingServiceURL.replace(/\/$/, '')
+    const baseURL = config.mediaServiceURL.replace(/\/$/, '')
     const response = await fetch(`${baseURL}/api/client-updates/latest`, {
         signal: AbortSignal.timeout(8000)
     })
@@ -143,7 +167,7 @@ async function checkClientUpdate() {
 }
 
 async function downloadAndInstallUpdate(update) {
-    const baseURL = config.recordingServiceURL.replace(/\/$/, '')
+    const baseURL = config.mediaServiceURL.replace(/\/$/, '')
     const downloadURL = new URL(update.download_url, `${baseURL}/`).toString()
     const response = await fetch(downloadURL, { signal: AbortSignal.timeout(10 * 60 * 1000) })
     if (!response.ok) throw new Error(`下载安装包失败 HTTP ${response.status}`)
@@ -181,10 +205,10 @@ async function promptClientUpdate() {
 }
 
 async function registerDevice() {
-    if (!config.recordingServiceURL) {
+    if (!config.mediaServiceURL) {
         lastRegistration = {
             ok: false,
-            message: '未配置 recordingServiceURL',
+            message: '未配置 mediaServiceURL',
             at: new Date().toISOString()
         }
         return lastRegistration
@@ -196,7 +220,7 @@ async function registerDevice() {
         const registrationPayload = { ...info }
         delete registrationPayload.public_ip
         const response = await fetch(
-            `${config.recordingServiceURL.replace(/\/$/, '')}/api/clients/register`,
+            `${config.mediaServiceURL.replace(/\/$/, '')}/api/clients/register`,
             {
                 method: 'POST',
                 headers: {
@@ -283,7 +307,7 @@ function createTray() {
 
 ipcMain.handle('app:get-status', async () => ({
     config: {
-        recordingServiceURL: config.recordingServiceURL
+        mediaServiceURL: config.mediaServiceURL
     },
     system: await collectSystemInfo(),
     registration: lastRegistration,
@@ -307,7 +331,7 @@ app.whenReady().then(async () => {
     // Windows 登录启动时保持后台运行，用户可从托盘打开窗口。
     createTray()
     screenController = setupScreenHelper({
-        recordingServiceURL: config.recordingServiceURL,
+        mediaServiceURL: config.mediaServiceURL,
         clientApiKey: config.apiKey,
         videoSources: config.videoSources,
         onStatus: (status) => mainWindow?.webContents.send('stream:status-changed', status)

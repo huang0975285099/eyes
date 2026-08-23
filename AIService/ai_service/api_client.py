@@ -6,11 +6,11 @@ import urllib.request
 from typing import Any
 
 
-class RecordingAPIError(RuntimeError):
+class MediaAPIError(RuntimeError):
     pass
 
 
-class RecordingAPIClient:
+class MediaAPIClient:
     def __init__(self, base_url: str, timeout_seconds: float) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
@@ -33,7 +33,7 @@ class RecordingAPIClient:
         )
         jobs = response.get("jobs", [])
         if not isinstance(jobs, list):
-            raise RecordingAPIError("claim response does not contain a jobs list")
+            raise MediaAPIError("claim response does not contain a jobs list")
         return jobs
 
     def report_success(
@@ -104,18 +104,18 @@ class RecordingAPIClient:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RecordingAPIError(
-                f"RecordingService returned HTTP {exc.code}: {detail}"
+            raise MediaAPIError(
+                f"MediaService returned HTTP {exc.code}: {detail}"
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RecordingAPIError(f"RecordingService request failed: {exc}") from exc
+            raise MediaAPIError(f"MediaService request failed: {exc}") from exc
 
         if not raw:
             return {}
         try:
             value = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RecordingAPIError("RecordingService returned invalid JSON") from exc
+            raise MediaAPIError("MediaService returned invalid JSON") from exc
         if not isinstance(value, dict):
-            raise RecordingAPIError("RecordingService returned a non-object JSON value")
+            raise MediaAPIError("MediaService returned a non-object JSON value")
         return value

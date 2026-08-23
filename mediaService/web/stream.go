@@ -4,10 +4,10 @@ import (
 	"crypto/hmac"
 	"encoding/json"
 	"fmt"
+	"media-service/database"
+	"media-service/models"
+	"media-service/streamsource"
 	"net/http"
-	"recording-service/database"
-	"recording-service/models"
-	"recording-service/streamsource"
 	"strings"
 
 	"gorm.io/gorm/clause"
@@ -99,7 +99,7 @@ func (s *Server) handleSRSPublish(w http.ResponseWriter, r *http.Request) {
 
 // allowedPublishStream performs no token authentication. It accepts registered
 // video sources and, for old desktop clients, a legacy MAC stream belonging to
-// a computer already registered in RecordingService.
+// a computer already registered in MediaService.
 func (s *Server) allowedPublishStream(streamName string) bool {
 	var count int64
 	database.DB.Model(&models.VideoSource{}).

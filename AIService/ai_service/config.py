@@ -30,7 +30,7 @@ def _positive_float(name: str, default: float) -> float:
 
 @dataclass(frozen=True)
 class Settings:
-    recording_api: str
+    media_api: str
     recording_root: Path
     worker_id: str
     concurrency: int
@@ -47,8 +47,9 @@ class Settings:
     def from_env(cls) -> "Settings":
         default_worker = f"{socket.gethostname()}-{os.getpid()}"
         return cls(
-            recording_api=os.getenv(
-                "AI_RECORDING_API", "http://recording-service:52350"
+            media_api=os.getenv(
+                "AI_MEDIA_API",
+                os.getenv("AI_RECORDING_API", "http://media-service:22222"),
             ).rstrip("/"),
             recording_root=Path(
                 os.getenv("AI_RECORDING_ROOT", "/var/recordings")
@@ -64,5 +65,5 @@ class Settings:
             ffmpeg_path=os.getenv("AI_FFMPEG_PATH", "ffmpeg"),
             ffprobe_path=os.getenv("AI_FFPROBE_PATH", "ffprobe"),
             ffmpeg_timeout_seconds=_positive_int("AI_FFMPEG_TIMEOUT", 120),
-            health_port=_positive_int("AI_HEALTH_PORT", 52351),
+            health_port=_positive_int("AI_HEALTH_PORT", 11111),
         )

@@ -1,3 +1,7 @@
+# Keep the historical Compose project name so an in-place upgrade reuses the
+# existing MySQL/recording volumes and can remove the old service container.
+name: recordingservice
+
 services:
   mysql:
     image: mysql:8.1.0
@@ -37,9 +41,9 @@ services:
       timeout: 3s
       retries: 10
 
-  recording-service:
+  media-service:
     build: .
-    image: "${RECORDING_IMAGE:-recording-service:latest}"
+    image: "${MEDIA_IMAGE:-media-service:latest}"
     restart: always
     environment:
       DB_HOST: "mysql"
@@ -58,12 +62,12 @@ services:
       RECORDING_CHECK_INTERVAL: "30"
       RECORDING_RETAIN_DAYS: "2"
       RECORDING_FRAME_RETAIN_DAYS: "30"
-      RECORDING_WEB_PORT: "52350"
-      RECORDING_SRS_HTTP_HOST: "${RECORDING_SRS_HTTP_HOST:-112.18.238.6:8090}"
+      MEDIA_WEB_PORT: "22222"
+      MEDIA_SRS_HTTP_HOST: "${MEDIA_SRS_HTTP_HOST:-112.18.238.6:8090}"
       UPDATE_ADMIN_KEY: "${UPDATE_ADMIN_KEY:-}"
       CLIENT_UPDATE_DIR: "/var/client-updates"
     ports:
-      - "52350:52350"
+      - "22222:22222"
     networks:
       - rec-net
     volumes:
@@ -75,7 +79,7 @@ services:
       srs:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:52350/api/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:22222/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -87,7 +91,7 @@ services:
     image: "${AI_IMAGE:-eyes-ai-service:latest}"
     restart: always
     environment:
-      AI_RECORDING_API: "http://recording-service:52350"
+      AI_MEDIA_API: "http://media-service:22222"
       AI_RECORDING_ROOT: "/var/recordings"
       AI_WORKER_ID: "${AI_WORKER_ID:-ai-worker-01}"
       AI_CONCURRENCY: "${AI_CONCURRENCY:-4}"
@@ -96,16 +100,22 @@ services:
       AI_JOB_LEASE_SECONDS: "${AI_JOB_LEASE_SECONDS:-300}"
       AI_REQUEST_TIMEOUT: "${AI_REQUEST_TIMEOUT:-15}"
       AI_FFMPEG_TIMEOUT: "${AI_FFMPEG_TIMEOUT:-120}"
-      AI_HEALTH_PORT: "52351"
+      AI_HEALTH_PORT: "11111"
+      # 预留给后续Qwen视觉复核模块；当前frame_sampler不会调用模型API。
+      DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
+      DASHSCOPE_BASE_URL: "${DASHSCOPE_BASE_URL:-}"
+      QWEN_VL_MODEL: "${QWEN_VL_MODEL:-}"
+    ports:
+      - "11111:11111"
     networks:
       - rec-net
     volumes:
       - recordings:/var/recordings
     depends_on:
-      recording-service:
+      media-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:52351/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:11111/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -113,13 +123,16 @@ services:
 
 volumes:
   mysql_data:
+    name: recordingservice_mysql_data
   recordings:
+    name: recordingservice_recordings
     driver: local
     driver_opts:
       type: none
       o: bind
       device: "${RECORDING_DIR:-/home/test/recordings}"
   client_updates:
+    name: recordingservice_client_updates
     driver: local
 
 networks:

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# RecordingService - 离线部署脚本
+# MediaService - 离线部署脚本
 # 使用方法: ./deploy.sh
 #
 # 在目标服务器上执行（无需网络），加载 build.sh 上传的镜像并启动服务。
@@ -8,7 +8,7 @@
 set -e
 
 # 镜像配置
-IMAGE_NAME="recording-service"
+IMAGE_NAME="media-service"
 AI_IMAGE_NAME="eyes-ai-service"
 TAG="latest"
 SRS_IMAGE="ossrs/srs:5"
@@ -34,7 +34,7 @@ fi
 
 TAR_FILE="${IMAGE_NAME}-${TAG}.tar"
 AI_TAR_FILE="${AI_IMAGE_NAME}-${TAG}.tar"
-export RECORDING_IMAGE="${IMAGE_NAME}:${TAG}"
+export MEDIA_IMAGE="${IMAGE_NAME}:${TAG}"
 export AI_IMAGE="${AI_IMAGE_NAME}:${TAG}"
 
 # docker / docker compose 命令前缀（自动检测是否需要 sudo）
@@ -47,7 +47,7 @@ else
 fi
 
 echo "=========================================="
-echo "  RecordingService - 离线部署脚本"
+echo "  MediaService - 离线部署脚本"
 echo "=========================================="
 echo "  部署时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  录像目录: ${RECORDING_DIR}"
@@ -125,7 +125,7 @@ fi
 
 # 加载应用镜像（始终加载，确保覆盖旧版本）
 echo ""
-echo "[4/6] 加载 recording-service 镜像..."
+echo "[4/6] 加载 media-service 镜像..."
 if [ -f "${TAR_FILE}" ]; then
     ${DOCKER} load -i "${TAR_FILE}"
     echo "  ✓ 应用镜像加载完成"
@@ -149,15 +149,17 @@ APP_SIZE=$(${DOCKER} images "${IMAGE_NAME}:${TAG}" --format "{{.Size}}" 2>/dev/n
 AI_SIZE=$(${DOCKER} images "${AI_IMAGE_NAME}:${TAG}" --format "{{.Size}}" 2>/dev/null)
 SRS_SIZE=$(${DOCKER} images "${SRS_IMAGE}" --format "{{.Size}}" 2>/dev/null)
 MYSQL_SIZE=$(${DOCKER} images "${MYSQL_IMAGE}" --format "{{.Size}}" 2>/dev/null)
-echo "  ✓ recording-service:${TAG} → ${APP_SIZE}"
+echo "  ✓ media-service:${TAG} → ${APP_SIZE}"
 echo "  ✓ ${AI_IMAGE_NAME}:${TAG} → ${AI_SIZE}"
 echo "  ✓ ${SRS_IMAGE} → ${SRS_SIZE}"
 echo "  ✓ ${MYSQL_IMAGE} → ${MYSQL_SIZE}"
 
 # 启动服务
 echo ""
-echo "[6/6] 启动服务（recording-service + AIService + SRS + MySQL）..."
-${COMPOSE} up -d --no-build
+echo "[6/6] 启动服务（media-service + AIService + SRS + MySQL）..."
+${COMPOSE} up -d --no-build --remove-orphans
+# srs.conf中的回调服务名和端口已变更，必须重启SRS进程加载新配置。
+${COMPOSE} restart srs
 
 # 等待服务启动
 echo ""
@@ -171,7 +173,7 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     ELAPSED=$((ELAPSED + WAIT_INTERVAL))
 
     ALL_HEALTHY=true
-    for SERVICE in mysql srs recording-service ai-service; do
+    for SERVICE in mysql srs media-service ai-service; do
         CONTAINER_ID=$(${COMPOSE} ps -a -q "${SERVICE}")
         if [ -z "${CONTAINER_ID}" ]; then
             ALL_HEALTHY=false
@@ -223,7 +225,8 @@ echo ""
 echo "=========================================="
 echo "  访问地址:"
 REMOTE_IP=$(hostname -I | awk '{print $1}')
-echo "    - 录像回放 Web: http://${REMOTE_IP}:52350"
+echo "    - MediaService:  http://${REMOTE_IP}:22222"
+echo "    - AIService:     http://${REMOTE_IP}:11111/health"
 echo "    - RTMP 推流:     rtmp://${REMOTE_IP}:1935/live/{流名}"
 echo "    - HTTP-FLV:      http://${REMOTE_IP}:8090/live/{流名}.flv"
 echo "    - SRS HTTP API:  仅 Docker 内部 http://srs:1985"

@@ -12,5 +12,5 @@ WORKDIR /app
 COPY ai_service ./ai_service
 
 VOLUME ["/var/recordings"]
-EXPOSE 52351
+EXPOSE 11111
 CMD ["python", "-m", "ai_service"]

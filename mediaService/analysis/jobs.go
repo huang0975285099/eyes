@@ -3,8 +3,8 @@ package analysis
 import (
 	"fmt"
 	"log"
-	"recording-service/database"
-	"recording-service/models"
+	"media-service/database"
+	"media-service/models"
 	"time"
 
 	"gorm.io/gorm/clause"

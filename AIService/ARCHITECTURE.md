@@ -2,12 +2,12 @@
 
 ## 当前阶段
 
-当前实现的是离线任务通道：RecordingService完成录像并建立索引后，创建
+当前实现的是离线任务通道：MediaService完成录像并建立索引后，创建
 `frame_sampler`任务；AIService通过租约领取任务，执行抽帧，并把图片索引回报给
-RecordingService。任务状态存放在MySQL，AIService重启不会丢任务。
+MediaService。任务状态存放在MySQL，AIService重启不会丢任务。
 
 ```text
-SRS -> RecordingService -> MP4 + AIJob
+SRS -> MediaService -> MP4 + AIJob
                               |
                               v
                         AIService Worker
@@ -21,7 +21,7 @@ SRS -> RecordingService -> MP4 + AIJob
 打架、安全帽和火灾不应使用低频录像抽帧。下一阶段在AIService增加实时数据通道：
 
 ```text
-RecordingService 视频源与规则
+MediaService 视频源与规则
               |
               v
        Realtime Task Manager
@@ -53,6 +53,6 @@ RecordingService 视频源与规则
 - `frame_sampler`：当前已实现的录像片段抽帧模块。
 - `StreamManager`：下一阶段实现在线流同步、拉流、重连和共享解码。
 - `EventAggregator`：下一阶段实现连续命中、事件合并、冷却和证据导出。
-- RecordingService：始终是配置、任务、事件、录像索引和后台页面的控制中心。
+- MediaService：始终是配置、任务、事件、录像索引和后台页面的控制中心。
 
 `fight`、`helmet`、`fire`已经进入算法目录但保持禁用，避免未接入模型时产生虚假能力。

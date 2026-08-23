@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"log"
+	"media-service/analysis"
+	"media-service/config"
+	"media-service/database"
+	"media-service/models"
+	"media-service/recording"
+	"media-service/web"
 	"os"
 	"os/signal"
-	"recording-service/analysis"
-	"recording-service/config"
-	"recording-service/database"
-	"recording-service/models"
-	"recording-service/recording"
-	"recording-service/web"
 	"syscall"
 
 	"github.com/joho/godotenv"
@@ -61,7 +61,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go mgr.Run(ctx)
-	log.Println("[main] RecordingService 已启动")
+	log.Println("[main] MediaService 已启动")
 
 	if cfg.Recording.WebPort > 0 {
 		go web.NewServer(

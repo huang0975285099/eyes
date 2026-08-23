@@ -34,7 +34,7 @@ declare global {
     interface Window {
         eyesAPI: {
             getStatus: () => Promise<{
-                config: { recordingServiceURL: string }
+                config: { mediaServiceURL: string }
                 system: SystemInfo
                 registration: RegistrationStatus
                 stream: StreamStatus

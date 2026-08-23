@@ -132,7 +132,7 @@ function cameraFFmpegArgs(source, rtmpURL) {
     return args
 }
 
-export function setupScreenHelper({ recordingServiceURL, clientApiKey, videoSources, onStatus }) {
+export function setupScreenHelper({ mediaServiceURL, clientApiKey, videoSources, onStatus }) {
     let sources
     let configurationError = ''
     try {
@@ -180,9 +180,9 @@ export function setupScreenHelper({ recordingServiceURL, clientApiKey, videoSour
     }
 
     async function getPublishConfig(mac, source) {
-        if (!recordingServiceURL || !clientApiKey) throw new Error('RecordingService 配置不完整')
+        if (!mediaServiceURL || !clientApiKey) throw new Error('MediaService 配置不完整')
         const response = await fetch(
-            `${recordingServiceURL.replace(/\/$/, '')}/api/streams/publish-config`,
+            `${mediaServiceURL.replace(/\/$/, '')}/api/streams/publish-config`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-Client-Key': clientApiKey },
@@ -198,7 +198,7 @@ export function setupScreenHelper({ recordingServiceURL, clientApiKey, videoSour
         const body = await response.json().catch(() => ({}))
         if (!response.ok)
             throw new Error(body.message || `申请推流地址失败 HTTP ${response.status}`)
-        if (!body.rtmp_url) throw new Error('RecordingService 未返回 rtmp_url')
+        if (!body.rtmp_url) throw new Error('MediaService 未返回 rtmp_url')
         return body
     }
 
@@ -218,7 +218,7 @@ export function setupScreenHelper({ recordingServiceURL, clientApiKey, videoSour
         try {
             let sourceMAC = mac
             if (!sourceMAC) {
-                const nic = await getPreferredNICAsync(recordingServiceURL)
+                const nic = await getPreferredNICAsync(mediaServiceURL)
                 sourceMAC = nic.mac
             }
             if (!sourceMAC) throw new Error('未找到可用网卡 MAC 地址')
@@ -236,7 +236,7 @@ export function setupScreenHelper({ recordingServiceURL, clientApiKey, videoSour
                     '--fps',
                     String(source.fps),
                     '--server-url',
-                    recordingServiceURL,
+                    mediaServiceURL,
                     '--rtmp',
                     rtmpURL
                 ]
@@ -295,7 +295,7 @@ export function setupScreenHelper({ recordingServiceURL, clientApiKey, videoSour
             onStatus?.(status())
             return { ok: false, error: configurationError }
         }
-        const nic = await getPreferredNICAsync(recordingServiceURL)
+        const nic = await getPreferredNICAsync(mediaServiceURL)
         if (!nic.mac) {
             const error = '未找到可用网卡 MAC 地址'
             for (const source of sources) updateSource(source.id, { running: false, error })
