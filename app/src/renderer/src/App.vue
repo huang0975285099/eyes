@@ -5,6 +5,7 @@ import flvjs from 'flv.js'
 const loading = ref(true)
 const status = ref({ system: {}, registration: {}, stream: {}, config: {} })
 const videoRef = ref(null)
+const selectedSourceID = ref('')
 const playbackStatus = ref('等待推流')
 const playbackError = ref('')
 const editingUserName = ref(false)
@@ -32,8 +33,36 @@ function destroyPlayer() {
     flvPlayer = undefined
 }
 
+function streamSources() {
+    const sources = status.value.stream.sources
+    if (Array.isArray(sources) && sources.length) return sources
+    return [
+        {
+            id: 'desktop',
+            type: 'screen',
+            displayName: '电脑桌面',
+            running: status.value.stream.running,
+            url: status.value.stream.url,
+            error: status.value.stream.error
+        }
+    ]
+}
+
+function ensureSelectedSource() {
+    const sources = streamSources()
+    if (!sources.some((source) => source.id === selectedSourceID.value)) {
+        selectedSourceID.value =
+            sources.find((source) => source.running)?.id || sources[0]?.id || ''
+    }
+}
+
+function selectedSource() {
+    ensureSelectedSource()
+    return streamSources().find((source) => source.id === selectedSourceID.value) || {}
+}
+
 function playbackURL() {
-    const rtmpURL = status.value.stream.url
+    const rtmpURL = selectedSource().url
     if (!rtmpURL) return ''
     try {
         const parsed = new URL(rtmpURL)
@@ -48,8 +77,10 @@ function playbackURL() {
 async function startPlayback() {
     destroyPlayer()
     playbackError.value = ''
-    if (!status.value.stream.running) {
+    const source = selectedSource()
+    if (!source.running) {
         playbackStatus.value = '推流未启动'
+        playbackError.value = source.error || ''
         return
     }
     const url = playbackURL()
@@ -88,6 +119,7 @@ async function startPlayback() {
 
 async function refresh() {
     status.value = await window.eyesAPI.getStatus()
+    ensureSelectedSource()
     loading.value = false
 }
 
@@ -149,6 +181,7 @@ onMounted(async () => {
     startPlayback()
     offStream = window.eyesAPI.onStreamStatus((value) => {
         status.value.stream = value
+        ensureSelectedSource()
         startPlayback()
     })
     offRegistration = window.eyesAPI.onRegistration((value) => {
@@ -182,8 +215,17 @@ onUnmounted(() => {
                 <div>
                     <span class="label">RecordingService</span>
                     <strong>{{ status.config.recordingServiceURL || '-' }}</strong>
-                    <code>{{ status.stream.url || '尚未建立 RTMP 连接' }}</code>
+                    <code>{{ selectedSource().url || '尚未建立 RTMP 连接' }}</code>
                     <p v-if="status.stream.error" class="error">{{ status.stream.error }}</p>
+                    <div class="source-status-list">
+                        <span
+                            v-for="source in streamSources()"
+                            :key="source.id"
+                            :class="['source-chip', source.running ? 'online' : 'offline']"
+                        >
+                            {{ source.displayName }} · {{ source.running ? '在线' : '离线' }}
+                        </span>
+                    </div>
                 </div>
                 <button @click="restartStream">重新推流</button>
             </section>
@@ -194,9 +236,26 @@ onUnmounted(() => {
                         <span class="label">MY LIVE VIEW</span>
                         <h2>我的监控画面</h2>
                     </div>
-                    <span :class="['badge', playbackStatus === '实时画面' ? 'online' : 'offline']">
-                        {{ playbackStatus }}
-                    </span>
+                    <div class="monitor-controls">
+                        <select
+                            v-if="streamSources().length > 1"
+                            v-model="selectedSourceID"
+                            @change="startPlayback"
+                        >
+                            <option
+                                v-for="source in streamSources()"
+                                :key="source.id"
+                                :value="source.id"
+                            >
+                                {{ source.displayName }}
+                            </option>
+                        </select>
+                        <span
+                            :class="['badge', playbackStatus === '实时画面' ? 'online' : 'offline']"
+                        >
+                            {{ playbackStatus }}
+                        </span>
+                    </div>
                 </div>
                 <div class="video-wrap">
                     <video ref="videoRef" muted autoplay playsinline controls></video>
@@ -205,7 +264,7 @@ onUnmounted(() => {
                         <small v-if="playbackError">{{ playbackError }}</small>
                     </div>
                 </div>
-                <p class="monitor-note">仅显示本机当前正在推送的实时画面，播放异常时会自动重连。</p>
+                <p class="monitor-note">可切换查看本机各视频源，播放异常时会自动重连。</p>
             </section>
 
             <section class="grid">

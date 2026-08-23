@@ -135,7 +135,7 @@
     </div>
     <table id="streamTable" style="display:none">
       <thead>
-        <tr><th>状态</th><th>设备名称</th><th>MAC 地址</th><th>公网 IP - 内网 IP</th><th>用户</th><th>流名称</th></tr>
+        <tr><th>状态</th><th>设备名称</th><th>视频源</th><th>MAC 地址</th><th>公网 IP - 内网 IP</th><th>用户</th><th>流名称</th></tr>
       </thead>
       <tbody id="streamTbody"></tbody>
     </table>
@@ -149,6 +149,11 @@
     <div class="filters">
       <input type="date" id="dateInput">
       <select id="macSelect"><option value="">全部设备</option></select>
+      <select id="sourceTypeSelect">
+        <option value="">全部视频源</option><option value="screen">电脑桌面</option>
+        <option value="usb_camera">USB 摄像头</option><option value="ip_camera">网络摄像头</option>
+        <option value="direct_camera">品牌摄像头直推</option>
+      </select>
       <button class="btn btn-primary" onclick="loadSegments()">查询</button>
       <span style="font-size:12px;color:#999" id="countTag"></span>
     </div>
@@ -159,7 +164,7 @@
     <div id="segHint" class="empty">请选择日期后点击「查询」</div>
     <table id="segTable" style="display:none">
       <thead>
-        <tr><th>开始时间</th><th>时长</th><th>大小</th><th>设备</th><th>用户</th><th>操作</th></tr>
+        <tr><th>开始时间</th><th>时长</th><th>大小</th><th>设备</th><th>视频源</th><th>用户</th><th>操作</th></tr>
       </thead>
       <tbody id="segTbody"></tbody>
     </table>
@@ -172,6 +177,11 @@
     <div class="filters">
       <input type="date" id="frameDateInput">
       <input type="text" id="frameMacInput" placeholder="MAC 地址（可选）">
+      <select id="frameSourceTypeSelect">
+        <option value="">全部视频源</option><option value="screen">电脑桌面</option>
+        <option value="usb_camera">USB 摄像头</option><option value="ip_camera">网络摄像头</option>
+        <option value="direct_camera">品牌摄像头直推</option>
+      </select>
       <button class="btn btn-primary" onclick="loadFrames()">查询</button>
       <span style="font-size:12px;color:#999" id="frameCountTag"></span>
     </div>
@@ -184,6 +194,12 @@
 <div id="page-manage" class="page">
   <div class="content">
     <div class="stats-grid" id="statsGrid"></div>
+    <div class="card">
+      <div class="card-title">AI 分析平台</div>
+      <div id="aiPlatformStatus" style="font-size:13px;color:#666">加载中...</div>
+      <div id="aiAlgorithmGrid" class="stats-grid" style="margin-top:12px"></div>
+      <p style="font-size:12px;color:#999;margin-top:8px">抽帧已迁移到独立 AIService；打架、安全帽和火灾模块已预留，接入模型前保持关闭。</p>
+    </div>
     <div class="card">
       <div class="card-title">录制开关</div>
       <div style="display:flex;align-items:center;gap:12px">
@@ -206,6 +222,22 @@
       <p id="retainDaysHint" style="font-size:12px;color:#999;margin-top:8px"></p>
     </div>
     <div class="card">
+      <div class="card-title">品牌摄像头直推</div>
+      <div class="filters">
+        <input type="text" id="directCameraID" placeholder="唯一编号，如 north-gate">
+        <input type="text" id="directCameraName" placeholder="显示名称，如 北门摄像头">
+        <input type="text" id="directCameraBrand" placeholder="品牌（可选）">
+        <button class="btn btn-primary" onclick="createDirectCamera()">生成推流地址</button>
+      </div>
+      <p style="font-size:12px;color:#999;margin-bottom:10px">将生成的永久 RTMP 地址填入摄像头品牌后台。地址不含 token，但只有已登记的视频源或已登记电脑的桌面流可以发布。</p>
+      <p id="directCameraStatus" style="font-size:12px;margin-bottom:10px"></p>
+      <table id="directCameraTable" style="display:none">
+        <thead><tr><th>状态</th><th>名称</th><th>品牌</th><th>唯一编号</th><th>RTMP 服务器</th><th>串流密钥</th><th>操作</th></tr></thead>
+        <tbody id="directCameraTbody"></tbody>
+      </table>
+      <div id="directCameraEmpty" class="empty" style="padding:20px">暂无直推摄像头</div>
+    </div>
+    <div class="card">
       <div class="card-title">客户端更新包</div>
       <div class="filters">
         <input type="password" id="updateAdminKey" placeholder="更新管理密钥">
@@ -225,6 +257,14 @@
   let streamRefreshTimer = null;
   const monitorPlayers = {}; // streamName -> Hls instance
 
+  function sourceTypeName(type) {
+    return {screen:'电脑桌面', usb_camera:'USB 摄像头', ip_camera:'网络摄像头', direct_camera:'品牌摄像头直推'}[type] || '未知视频源';
+  }
+
+  function escapeHTML(value) {
+    return String(value ?? '').replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+  }
+
   // ========== Tab 切换 ==========
   function switchTab(name) {
     document.querySelectorAll('.tab').forEach((t, i) => {
@@ -243,7 +283,7 @@
     if (name === 'streams') loadStreamStatus();
     if (name === 'recordings') { loadMACs(); loadSegments(); }
     if (name === 'frames') loadFrames();
-    if (name === 'manage') { loadManageData(); loadRecordingSettings(); }
+    if (name === 'manage') { loadManageData(); loadRecordingSettings(); loadAIPlatformStatus(); }
   }
 
   // ========== 实时监控 ==========
@@ -278,8 +318,8 @@
       <div class="monitor-cell">
         <video id="v-${s.stream_name}" muted autoplay playsinline></video>
         <div class="monitor-info">
-          <div class="name">${s.hostname || s.user_name || s.mac || s.stream_name}</div>
-          <div class="mac">${s.mac || ''} ${s.ip ? '· ' + s.ip : ''}</div>
+          <div class="name">${escapeHTML(s.display_name || s.hostname || s.user_name || s.mac || s.stream_name)}</div>
+          <div class="mac">${escapeHTML(s.display_name || sourceTypeName(s.source_type))} · ${escapeHTML(s.mac || '')} ${s.ip ? '· ' + escapeHTML(s.ip) : ''}</div>
         </div>
       </div>
     `).join('');
@@ -334,7 +374,8 @@
     tbody.innerHTML = streams.map(s => `
       <tr>
         <td><span class="badge badge-online">在线</span></td>
-        <td>${s.hostname || '-'}</td>
+        <td>${s.hostname || (s.source_type === 'direct_camera' ? '独立摄像头' : '-')}</td>
+        <td>${escapeHTML(s.display_name || sourceTypeName(s.source_type))}</td>
         <td class="mac">${s.mac || '-'}</td>
         <td>${s.public_ip || '-'} - ${s.ip || '-'}</td>
         <td>${s.user_name || '-'}</td>
@@ -363,9 +404,11 @@
   async function loadSegments() {
     const date = document.getElementById('dateInput').value;
     const mac = document.getElementById('macSelect').value;
+    const sourceType = document.getElementById('sourceTypeSelect').value;
     const params = new URLSearchParams();
     if (date) params.set('date', date);
     if (mac) params.set('mac', mac);
+    if (sourceType) params.set('source_type', sourceType);
 
     const hint = document.getElementById('segHint');
     const table = document.getElementById('segTable');
@@ -400,7 +443,8 @@
         <td class="time">${new Date(seg.started_at).toLocaleString('zh-CN', {hour12:false})}</td>
         <td>${formatDuration(seg.duration)}</td>
         <td style="color:#999;font-size:12px">${formatSize(seg.file_size)}</td>
-        <td><span>${seg.hostname || seg.mac}</span><br><span class="mac">${seg.mac}</span></td>
+        <td><span>${seg.hostname || seg.mac || '独立摄像头'}</span><br><span class="mac">${seg.mac || '-'}</span></td>
+        <td>${escapeHTML(seg.display_name || sourceTypeName(seg.source_type))}</td>
         <td>${seg.user_name || '-'}</td>
         <td><button class="btn btn-primary btn-sm" onclick="playSegment(${seg.id}, this)">播放</button></td>
       </tr>
@@ -433,6 +477,7 @@
   async function loadFrames() {
     const date = document.getElementById('frameDateInput').value;
     const mac = document.getElementById('frameMacInput').value.trim();
+    const sourceType = document.getElementById('frameSourceTypeSelect').value;
     const grid = document.getElementById('frameGrid');
     const empty = document.getElementById('frameEmpty');
     const count = document.getElementById('frameCountTag');
@@ -446,6 +491,7 @@
     try {
       const params = new URLSearchParams({ date });
       if (mac) params.set('mac', mac.toLowerCase());
+      if (sourceType) params.set('source_type', sourceType);
       const res = await fetch('/api/frames?' + params.toString());
       if (!res.ok) throw new Error(await res.text());
       const frames = await res.json();
@@ -463,6 +509,7 @@
           </a>
           <div class="frame-info">
             <div><b>${new Date(frame.captured_at).toLocaleString()}</b></div>
+            <div>${escapeHTML(frame.display_name || sourceTypeName(frame.source_type))}</div>
             <div class="mac">${frame.mac || frame.stream_name || '-'}</div>
             <div style="color:#999">第 ${frame.frame_index || '-'} 帧 · ${formatSize(frame.file_size)}</div>
           </div>
@@ -492,7 +539,110 @@
         `;
       }
     } catch {}
+    loadDirectCameras();
+  }
 
+  async function loadAIPlatformStatus() {
+    const status = document.getElementById('aiPlatformStatus');
+    const grid = document.getElementById('aiAlgorithmGrid');
+    try {
+      const [algorithmRes, jobRes] = await Promise.all([
+        fetch('/api/ai/algorithms'),
+        fetch('/api/ai/jobs/stats')
+      ]);
+      if (!algorithmRes.ok || !jobRes.ok) throw new Error('AI状态接口不可用');
+      const algorithms = await algorithmRes.json();
+      const jobStats = await jobRes.json();
+      const workers = jobStats.workers || [];
+      const recentCutoff = Date.now() - 60 * 1000;
+      const onlineWorkers = workers.filter(w => w.status === 'online' && new Date(w.heartbeat_at).getTime() >= recentCutoff);
+      const counts = {};
+      (jobStats.jobs || []).forEach(row => {
+        counts[row.algorithm_code] ||= {};
+        counts[row.algorithm_code][row.status] = row.count;
+      });
+      status.innerHTML = onlineWorkers.length
+        ? `<span class="badge badge-online">运行中</span> ${onlineWorkers.length} 个 Worker 在线，${onlineWorkers.reduce((n, w) => n + (w.active_jobs || 0), 0)} 个任务执行中`
+        : '<span class="badge badge-offline">未连接</span> 最近60秒没有 AIService 心跳';
+      grid.innerHTML = algorithms.map(a => {
+        const stat = counts[a.code] || {};
+        const state = a.enabled ? '已启用' : '待接入';
+        const stateClass = a.enabled ? 'badge-online' : 'badge-offline';
+        return `<div class="stat-card">
+          <div class="stat-value" style="font-size:16px">${escapeHTML(a.name)}</div>
+          <div class="stat-label"><span class="badge ${stateClass}">${state}</span> · ${escapeHTML(a.input_mode)}</div>
+          <div class="stat-label">待处理 ${stat.pending || 0} · 失败 ${stat.failed || 0}</div>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      status.textContent = '加载失败：' + e.message;
+      grid.innerHTML = '';
+    }
+  }
+
+  async function loadDirectCameras() {
+    const table = document.getElementById('directCameraTable');
+    const empty = document.getElementById('directCameraEmpty');
+    const tbody = document.getElementById('directCameraTbody');
+    try {
+      const res = await fetch('/api/video-sources');
+      if (!res.ok) throw new Error(await res.text());
+      const sources = (await res.json()).filter(s => s.publish_mode === 'direct');
+      if (!sources.length) {
+        table.style.display = 'none';
+        empty.style.display = '';
+        return;
+      }
+      empty.style.display = 'none';
+      table.style.display = '';
+      tbody.innerHTML = sources.map(source => `
+        <tr>
+          <td><span class="badge ${source.active ? 'badge-online' : 'badge-offline'}">${source.active ? '在线' : '离线'}</span></td>
+          <td>${escapeHTML(source.display_name)}</td>
+          <td>${escapeHTML(source.brand || '-')}</td>
+          <td class="mac">${escapeHTML(source.source_id)}</td>
+          <td class="mac">${escapeHTML(source.rtmp_server)}</td>
+          <td class="mac">${escapeHTML(source.stream_key)}</td>
+          <td><button class="btn btn-primary btn-sm" data-url="${escapeHTML(source.rtmp_url)}" onclick="copyRTMP(this.dataset.url)">复制地址</button></td>
+        </tr>
+      `).join('');
+    } catch (e) {
+      table.style.display = 'none';
+      empty.style.display = '';
+      empty.textContent = '加载失败：' + e.message;
+    }
+  }
+
+  async function createDirectCamera() {
+    const sourceID = document.getElementById('directCameraID').value.trim();
+    const displayName = document.getElementById('directCameraName').value.trim();
+    const brand = document.getElementById('directCameraBrand').value.trim();
+    const status = document.getElementById('directCameraStatus');
+    if (!sourceID || !displayName) {
+      alert('请输入摄像头唯一编号和显示名称');
+      return;
+    }
+    try {
+      const res = await fetch('/api/video-sources', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({source_id: sourceID, display_name: displayName, brand})
+      });
+      const source = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(source.message || `HTTP ${res.status}`);
+      status.style.color = '#28a745';
+      status.textContent = `已生成：${source.rtmp_url}`;
+      await loadDirectCameras();
+    } catch (e) {
+      status.style.color = '#dc3545';
+      status.textContent = '创建失败：' + e.message;
+    }
+  }
+
+  function copyRTMP(url) {
+    navigator.clipboard.writeText(url).then(() => alert('推流地址已复制')).catch(() => {
+      window.prompt('请复制推流地址', url);
+    });
   }
 
   async function loadRecordingSettings() {

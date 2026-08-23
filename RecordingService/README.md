@@ -1,12 +1,13 @@
 # RecordingService
 
-RecordingService 为千里眼客户端提供设备登记、短期 RTMP 推流地址、实时流查看、录像录制和客户端更新服务。数据保存在独立的 `eyes` MySQL 数据库中，不依赖其他业务数据库。
+RecordingService 为千里眼客户端和品牌摄像头提供设备登记、永久 RTMP 推流地址、实时流查看、录像录制和客户端更新服务。数据保存在独立的 `eyes` MySQL 数据库中，不依赖其他业务数据库。
 
 ```text
 Electron -> HTTP :52350 -> RecordingService -> MySQL 8.1.0 / eyes
-Electron -> FFmpeg -> RTMP :1935 -> SRS
+Electron desktop/USB/IP camera -> FFmpeg -> RTMP :1935 -> SRS
                                       |-> HTTP-FLV/HLS :8090
                                       |-> RecordingService -> 录像文件
+                                      |-> AIService -> 抽帧/后续实时AI
 ```
 
 ## 配置
@@ -18,13 +19,12 @@ cp .env.example .env
 生产环境至少修改以下配置：
 
 - `CLIENT_API_KEY`：客户端登记和推流配置接口的共享密钥，必须与 `app/config.json` 的 `apiKey` 一致。
-- `STREAM_TOKEN_SECRET`：签发/校验短期推流 token 的密钥；不要复用公开或弱密钥。
 - `PUBLIC_RTMP_HOST`：客户端可访问的 RTMP 地址，例如 `example.com:1935`。
 - `RECORDING_SRS_HTTP_HOST`：客户端/管理页可访问的 SRS HTTP-FLV/HLS 地址，例如 `example.com:8090`。
 - `UPDATE_ADMIN_KEY`：客户端更新 ZIP 上传密钥；为空时禁用上传。
 - `RECORDING_DIR`：宿主机录像目录，默认 `/home/test/recordings`，应改为实际磁盘挂载点。
 
-录像默认分段 600 秒；Compose 当前默认录像保留 2 天、截图保留 30 天。管理页保存的录制开关和录像保留天数会写入数据库，并覆盖环境变量、立即生效。
+录像默认分段 600 秒；Compose 当前默认录像保留 2 天、截图保留 30 天。管理页保存的录制开关和录像保留天数会写入数据库，并覆盖环境变量、立即生效。每台电脑可以登记多个独立视频源，当前内置来源类型为 `screen`、`usb_camera` 和 `ip_camera`；符合小写字母、数字和下划线命名规则的新适配器类型也可直接登记，无需再次修改服务端流名协议。
 
 ## Docker 部署
 
@@ -34,7 +34,7 @@ cp .env.example .env
 docker compose config -q
 docker compose up -d --build
 docker compose ps
-docker compose logs -f recording-service
+docker compose logs -f recording-service ai-service
 ```
 
 也可以使用离线部署脚本（脚本会加载镜像 tar 并执行健康检查）：
@@ -53,18 +53,38 @@ chmod +x deploy.sh
 
 SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `52350`、`8090` 的来源，并通过 HTTPS 反向代理保护管理接口。
 
+录像抽帧已从 RecordingService 的录制进程迁移到独立 `AIService`。RecordingService
+在录像片段入库后创建持久化任务，AIService 领取任务、执行FFmpeg并回报图片；两个
+容器共享 `recordings` 卷。已有图片页面、保留期和访问地址保持不变。历史录像会在
+启动时自动补建幂等任务，因此升级时不会漏图或重复入库。
+
 ## 常用接口
 
 - `GET /api/health`：服务和数据库健康检查，数据库不可用时返回 HTTP 503。
 - `POST /api/clients/register`：客户端登记/更新设备信息。
-- `GET /api/streams/publish-config`：获取带短期 token 的 RTMP 推流配置。
+- `POST /api/streams/publish-config`：APP 按设备和视频源获取永久 RTMP 推流配置。旧客户端只提交 `mac` 仍然有效；新客户端可同时提交 `source_type`、`source_id`、`display_name`。
 - `GET /api/streams`、`GET /api/stats`：实时流和系统统计。
-- `GET /api/segments`、`GET /api/frames`：录像片段和截图列表；媒体分别通过 `/segments/{id}/video`、`/frames/{id}/image` 获取。
+- `GET /api/video-sources`：查看已登记的视频源、在线状态及品牌摄像头直推地址。
+- `POST /api/video-sources`：登记一个独立品牌摄像头并生成永久 RTMP 地址，请求字段为 `source_id`、`display_name` 和可选的 `brand`。
+- `GET /api/segments`、`GET /api/frames`：录像片段和截图列表，支持 `mac`、`source_type` 过滤；媒体分别通过 `/segments/{id}/video`、`/frames/{id}/image` 获取。
 - `GET/PUT /api/recording-settings`：查看或修改录制开关、录像保留天数。
+- `GET /api/ai/algorithms`：AI能力目录；当前抽帧已启用，打架、安全帽和火灾为后续模块。
+- `GET /api/ai/jobs/stats`：AI任务状态和Worker心跳概览。
+- `/api/internal/ai/*`：AIService任务领取、结果上报和心跳接口，仅供Docker内部网络或可信局域网调用。
 - `GET /api/client-updates/latest`：客户端检查更新。
 - `POST /api/client-updates/upload`：上传更新 ZIP，必须提供 `X-Update-Key: <UPDATE_ADMIN_KEY>`。
 
 管理后台地址为 `http://<服务器地址>:52350`。更新 ZIP 必须包含 `latest.yml`、对应的 `*-setup.exe`，并且其中的版本、路径和 SHA-512 必须匹配；客户端侧 ZIP 可由 `app` 目录的 `pnpm run build:update` 生成。
+
+RTMP 发布不再使用 token。SRS 发布回调只接受 `video_sources` 中已登记的视频源，以及已经完成电脑登记的旧版桌面流。品牌摄像头后台填写的地址形如 `rtmp://<服务器>:1935/live/camera--<固定标识>`，配置一次即可长期使用。因为地址本身不再提供身份认证，生产环境应限制 1935 端口来源 IP，管理端口 52350 也应仅允许可信内网访问。
+
+部分摄像头后台提供一个“推流地址”输入框，直接填写接口返回的 `rtmp_url`；部分后台将其拆成两个输入框，则分别填写 `rtmp_server`（例如 `rtmp://example.com:1935/live`）和 `stream_key`。也可以通过接口登记：
+
+```bash
+curl -X POST http://<服务器地址>:52350/api/video-sources \
+  -H 'Content-Type: application/json' \
+  -d '{"source_id":"north-gate","display_name":"北门摄像头","brand":"camera-brand"}'
+```
 
 ## 备份与恢复
 
@@ -76,4 +96,7 @@ docker compose exec -T mysql mysql -uroot -pall_seeing_eyes \
   eyes < eyes-backup.sql
 ```
 
-数据库表由服务启动时自动创建或更新，包括 `users`、`computers`、`recording_settings`、`recording_segments` 和 `recording_frames`。备份时还应保留宿主机 `RECORDING_DIR` 中的录像文件；数据库记录和文件需要同时恢复才能正常播放。
+数据库表由服务启动时自动创建或更新，包括设备、录像、抽帧以及
+`ai_algorithms`、`video_analysis_rules`、`ai_jobs`、`ai_workers`、`ai_events` 等AI平台表。
+备份时还应保留宿主机 `RECORDING_DIR` 中的录像和AI证据文件；数据库记录和文件需要
+同时恢复才能正常播放。

@@ -13,4 +13,8 @@ Thumbs.db
 **/out/
 **/dist/
 **/*.tar
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.venv/
 .tmp-go-cache/

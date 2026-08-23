@@ -12,6 +12,7 @@ set -e
 
 # 默认值
 IMAGE_NAME="recording-service"
+AI_IMAGE_NAME="eyes-ai-service"
 TAG="latest"
 BUILD_NO_CACHE=false
 
@@ -69,6 +70,8 @@ done
 
 FULL_IMAGE_NAME="${IMAGE_NAME}:${TAG}"
 TAR_FILE="${IMAGE_NAME}-${TAG}.tar"
+AI_FULL_IMAGE_NAME="${AI_IMAGE_NAME}:${TAG}"
+AI_TAR_FILE="${AI_IMAGE_NAME}-${TAG}.tar"
 
 echo "=========================================="
 echo "  RecordingService - 构建应用镜像"
@@ -90,15 +93,24 @@ if [ ! -f "Dockerfile" ]; then
     echo "✗ 错误: 未找到 Dockerfile"
     exit 1
 fi
+if [ ! -f "../AIService/Dockerfile" ]; then
+    echo "✗ 错误: 未找到 ../AIService/Dockerfile"
+    exit 1
+fi
 
 echo ""
 echo "[1/5] 清理旧镜像和构建缓存..."
 docker rmi "${FULL_IMAGE_NAME}" 2>/dev/null || echo "  旧镜像不存在，跳过"
+docker rmi "${AI_FULL_IMAGE_NAME}" 2>/dev/null || echo "  旧AI镜像不存在，跳过"
 
 # 清理旧的 tar 文件
 if [ -f "${TAR_FILE}" ]; then
     rm -f "${TAR_FILE}"
     echo "  已清理旧镜像文件: ${TAR_FILE}"
+fi
+if [ -f "${AI_TAR_FILE}" ]; then
+    rm -f "${AI_TAR_FILE}"
+    echo "  已清理旧镜像文件: ${AI_TAR_FILE}"
 fi
 if [ -f "${SRS_TAR}" ]; then
     rm -f "${SRS_TAR}"
@@ -119,6 +131,12 @@ fi
 
 ${BUILD_CMD}
 
+AI_BUILD_CMD="docker build -t ${AI_FULL_IMAGE_NAME} ../AIService"
+if [ "${BUILD_NO_CACHE}" = true ]; then
+    AI_BUILD_CMD="${AI_BUILD_CMD} --no-cache"
+fi
+${AI_BUILD_CMD}
+
 echo ""
 echo "[3/5] 验证镜像并导出..."
 IMAGE_SIZE=$(docker images "${FULL_IMAGE_NAME}" --format "{{.Size}}")
@@ -129,6 +147,8 @@ echo "  镜像大小: ${IMAGE_SIZE}"
 # 导出应用镜像
 docker save -o "${TAR_FILE}" "${FULL_IMAGE_NAME}"
 echo "  ✓ 应用镜像已导出: ${TAR_FILE}"
+docker save -o "${AI_TAR_FILE}" "${AI_FULL_IMAGE_NAME}"
+echo "  ✓ AI镜像已导出: ${AI_TAR_FILE}"
 
 # 拉取并导出依赖镜像
 echo ""
@@ -159,6 +179,8 @@ ssh -p "${REMOTE_PORT}" "${REMOTE_USER}@${REMOTE_IP}" "mkdir -p '${REMOTE_DIR}'"
 # 上传镜像 tar
 echo "  上传 ${TAR_FILE}..."
 scp -P "${REMOTE_PORT}" -C "${TAR_FILE}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
+echo "  上传 ${AI_TAR_FILE}..."
+scp -P "${REMOTE_PORT}" -C "${AI_TAR_FILE}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
 echo "  上传 ${SRS_TAR}..."
 scp -P "${REMOTE_PORT}" -C "${SRS_TAR}" "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIR}"
 echo "  上传 ${MYSQL_TAR}..."

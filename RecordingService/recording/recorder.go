@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"recording-service/analysis"
 	"recording-service/database"
 	"recording-service/models"
+	"recording-service/streamsource"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,8 +27,6 @@ const (
 	defaultCheckInterval   = 30
 	defaultRetainDays      = 7
 	defaultFrameRetainDays = 30
-	extractConcurrency     = 16
-
 	// SRS 的 /api/v1/streams 默认只返回前 ~10 条（HTTP API 内置分页上限）。
 	// 不带 count 时会漏掉绝大多数在推的流，导致只录到一小撮设备。
 	// 显式带足够大的 count 取全量；SRS 会返回 min(实际, count)。
@@ -40,6 +40,8 @@ type Config struct {
 	SegmentDuration int
 	CheckInterval   int
 	RetainDays      int
+	// FrameRetainDays controls lifecycle cleanup for AIService-produced frame
+	// artifacts. Frame extraction itself does not run in RecordingService.
 	FrameRetainDays int
 	FFmpegPath      string
 	RecordEnabled   bool
@@ -73,8 +75,7 @@ type RecorderManager struct {
 	active         map[string]*Recorder
 	cfg            Config
 	client         *http.Client // SRS API 查询，短超时
-	extractSem     chan struct{}
-	corruptedPaths sync.Map // 已确认损坏的文件路径集合，避免每轮扫盘重复 ffprobe
+	corruptedPaths sync.Map     // 已确认损坏的文件路径集合，避免每轮扫盘重复 ffprobe
 }
 
 func NewRecorderManager(cfg Config) *RecorderManager {
@@ -97,10 +98,9 @@ func NewRecorderManager(cfg Config) *RecorderManager {
 		cfg.OutputDir = "/var/recordings"
 	}
 	return &RecorderManager{
-		active:     make(map[string]*Recorder),
-		cfg:        cfg,
-		client:     &http.Client{Timeout: 10 * time.Second},
-		extractSem: make(chan struct{}, extractConcurrency),
+		active: make(map[string]*Recorder),
+		cfg:    cfg,
+		client: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -340,6 +340,7 @@ func (m *RecorderManager) indexExistingFiles() {
 			continue
 		}
 		streamDir := filepath.Join(root, streamName)
+		mac, sourceType, sourceID := lookupVideoSource(streamName)
 
 		dayEntries, err := os.ReadDir(streamDir)
 		if err != nil {
@@ -351,18 +352,16 @@ func (m *RecorderManager) indexExistingFiles() {
 				continue
 			}
 			dayDir := filepath.Join(streamDir, dayEntry.Name())
-			m.indexDayDir(streamName, dayDir, dayEntry.Name())
+			m.indexDayDir(streamName, mac, sourceType, sourceID, dayDir, dayEntry.Name())
 		}
 	}
 }
 
-func (m *RecorderManager) indexDayDir(streamName, dayDir, dayStr string) {
+func (m *RecorderManager) indexDayDir(streamName, mac, sourceType, sourceID, dayDir, dayStr string) {
 	entries, err := os.ReadDir(dayDir)
 	if err != nil {
 		return
 	}
-
-	mac := streamNameToMAC(streamName)
 
 	// 先收集本目录所有 mp4 路径，一次性批量查出已入库的，避免逐文件 SELECT count(*)。
 	var candidates []string
@@ -432,6 +431,8 @@ func (m *RecorderManager) indexDayDir(streamName, dayDir, dayStr string) {
 		seg := models.RecordingSegment{
 			StreamName: streamName,
 			MAC:        mac,
+			SourceType: sourceType,
+			SourceID:   sourceID,
 			FilePath:   filePath,
 			FileSize:   fi.Size(),
 			StartedAt:  startedAt,
@@ -443,100 +444,10 @@ func (m *RecorderManager) indexDayDir(streamName, dayDir, dayStr string) {
 			log.Printf("[recording] 写入索引失败 %s: %v", filePath, err)
 		} else {
 			log.Printf("[recording] 索引新片段 %s (%.0fs)", filePath, actualDuration)
-			go m.extractFrames(streamName, mac, seg.ID, filePath, startedAt, m.cfg.SegmentDuration)
+			if err := analysis.EnqueueFrameSampler(seg); err != nil {
+				log.Printf("[analysis] 创建录像抽帧任务失败 segment=%d: %v", seg.ID, err)
+			}
 		}
-	}
-}
-
-func (m *RecorderManager) extractFrames(streamName, mac string, segmentID uint, segmentPath string, startedAt time.Time, segDuration int) {
-	m.extractSem <- struct{}{}
-	defer func() { <-m.extractSem }()
-
-	actualDuration, corrupted := m.probeDuration(segmentPath)
-	if corrupted {
-		return
-	}
-	if actualDuration <= 0 {
-		actualDuration = float64(segDuration)
-	}
-	if actualDuration < 30 {
-		return
-	}
-
-	effectiveDur := int(actualDuration)
-	frameCount := 2
-	if effectiveDur >= 600 {
-		frameCount = effectiveDur / 300
-	}
-	interval := effectiveDur / frameCount
-
-	framesDir := filepath.Join(m.cfg.OutputDir, "_frames", streamName)
-	if err := os.MkdirAll(framesDir, 0755); err != nil {
-		log.Printf("[recording] 创建抽帧目录失败 %s: %v", framesDir, err)
-		return
-	}
-
-	for i := 0; i < frameCount; i++ {
-		offset := interval*i + interval/2
-		capturedAt := startedAt.Add(time.Duration(offset) * time.Second)
-
-		frameName := fmt.Sprintf("%s_f%d.jpg",
-			strings.TrimSuffix(filepath.Base(segmentPath), filepath.Ext(segmentPath)),
-			i+1,
-		)
-		framePath := filepath.Join(framesDir, frameName)
-
-		// 以 (segment_id, frame_index) 去重
-		var exist int64
-		database.DB.Model(&models.RecordingFrame{}).
-			Where("segment_id = ? AND frame_index = ?", segmentID, i+1).
-			Count(&exist)
-		if exist > 0 {
-			continue
-		}
-
-		// 文件已存在但 DB 写入失败时重新索引
-		if _, err := os.Stat(framePath); err == nil {
-			m.indexFrame(streamName, mac, segmentID, framePath, capturedAt, i+1)
-			continue
-		}
-
-		args := []string{
-			"-ss", fmt.Sprintf("%d", offset),
-			"-i", segmentPath,
-			"-frames:v", "1",
-			"-q:v", "2",
-			"-y",
-			framePath,
-		}
-		cmd := exec.Command(m.cfg.FFmpegPath, args...)
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-		if err := cmd.Run(); err != nil {
-			log.Printf("[recording] 抽帧失败 %s offset=%ds: %v", segmentPath, offset, err)
-			continue
-		}
-
-		m.indexFrame(streamName, mac, segmentID, framePath, capturedAt, i+1)
-	}
-}
-
-func (m *RecorderManager) indexFrame(streamName, mac string, segmentID uint, framePath string, capturedAt time.Time, frameIndex int) {
-	fi, err := os.Stat(framePath)
-	if err != nil {
-		return
-	}
-	frame := models.RecordingFrame{
-		StreamName: streamName,
-		MAC:        mac,
-		SegmentID:  segmentID,
-		FilePath:   framePath,
-		FileSize:   fi.Size(),
-		CapturedAt: capturedAt,
-		FrameIndex: frameIndex,
-	}
-	if err := database.DB.Create(&frame).Error; err != nil {
-		log.Printf("[recording] 写入帧索引失败 %s: %v", framePath, err)
 	}
 }
 
@@ -560,6 +471,8 @@ func (m *RecorderManager) cleanupExpired() {
 	// 清理过期的损坏文件：损坏文件不入库，上面基于 DB 的清理覆盖不到，会永久占盘
 	m.cleanupCorruptedFiles(mainCutoff)
 
+	// RecordingService owns metadata and storage lifecycle for analysis
+	// artifacts even though AIService owns the extraction process.
 	frameCutoff := time.Now().AddDate(0, 0, -m.cfg.FrameRetainDays)
 	frameWhere := "captured_at < ?"
 	frameArgs := []interface{}{frameCutoff}
@@ -575,6 +488,15 @@ func (m *RecorderManager) cleanupExpired() {
 	if len(expiredFrames) > 0 {
 		database.DB.Unscoped().Where(frameWhere, frameArgs...).Delete(&models.RecordingFrame{})
 		log.Printf("[recording] 清理过期帧 %d 条", len(expiredFrames))
+	}
+
+	segmentIDs := make([]uint, 0, len(localSegments))
+	for _, segment := range localSegments {
+		segmentIDs = append(segmentIDs, segment.ID)
+	}
+	if len(segmentIDs) > 0 {
+		database.DB.Where("input_type = ? AND input_ref_id IN ?", analysis.JobInputSegment, segmentIDs).
+			Delete(&models.AIJob{})
 	}
 
 	result := database.DB.Unscoped().Where(segWhere, segArgs...).Delete(&models.RecordingSegment{})
@@ -708,13 +630,19 @@ func (m *RecorderManager) cleanupEmptyDirs() {
 	}
 }
 
-func streamNameToMAC(s string) string {
-	s = strings.ToLower(s)
-	if len(s) != 12 {
-		return s
+func lookupVideoSource(streamName string) (mac, sourceType, sourceID string) {
+	var source models.VideoSource
+	if err := database.DB.Where("stream_name = ?", streamName).First(&source).Error; err == nil {
+		return source.MAC, source.SourceType, source.SourceID
 	}
-	return fmt.Sprintf("%s:%s:%s:%s:%s:%s",
-		s[0:2], s[2:4], s[4:6], s[6:8], s[8:10], s[10:12])
+	mac, sourceType, ok := streamsource.Parse(streamName)
+	if !ok {
+		return streamName, "unknown", ""
+	}
+	if sourceType == streamsource.TypeScreen {
+		sourceID = "desktop"
+	}
+	return mac, sourceType, sourceID
 }
 
 func parseSegmentTimes(filename, dayStr string, segDuration int) (startedAt, endedAt time.Time, duration float64) {

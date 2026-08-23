@@ -1,4 +1,13 @@
 {
     "recordingServiceURL": "http://112.18.238.6:52350",
-    "apiKey": "Yx7pK4vN9mQ2tR8wF6cH3sD5jL1aZ0eB"
+    "apiKey": "Yx7pK4vN9mQ2tR8wF6cH3sD5jL1aZ0eB",
+    "videoSources": [
+        {
+            "id": "desktop",
+            "type": "screen",
+            "displayName": "电脑桌面",
+            "enabled": true,
+            "fps": 8
+        }
+    ]
 }

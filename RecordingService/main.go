@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"recording-service/analysis"
 	"recording-service/config"
 	"recording-service/database"
 	"recording-service/models"
@@ -30,6 +31,9 @@ func main() {
 			log.Printf("[main] 关闭数据库连接失败: %v", err)
 		}
 	}()
+	if err := analysis.InitializeCatalog(); err != nil {
+		log.Fatalf("[main] 初始化AI分析任务失败: %v", err)
+	}
 
 	// 启动后尝试从 DB 加载保留天数，覆盖环境变量
 	var recordingSetting models.RecordingSetting
@@ -64,12 +68,12 @@ func main() {
 			cfg.Recording.SRSApiBase,
 			cfg.Recording.SRSHttpHost,
 			cfg.Recording.PublicRTMPHost,
+			cfg.Recording.OutputDir,
 			cfg.Recording.RetainDays,
 			recordEnabled,
 			mgr.UpdateRetainDays, // 热更新回调
 			mgr.UpdateRecordEnabled,
 			cfg.Security.ClientAPIKey,
-			cfg.Security.StreamTokenSecret,
 		).Start(cfg.Recording.WebPort)
 	}
 

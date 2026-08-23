@@ -1419,7 +1419,7 @@ func main() {
 	mode := flag.String("mode", "monitor", "capture mode: monitor | assist")
 	authToken := flag.String("auth-token", "", "token required for /control and /control-status")
 	auditReportURLFlag := flag.String("audit-url", "", "URL to POST assist audit events (e.g. http://host:port/api/assist-audit-logs)")
-	rtmpURL := flag.String("rtmp", "", "RTMP push URL, e.g. rtmp://srs-host:1935/live/AA:BB:CC:DD:EE:FF?token=...")
+	rtmpURL := flag.String("rtmp", "", "RTMP push URL, e.g. rtmp://srs-host:1935/live/stream-name")
 	serverURLFlag := flag.String("server-url", "", "中心服务器地址，用于拨服务器选路确定本机 LAN IP")
 	flag.Parse()
 

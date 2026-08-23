@@ -13,7 +13,21 @@ type SystemInfo = {
     app_version: string
 }
 
-type StreamStatus = { running: boolean; url: string; error: string; reason?: string }
+type VideoSourceStatus = {
+    id: string
+    type: 'screen' | 'usb_camera' | 'ip_camera'
+    displayName: string
+    running: boolean
+    url: string
+    error: string
+    reason?: string
+}
+type StreamStatus = {
+    running: boolean
+    url: string
+    error: string
+    sources: VideoSourceStatus[]
+}
 type RegistrationStatus = { ok: boolean; message: string; at: string | null; info?: SystemInfo }
 
 declare global {

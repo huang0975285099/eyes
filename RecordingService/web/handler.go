@@ -10,9 +10,12 @@ import (
 	"path/filepath"
 	"recording-service/database"
 	"recording-service/models"
+	"recording-service/streamsource"
 	"strconv"
 	"strings"
 	"time"
+
+	"gorm.io/gorm/clause"
 )
 
 //go:embed index.html
@@ -31,10 +34,10 @@ type Server struct {
 	UpdateRecordEnabled func(bool) // 热更新全局录制开关
 	ClientAPIKey        string     // Electron 设备登记接口共享密钥
 	PublicRTMPHost      string     // 下发给客户端的 RTMP 公网地址
-	StreamSecret        string     // SRS 发布 token HMAC 密钥
+	RecordingOutputDir  string     // 录像和AI证据共享目录
 }
 
-func NewServer(srsApiBase, srsHttpHost, publicRTMPHost string, retainDays int, recordEnabled bool, updateRetainDays func(int), updateRecordEnabled func(bool), clientAPIKey, streamSecret string) *Server {
+func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, recordingOutputDir string, retainDays int, recordEnabled bool, updateRetainDays func(int), updateRecordEnabled func(bool), clientAPIKey string) *Server {
 	return &Server{
 		SRSApiBase:          srsApiBase,
 		SRSHttpHost:         srsHttpHost,
@@ -45,7 +48,7 @@ func NewServer(srsApiBase, srsHttpHost, publicRTMPHost string, retainDays int, r
 		UpdateRecordEnabled: updateRecordEnabled,
 		ClientAPIKey:        clientAPIKey,
 		PublicRTMPHost:      publicRTMPHost,
-		StreamSecret:        streamSecret,
+		RecordingOutputDir:  recordingOutputDir,
 	}
 }
 
@@ -56,6 +59,7 @@ func (s *Server) Start(port int) {
 	mux.HandleFunc("/api/segments", s.handleSegments)
 	mux.HandleFunc("/api/frames", s.handleFrames)
 	mux.HandleFunc("/api/macs", s.handleMACs)
+	mux.HandleFunc("/api/video-sources", s.handleVideoSources)
 	mux.HandleFunc("/api/streams", s.handleStreams)
 	mux.HandleFunc("/api/recording-settings", s.handleRecordingSettings)
 	mux.HandleFunc("/api/stats", s.handleStats)
@@ -69,6 +73,11 @@ func (s *Server) Start(port int) {
 	mux.HandleFunc("/api/srs/on-unpublish", s.handleSRSLifecycle)
 	mux.HandleFunc("/api/srs/on-play", s.handleSRSLifecycle)
 	mux.HandleFunc("/api/srs/on-stop", s.handleSRSLifecycle)
+	mux.HandleFunc("/api/ai/algorithms", s.handleAIAlgorithms)
+	mux.HandleFunc("/api/ai/jobs/stats", s.handleAIJobStats)
+	mux.HandleFunc("/api/internal/ai/jobs/claim", s.handleAIJobClaim)
+	mux.HandleFunc("/api/internal/ai/jobs/report", s.handleAIJobReport)
+	mux.HandleFunc("/api/internal/ai/workers/heartbeat", s.handleAIWorkerHeartbeat)
 	mux.HandleFunc("/segments/", s.handleVideo)
 	mux.HandleFunc("/frames/", s.handleFrameImage)
 
@@ -99,13 +108,16 @@ func (s *Server) handleHlsJS(w http.ResponseWriter, r *http.Request) {
 // ============================================================
 
 type streamStatusRow struct {
-	StreamName string `json:"stream_name"`
-	MAC        string `json:"mac"`
-	IP         string `json:"ip"`
-	PublicIP   string `json:"public_ip"`
-	Hostname   string `json:"hostname"`
-	UserName   string `json:"user_name"`
-	Active     bool   `json:"active"`
+	StreamName  string `json:"stream_name"`
+	MAC         string `json:"mac"`
+	SourceType  string `json:"source_type"`
+	SourceID    string `json:"source_id"`
+	DisplayName string `json:"display_name"`
+	IP          string `json:"ip"`
+	PublicIP    string `json:"public_ip"`
+	Hostname    string `json:"hostname"`
+	UserName    string `json:"user_name"`
+	Active      bool   `json:"active"`
 }
 
 func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
@@ -116,11 +128,16 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 
 	// 查询 SRS 活跃流
 	streams := s.fetchSRSStreams()
+	streamNames := make([]string, 0, len(streams))
+	for _, st := range streams {
+		streamNames = append(streamNames, st.Name)
+	}
+	sourceMap := loadVideoSourceMap(streamNames)
 
 	// 批量查设备信息
 	macSet := map[string]struct{}{}
 	for _, st := range streams {
-		mac := streamNameToMAC(st.Name)
+		mac, _, _, _ := resolveVideoSource(st.Name, sourceMap)
 		if mac != "" {
 			macSet[mac] = struct{}{}
 		}
@@ -151,11 +168,10 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 
 	rows := make([]streamStatusRow, 0, len(streams))
 	for _, st := range streams {
-		mac := streamNameToMAC(st.Name)
+		mac, sourceType, sourceID, displayName := resolveVideoSource(st.Name, sourceMap)
 		row := streamStatusRow{
-			StreamName: st.Name,
-			MAC:        mac,
-			Active:     st.Publish.Active,
+			StreamName: st.Name, MAC: mac, SourceType: sourceType,
+			SourceID: sourceID, DisplayName: displayName, Active: st.Publish.Active,
 		}
 		if c, ok := compMap[mac]; ok {
 			row.IP = c.IP
@@ -168,6 +184,48 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rows)
+}
+
+func loadVideoSourceMap(streamNames []string) map[string]models.VideoSource {
+	result := make(map[string]models.VideoSource, len(streamNames))
+	if len(streamNames) == 0 {
+		return result
+	}
+	var sources []models.VideoSource
+	database.DB.Where("stream_name IN ?", streamNames).Find(&sources)
+	for _, source := range sources {
+		result[source.StreamName] = source
+	}
+	return result
+}
+
+func resolveVideoSource(streamName string, sources map[string]models.VideoSource) (mac, sourceType, sourceID, displayName string) {
+	if source, ok := sources[streamName]; ok {
+		return source.MAC, source.SourceType, source.SourceID, source.DisplayName
+	}
+	mac, sourceType, ok := streamsource.Parse(streamName)
+	if !ok {
+		return streamName, "unknown", "", "未知视频源"
+	}
+	if sourceType == streamsource.TypeScreen {
+		return mac, sourceType, "desktop", "电脑桌面"
+	}
+	return mac, sourceType, "", sourceTypeLabel(sourceType)
+}
+
+func sourceTypeLabel(sourceType string) string {
+	switch sourceType {
+	case streamsource.TypeScreen:
+		return "电脑桌面"
+	case streamsource.TypeUSBCamera:
+		return "USB 摄像头"
+	case streamsource.TypeIPCamera:
+		return "网络摄像头"
+	case streamsource.TypeDirectCamera:
+		return "品牌摄像头直推"
+	default:
+		return "摄像头"
+	}
 }
 
 type srsStream struct {
@@ -217,22 +275,6 @@ func (s *Server) fetchSRSStreams() []srsStream {
 		result = append(result, st)
 	}
 	return result
-}
-
-// streamNameToMAC 将流名（如 d85ed39f2a17）转为 MAC 格式（d8:5e:d3:9f:2a:17）
-func streamNameToMAC(name string) string {
-	name = strings.ToLower(strings.TrimSpace(name))
-	if len(name) != 12 {
-		return name
-	}
-	var b strings.Builder
-	for i := 0; i < 12; i += 2 {
-		if i > 0 {
-			b.WriteByte(':')
-		}
-		b.WriteString(name[i : i+2])
-	}
-	return b.String()
 }
 
 // ============================================================
@@ -382,24 +424,30 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // ============================================================
 
 type segmentRow struct {
-	ID         uint      `json:"id"`
-	StreamName string    `json:"stream_name"`
-	MAC        string    `json:"mac"`
-	Hostname   string    `json:"hostname"`
-	UserName   string    `json:"user_name"`
-	StartedAt  time.Time `json:"started_at"`
-	EndedAt    time.Time `json:"ended_at"`
-	Duration   float64   `json:"duration"`
-	FileSize   int64     `json:"file_size"`
+	ID          uint      `json:"id"`
+	StreamName  string    `json:"stream_name"`
+	MAC         string    `json:"mac"`
+	SourceType  string    `json:"source_type"`
+	SourceID    string    `json:"source_id"`
+	DisplayName string    `json:"display_name"`
+	Hostname    string    `json:"hostname"`
+	UserName    string    `json:"user_name"`
+	StartedAt   time.Time `json:"started_at"`
+	EndedAt     time.Time `json:"ended_at"`
+	Duration    float64   `json:"duration"`
+	FileSize    int64     `json:"file_size"`
 }
 
 type frameRow struct {
-	ID         uint      `json:"id"`
-	StreamName string    `json:"stream_name"`
-	MAC        string    `json:"mac"`
-	CapturedAt time.Time `json:"captured_at"`
-	FrameIndex int       `json:"frame_index"`
-	FileSize   int64     `json:"file_size"`
+	ID          uint      `json:"id"`
+	StreamName  string    `json:"stream_name"`
+	MAC         string    `json:"mac"`
+	SourceType  string    `json:"source_type"`
+	SourceID    string    `json:"source_id"`
+	DisplayName string    `json:"display_name"`
+	CapturedAt  time.Time `json:"captured_at"`
+	FrameIndex  int       `json:"frame_index"`
+	FileSize    int64     `json:"file_size"`
 }
 
 func (s *Server) handleFrames(w http.ResponseWriter, r *http.Request) {
@@ -416,12 +464,22 @@ func (s *Server) handleFrames(w http.ResponseWriter, r *http.Request) {
 	if mac := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mac"))); mac != "" {
 		query = query.Where("mac = ?", mac)
 	}
+	if sourceType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source_type"))); sourceType != "" {
+		query = query.Where("source_type = ?", sourceType)
+	}
 	var frames []models.RecordingFrame
 	query.Order("captured_at DESC").Limit(500).Find(&frames)
 	rows := make([]frameRow, 0, len(frames))
+	streamNames := make([]string, 0, len(frames))
 	for _, frame := range frames {
+		streamNames = append(streamNames, frame.StreamName)
+	}
+	sourceMap := loadVideoSourceMap(streamNames)
+	for _, frame := range frames {
+		_, _, _, displayName := resolveVideoSource(frame.StreamName, sourceMap)
 		rows = append(rows, frameRow{
 			ID: frame.ID, StreamName: frame.StreamName, MAC: frame.MAC,
+			SourceType: frame.SourceType, SourceID: frame.SourceID, DisplayName: displayName,
 			CapturedAt: frame.CapturedAt, FrameIndex: frame.FrameIndex, FileSize: frame.FileSize,
 		})
 	}
@@ -483,6 +541,9 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 	if mac != "" {
 		query = query.Where("mac = ?", strings.ToLower(mac))
 	}
+	if sourceType := strings.ToLower(strings.TrimSpace(q.Get("source_type"))); sourceType != "" {
+		query = query.Where("source_type = ?", sourceType)
+	}
 
 	var segs []models.RecordingSegment
 	query.Order("started_at DESC").Limit(500).Find(&segs)
@@ -516,15 +577,24 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows := make([]segmentRow, 0, len(segs))
+	streamNames := make([]string, 0, len(segs))
 	for _, seg := range segs {
+		streamNames = append(streamNames, seg.StreamName)
+	}
+	sourceMap := loadVideoSourceMap(streamNames)
+	for _, seg := range segs {
+		_, _, _, displayName := resolveVideoSource(seg.StreamName, sourceMap)
 		row := segmentRow{
-			ID:         seg.ID,
-			StreamName: seg.StreamName,
-			MAC:        seg.MAC,
-			StartedAt:  seg.StartedAt,
-			EndedAt:    seg.EndedAt,
-			Duration:   seg.Duration,
-			FileSize:   seg.FileSize,
+			ID:          seg.ID,
+			StreamName:  seg.StreamName,
+			MAC:         seg.MAC,
+			SourceType:  seg.SourceType,
+			SourceID:    seg.SourceID,
+			DisplayName: displayName,
+			StartedAt:   seg.StartedAt,
+			EndedAt:     seg.EndedAt,
+			Duration:    seg.Duration,
+			FileSize:    seg.FileSize,
 		}
 		if c, ok := compMap[seg.MAC]; ok {
 			row.Hostname = c.Hostname
@@ -543,6 +613,123 @@ type macInfo struct {
 	UserName string `json:"user_name"`
 }
 
+type videoSourceRow struct {
+	models.VideoSource
+	Hostname   string `json:"hostname"`
+	UserName   string `json:"user_name"`
+	Active     bool   `json:"active"`
+	RTMPURL    string `json:"rtmp_url,omitempty"`
+	RTMPServer string `json:"rtmp_server,omitempty"`
+	StreamKey  string `json:"stream_key,omitempty"`
+}
+
+// handleVideoSources exposes the vendor-neutral source registry. Connection
+// URLs and camera credentials are intentionally client-side only and therefore
+// never appear in this response.
+func (s *Server) handleVideoSources(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listVideoSources(w, r)
+	case http.MethodPost:
+		s.createDirectVideoSource(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) createDirectVideoSource(w http.ResponseWriter, r *http.Request) {
+	if s.PublicRTMPHost == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"message": "推流服务未配置"})
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		SourceID    string `json:"source_id"`
+		DisplayName string `json:"display_name"`
+		Brand       string `json:"brand"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&input); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "请求数据无效"})
+		return
+	}
+	sourceID, displayName, brand, err := streamsource.NormalizeDirect(input.SourceID, input.DisplayName, input.Brand)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "摄像头参数无效: " + err.Error()})
+		return
+	}
+	streamName := streamsource.DirectName(sourceID)
+	source := models.VideoSource{
+		MAC: "", SourceType: streamsource.TypeDirectCamera, SourceID: sourceID,
+		DisplayName: displayName, Brand: brand, PublishMode: "direct",
+		Enabled: true, StreamName: streamName,
+	}
+	if err := database.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "stream_name"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"source_id", "display_name", "brand", "publish_mode", "enabled", "updated_at",
+		}),
+	}).Create(&source).Error; err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "保存摄像头失败"})
+		return
+	}
+	_ = database.DB.Where("stream_name = ?", streamName).First(&source).Error
+	writeJSON(w, http.StatusCreated, videoSourceRow{
+		VideoSource: source,
+		RTMPURL:     fmt.Sprintf("rtmp://%s/live/%s", s.PublicRTMPHost, streamName),
+		RTMPServer:  fmt.Sprintf("rtmp://%s/live", s.PublicRTMPHost),
+		StreamKey:   streamName,
+	})
+}
+
+func (s *Server) listVideoSources(w http.ResponseWriter, r *http.Request) {
+	query := database.DB.Model(&models.VideoSource{})
+	if mac := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mac"))); mac != "" {
+		query = query.Where("mac = ?", mac)
+	}
+	var sources []models.VideoSource
+	query.Order("mac, source_type, display_name").Find(&sources)
+
+	activeSet := make(map[string]bool)
+	for _, stream := range s.fetchSRSStreams() {
+		activeSet[stream.Name] = stream.Publish.Active
+	}
+	macs := make([]string, 0, len(sources))
+	seenMAC := make(map[string]bool)
+	for _, source := range sources {
+		if source.MAC != "" && !seenMAC[source.MAC] {
+			macs = append(macs, source.MAC)
+			seenMAC[source.MAC] = true
+		}
+	}
+	type computerName struct{ Hostname, UserName string }
+	computerMap := make(map[string]computerName)
+	if len(macs) > 0 {
+		var computers []struct{ MAC, Hostname, UserName string }
+		database.DB.Table("computers").Select("mac, hostname, user_name").Where("mac IN ?", macs).Scan(&computers)
+		for _, computer := range computers {
+			computerMap[computer.MAC] = computerName{computer.Hostname, computer.UserName}
+		}
+	}
+	rows := make([]videoSourceRow, 0, len(sources))
+	for _, source := range sources {
+		computer := computerMap[source.MAC]
+		rtmpURL := ""
+		rtmpServer := ""
+		streamKey := ""
+		if source.PublishMode == "direct" && s.PublicRTMPHost != "" {
+			rtmpURL = fmt.Sprintf("rtmp://%s/live/%s", s.PublicRTMPHost, source.StreamName)
+			rtmpServer = fmt.Sprintf("rtmp://%s/live", s.PublicRTMPHost)
+			streamKey = source.StreamName
+		}
+		rows = append(rows, videoSourceRow{
+			VideoSource: source, Hostname: computer.Hostname,
+			UserName: computer.UserName, Active: activeSet[source.StreamName], RTMPURL: rtmpURL,
+			RTMPServer: rtmpServer, StreamKey: streamKey,
+		})
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
 func (s *Server) handleMACs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -550,17 +737,12 @@ func (s *Server) handleMACs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var macs []string
-	macQuery := database.DB.Model(&models.RecordingSegment{}).Where("storage = ?", "local")
+	macQuery := database.DB.Model(&models.RecordingSegment{}).Where("storage = ? AND mac <> ''", "local")
 	macQuery.Distinct("mac").Pluck("mac", &macs)
 
 	result := make([]macInfo, 0, len(macs))
 	if len(macs) > 0 {
-		type compRow struct {
-			MAC      string
-			Hostname string
-			UserName string
-		}
-		var comps []compRow
+		var comps []macInfo
 		database.DB.Table("computers").
 			Select("computers.mac, computers.hostname, computers.user_name").
 			Where("computers.mac IN ?", macs).
@@ -568,7 +750,7 @@ func (s *Server) handleMACs(w http.ResponseWriter, r *http.Request) {
 
 		found := map[string]bool{}
 		for _, c := range comps {
-			result = append(result, macInfo{MAC: c.MAC, Hostname: c.Hostname, UserName: c.UserName})
+			result = append(result, c)
 			found[c.MAC] = true
 		}
 		for _, m := range macs {

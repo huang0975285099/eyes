@@ -49,7 +49,6 @@ services:
       DB_NAME: "eyes"
       DB_CHARSET: "utf8mb4"
       CLIENT_API_KEY: "${CLIENT_API_KEY}"
-      STREAM_TOKEN_SECRET: "${STREAM_TOKEN_SECRET:-}"
       RECORDING_SRS_API: "http://srs:1985"
       RECORDING_RTMP_HOST: "srs:1935"
       PUBLIC_RTMP_HOST: "${PUBLIC_RTMP_HOST:-112.18.238.6:1935}"
@@ -77,6 +76,36 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:52350/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  ai-service:
+    build:
+      context: ../AIService
+    image: "${AI_IMAGE:-eyes-ai-service:latest}"
+    restart: always
+    environment:
+      AI_RECORDING_API: "http://recording-service:52350"
+      AI_RECORDING_ROOT: "/var/recordings"
+      AI_WORKER_ID: "${AI_WORKER_ID:-ai-worker-01}"
+      AI_CONCURRENCY: "${AI_CONCURRENCY:-4}"
+      AI_POLL_INTERVAL: "${AI_POLL_INTERVAL:-3}"
+      AI_HEARTBEAT_INTERVAL: "${AI_HEARTBEAT_INTERVAL:-10}"
+      AI_JOB_LEASE_SECONDS: "${AI_JOB_LEASE_SECONDS:-300}"
+      AI_REQUEST_TIMEOUT: "${AI_REQUEST_TIMEOUT:-15}"
+      AI_FFMPEG_TIMEOUT: "${AI_FFMPEG_TIMEOUT:-120}"
+      AI_HEALTH_PORT: "52351"
+    networks:
+      - rec-net
+    volumes:
+      - recordings:/var/recordings
+    depends_on:
+      recording-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:52351/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3

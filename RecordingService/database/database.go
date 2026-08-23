@@ -72,9 +72,15 @@ func Init(cfg *config.Config) error {
 	if err := db.AutoMigrate(
 		&models.User{},
 		&models.Computer{},
+		&models.VideoSource{},
 		&models.RecordingSetting{},
 		&models.RecordingSegment{},
 		&models.RecordingFrame{},
+		&models.AIAlgorithm{},
+		&models.VideoAnalysisRule{},
+		&models.AIJob{},
+		&models.AIWorker{},
+		&models.AIEvent{},
 	); err != nil {
 		_ = sqlDB.Close()
 		return fmt.Errorf("迁移 eyes 数据库表结构失败: %w", err)

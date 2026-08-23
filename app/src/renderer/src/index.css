@@ -102,6 +102,38 @@ h2 {
 .monitor-heading h2 {
     margin: 5px 0 0;
 }
+.monitor-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.monitor-controls select {
+    max-width: 220px;
+    padding: 8px 10px;
+    border: 1px solid #355276;
+    border-radius: 8px;
+    background: #07172a;
+    color: #d7e5f8;
+}
+.source-status-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-top: 12px;
+}
+.source-chip {
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+}
+.source-chip.online {
+    background: rgba(57, 217, 138, 0.14);
+    color: #65e5a4;
+}
+.source-chip.offline {
+    background: rgba(255, 101, 119, 0.12);
+    color: #ff9ba5;
+}
 .video-wrap {
     position: relative;
     min-height: 360px;

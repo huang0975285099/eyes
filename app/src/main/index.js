@@ -11,7 +11,8 @@ import { getPreferredNICAsync } from './network-util'
 const DEFAULT_CONFIG = {
     recordingServiceURL: 'http://112.18.238.6:52350',
     apiKey: 'Yx7pK4vN9mQ2tR8wF6cH3sD5jL1aZ0eB',
-    userName: ''
+    userName: '',
+    videoSources: [{ id: 'desktop', type: 'screen', displayName: '电脑桌面', enabled: true }]
 }
 
 let mainWindow
@@ -101,7 +102,13 @@ function saveUserName(value) {
     if ([...userName].length > 20) throw new Error('姓名或编号不能超过20个字符')
     config.userName = userName
     const file = join(app.getPath('userData'), 'config.json')
-    writeFileSync(file, JSON.stringify({ userName }, null, 2), 'utf8')
+    let userConfig = {}
+    try {
+        if (existsSync(file)) userConfig = JSON.parse(readFileSync(file, 'utf8'))
+    } catch (error) {
+        console.error(`[config] 保留用户配置失败 ${file}:`, error.message)
+    }
+    writeFileSync(file, JSON.stringify({ ...userConfig, userName }, null, 2), 'utf8')
     return userName
 }
 
@@ -302,6 +309,7 @@ app.whenReady().then(async () => {
     screenController = setupScreenHelper({
         recordingServiceURL: config.recordingServiceURL,
         clientApiKey: config.apiKey,
+        videoSources: config.videoSources,
         onStatus: (status) => mainWindow?.webContents.send('stream:status-changed', status)
     })
     await registerDevice()

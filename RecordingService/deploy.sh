@@ -9,6 +9,7 @@ set -e
 
 # 镜像配置
 IMAGE_NAME="recording-service"
+AI_IMAGE_NAME="eyes-ai-service"
 TAG="latest"
 SRS_IMAGE="ossrs/srs:5"
 MYSQL_IMAGE="mysql:8.1.0"
@@ -32,7 +33,9 @@ elif [ $# -gt 0 ]; then
 fi
 
 TAR_FILE="${IMAGE_NAME}-${TAG}.tar"
+AI_TAR_FILE="${AI_IMAGE_NAME}-${TAG}.tar"
 export RECORDING_IMAGE="${IMAGE_NAME}:${TAG}"
+export AI_IMAGE="${AI_IMAGE_NAME}:${TAG}"
 
 # docker / docker compose 命令前缀（自动检测是否需要 sudo）
 if docker info > /dev/null 2>&1; then
@@ -68,18 +71,13 @@ echo "  ✓ docker compose 可用"
 # 验证生产环境密钥。build.sh 只上传示例文件，不覆盖服务器上的 .env。
 if [ ! -f ".env" ]; then
     echo "✗ 错误: 当前目录缺少 .env"
-    echo "  请执行: cp .env.example .env，然后填写 CLIENT_API_KEY 和 STREAM_TOKEN_SECRET"
+    echo "  请执行: cp .env.example .env，然后填写 CLIENT_API_KEY"
     exit 1
 fi
 
 CLIENT_API_KEY_VALUE=$(sed -n 's/^CLIENT_API_KEY=//p' .env | tail -n 1 | tr -d '\r')
-STREAM_TOKEN_SECRET_VALUE=$(sed -n 's/^STREAM_TOKEN_SECRET=//p' .env | tail -n 1 | tr -d '\r')
 if [ -z "${CLIENT_API_KEY_VALUE}" ] || [ "${CLIENT_API_KEY_VALUE}" = "replace-me" ]; then
     echo "✗ 错误: .env 中 CLIENT_API_KEY 未配置"
-    exit 1
-fi
-if [ -z "${STREAM_TOKEN_SECRET_VALUE}" ] || [[ "${STREAM_TOKEN_SECRET_VALUE}" == replace-* ]]; then
-    echo "✗ 错误: .env 中 STREAM_TOKEN_SECRET 未配置"
     exit 1
 fi
 echo "  ✓ 生产环境密钥已配置"
@@ -136,19 +134,29 @@ else
     exit 1
 fi
 
+if [ -f "${AI_TAR_FILE}" ]; then
+    ${DOCKER} load -i "${AI_TAR_FILE}"
+    echo "  ✓ AIService 镜像加载完成"
+else
+    echo "  ✗ 未找到 ${AI_TAR_FILE}，无法离线部署"
+    exit 1
+fi
+
 # 验证镜像
 echo ""
 echo "[5/6] 验证镜像..."
 APP_SIZE=$(${DOCKER} images "${IMAGE_NAME}:${TAG}" --format "{{.Size}}" 2>/dev/null)
+AI_SIZE=$(${DOCKER} images "${AI_IMAGE_NAME}:${TAG}" --format "{{.Size}}" 2>/dev/null)
 SRS_SIZE=$(${DOCKER} images "${SRS_IMAGE}" --format "{{.Size}}" 2>/dev/null)
 MYSQL_SIZE=$(${DOCKER} images "${MYSQL_IMAGE}" --format "{{.Size}}" 2>/dev/null)
 echo "  ✓ recording-service:${TAG} → ${APP_SIZE}"
+echo "  ✓ ${AI_IMAGE_NAME}:${TAG} → ${AI_SIZE}"
 echo "  ✓ ${SRS_IMAGE} → ${SRS_SIZE}"
 echo "  ✓ ${MYSQL_IMAGE} → ${MYSQL_SIZE}"
 
 # 启动服务
 echo ""
-echo "[6/6] 启动服务（recording-service + SRS + MySQL）..."
+echo "[6/6] 启动服务（recording-service + AIService + SRS + MySQL）..."
 ${COMPOSE} up -d --no-build
 
 # 等待服务启动
@@ -163,7 +171,7 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     ELAPSED=$((ELAPSED + WAIT_INTERVAL))
 
     ALL_HEALTHY=true
-    for SERVICE in mysql srs recording-service; do
+    for SERVICE in mysql srs recording-service ai-service; do
         CONTAINER_ID=$(${COMPOSE} ps -a -q "${SERVICE}")
         if [ -z "${CONTAINER_ID}" ]; then
             ALL_HEALTHY=false

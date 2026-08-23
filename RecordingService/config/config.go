@@ -13,8 +13,7 @@ type Config struct {
 }
 
 type SecurityConfig struct {
-	ClientAPIKey      string
-	StreamTokenSecret string
+	ClientAPIKey string
 }
 
 type DatabaseConfig struct {
@@ -42,10 +41,6 @@ type RecordingConfig struct {
 
 func Load() *Config {
 	clientAPIKey := getEnv("CLIENT_API_KEY", "")
-	streamTokenSecret := getEnv("STREAM_TOKEN_SECRET", "")
-	if streamTokenSecret == "" {
-		streamTokenSecret = clientAPIKey
-	}
 	return &Config{
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
@@ -69,8 +64,7 @@ func Load() *Config {
 			PublicRTMPHost:  getEnv("PUBLIC_RTMP_HOST", "112.18.238.6:1935"),
 		},
 		Security: SecurityConfig{
-			ClientAPIKey:      clientAPIKey,
-			StreamTokenSecret: streamTokenSecret,
+			ClientAPIKey: clientAPIKey,
 		},
 	}
 }
