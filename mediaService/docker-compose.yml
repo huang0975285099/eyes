@@ -65,7 +65,7 @@ services:
       UPDATE_ADMIN_KEY: "${UPDATE_ADMIN_KEY:-}"
       CLIENT_UPDATE_DIR: "/var/client-updates"
     ports:
-      - "22222:22222"
+      - "18888:22222"
     networks:
       - rec-net
     volumes:
@@ -106,7 +106,7 @@ services:
       DASHSCOPE_BASE_URL: "${DASHSCOPE_BASE_URL:-}"
       QWEN_VL_MODEL: "${QWEN_VL_MODEL:-}"
     ports:
-      - "11111:11111"
+      - "18887:11111"
     networks:
       - rec-net
     volumes:

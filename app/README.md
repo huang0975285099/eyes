@@ -8,7 +8,7 @@ Windows Electron 客户端，负责托盘/状态页和多视频源推流。电�
 
 ```json
 {
-    "mediaServiceURL": "http://<服务器地址>:22222",
+    "mediaServiceURL": "http://<服务器地址>:18888",
     "videoSources": [
         {
             "id": "desktop",
@@ -113,7 +113,7 @@ pnpm run build:update
 curl.exe -X POST `
   -H "X-Update-Key: <UPDATE_ADMIN_KEY>" `
   -F "file=@dist\<版本>.zip" `
-  http://<服务器地址>:22222/api/client-updates/upload
+  http://<服务器地址>:18888/api/client-updates/upload
 ```
 
 客户端会从 `/api/client-updates/latest` 检查新版本，并校验安装包 SHA-512；发布时应确保 `UPDATE_ADMIN_KEY` 仅管理员知晓。

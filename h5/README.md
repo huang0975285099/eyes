@@ -2,7 +2,7 @@
 
 Quasar/Vue 3客户门户，同一套代码支持：
 
-- 浏览器：部署后访问`http://<AIService>:11111/customer/`。
+- 浏览器：部署后访问`http://<AIService>:18887/customer/`。
 - Android APK：Quasar Capacitor模式，工程位于`src-capacitor`。
 - Windows EXE：Tauri 2，工程位于`src-tauri`。
 
@@ -39,5 +39,7 @@ npm run dev:tauri
 npm run build:tauri
 ```
 
+`build:tauri`会生成Windows NSIS安装包；需要预先安装Rust stable-msvc、Visual Studio C++生成工具及WebView2。
+
 源码开发时登录页可修改服务器地址。部署在AIService中的浏览器版本会自动使用当前域名；
-Capacitor/Tauri版本默认使用`http://10.0.20.219:11111`，并会记住用户修改后的地址。
+Capacitor/Tauri版本默认使用`http://112.18.238.6:18887`，并会记住用户修改后的地址。

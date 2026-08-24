@@ -3,7 +3,7 @@
 MediaService 为千里眼客户端和品牌摄像头提供视频源管理、永久 RTMP 推流地址、实时流查看、录像录制、AI控制面和客户端更新服务。数据保存在独立的 `eyes` MySQL 数据库中，不依赖其他业务数据库。
 
 ```text
-Electron -> HTTP :22222 -> MediaService -> MySQL 8.1.0 / eyes
+Electron -> HTTP :18888 -> MediaService -> MySQL 8.1.0 / eyes
 Electron desktop/USB/IP camera -> FFmpeg -> RTMP :1935 -> SRS 6
                                       |-> Native AdminService viewer
                                       |-> MediaService -> 录像文件
@@ -78,12 +78,12 @@ INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
 
 对外端口：
 
-- `22222`：MediaService HTTP API，供APP、AdminService和AIService调用
-- `11111`：AIService Web管理后台、健康状态和模块列表
+- `18888`：公网 MediaService HTTP API，供APP调用；容器内部端口仍为`22222`
+- `18887`：公网 AIService Web管理后台、健康状态和模块列表；容器内部端口仍为`11111`
 - `1935`：SRS RTMP 推流
 - `8080`：SRS HTTP-FLV/HLS，仅保留给电脑推流APP自预览和兼容工具
 
-SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `22222`、`11111`、`8080` 的来源，并通过 HTTPS 反向代理保护管理接口。
+SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `18888`、`18887`、`8080` 的来源，并通过 HTTPS 反向代理保护管理接口。
 
 MediaService按规则和SRS在线状态创建持久化实时抽帧任务；AIService领取任务后直接
 拉取SRS实时流、执行FFmpeg并回报图片。这个过程不读取录像片段，也不依赖该视频源的录像开关。
@@ -114,11 +114,11 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 - `POST /api/client-updates/upload`：上传更新 ZIP，必须提供 `X-Update-Key: <UPDATE_ADMIN_KEY>`。
 
 集中观看和H.264/H.265录像回放使用`adminService/Viewer.exe`；客户逐路服务配置使用
-`http://<AIService>:11111/customer/`，超级管理员使用AIService根页面。MediaService不再
-提供浏览器管理页，`22222`仅提供HTTP API。更新ZIP必须包含`latest.yml`、对应的
+`http://<AIService>:18887/customer/`，超级管理员使用AIService根页面。MediaService不再
+提供浏览器管理页，`18888`仅提供HTTP API。更新ZIP必须包含`latest.yml`、对应的
 `*-setup.exe`，并且版本、路径和SHA-512匹配。
 
-RTMP 发布不使用 token、API Key、数据库登记或回调校验。任何能够访问1935端口的设备都可以向 `live` 应用推流；品牌摄像头后台可填写形如 `rtmp://<服务器>:1935/live/<自定义流名>` 的地址。不同设备必须使用不同流名，避免互相覆盖。生产环境应限制1935端口来源IP，管理端口22222也应仅允许可信内网访问。
+RTMP 发布不使用 token、API Key、数据库登记或回调校验。任何能够访问1935端口的设备都可以向 `live` 应用推流；品牌摄像头后台可填写形如 `rtmp://<服务器>:1935/live/<自定义流名>` 的地址。不同设备必须使用不同流名，避免互相覆盖。生产环境应限制1935端口来源IP，管理端口18888也应仅允许可信来源访问。
 
 部分摄像头后台提供一个“推流地址”输入框，可直接填写
 `rtmp://example.com:1935/live/camera-001`；部分后台将其拆成两个输入框，则分别填写
@@ -126,7 +126,7 @@ RTMP 发布不使用 token、API Key、数据库登记或回调校验。任何�
 后台保存摄像头名称和固定地址，也可以选择通过接口登记：
 
 ```bash
-curl -X POST http://<服务器地址>:22222/api/video-sources \
+curl -X POST http://<服务器地址>:18888/api/video-sources \
   -H 'Content-Type: application/json' \
   -d '{"source_id":"north-gate","display_name":"北门摄像头","brand":"camera-brand"}'
 ```

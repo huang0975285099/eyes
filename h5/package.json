@@ -12,7 +12,7 @@
     "dev:android": "quasar dev -m capacitor -T android",
     "tauri": "tauri",
     "dev:tauri": "tauri dev",
-    "build:tauri": "tauri build --no-bundle"
+    "build:tauri": "tauri build"
   },
   "dependencies": {
     "@quasar/extras": "^1.17.0",

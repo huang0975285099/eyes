@@ -9,7 +9,7 @@ import { setupScreenHelper } from './screen-helper-main'
 import { getPreferredNICAsync } from './network-util'
 
 const DEFAULT_CONFIG = {
-    mediaServiceURL: 'http://10.0.20.219:22222',
+    mediaServiceURL: 'http://112.18.238.6:18888',
     userName: '',
     pendingUserNameSync: false,
     videoSources: [{ id: 'desktop', type: 'screen', displayName: '电脑桌面', enabled: true }]
@@ -65,6 +65,10 @@ function loadConfig() {
         } catch (error) {
             console.error(`[config] 读取失败 ${file}:`, error.message)
         }
+    }
+    // 正式公网部署：仅迁移旧版本内网默认值，用户主动填写的其它地址保持不变。
+    if (['http://10.0.20.219:22222', 'http://112.18.238.6:22222'].includes(loaded.mediaServiceURL)) {
+        loaded.mediaServiceURL = DEFAULT_CONFIG.mediaServiceURL
     }
     return loaded
 }

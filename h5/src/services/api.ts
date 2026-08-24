@@ -60,9 +60,16 @@ function normalizedServer(value: string): string {
 
 export function defaultServer(): string {
   const stored = localStorage.getItem(SERVER_KEY)
-  if (stored) return stored
+  if (stored) {
+    if (['http://10.0.20.219:11111', 'http://112.18.238.6:11111'].includes(stored)) {
+      const migrated = 'http://112.18.238.6:18887'
+      localStorage.setItem(SERVER_KEY, migrated)
+      return migrated
+    }
+    return stored
+  }
   if (location.pathname.startsWith('/customer')) return location.origin
-  return 'http://10.0.20.219:11111'
+  return 'http://112.18.238.6:18887'
 }
 
 export function saveServer(value: string): void {

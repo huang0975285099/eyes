@@ -1,5 +1,5 @@
 {
-    "mediaServiceURL": "http://10.0.20.219:22222",
+    "mediaServiceURL": "http://112.18.238.6:18888",
     "videoSources": [
         {
             "id": "desktop",
