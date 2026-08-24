@@ -25,9 +25,9 @@ DEPLOY_TARGET=""
 # 两台服务器都使用同一部署用户和历史目录；生产 .env 只保存在各自服务器上。
 REMOTE_USER="test"
 PUBLIC_REMOTE_IP="112.18.238.6"
-PUBLIC_REMOTE_PORT="2202"
+PUBLIC_REMOTE_PORT="${PUBLIC_REMOTE_PORT:-2202}"
 INTRANET_REMOTE_IP="10.0.20.219"
-INTRANET_REMOTE_PORT="20"
+INTRANET_REMOTE_PORT="${INTRANET_REMOTE_PORT:-22}"
 # 保留现有服务器目录，避免升级时丢失其中的生产 .env。
 REMOTE_DIR="/home/test/recordingservice/"
 # =================================================

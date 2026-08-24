@@ -58,9 +58,17 @@ AIService；不传`--target`时会要求输入部署目标：
 ```bash
 ./build.sh                         # 交互选择：1=公网，2=内网
 ./build.sh --target 1              # 公网 test@112.18.238.6:2202
-./build.sh --target 2              # 内网 test@10.0.20.219:20
+./build.sh --target 2              # 内网 test@10.0.20.219:22
 ./build.sh --target 2 --tag v1.0.0 # 指定镜像标签
 ```
+
+如需临时使用其他SSH端口，可覆盖端口：
+
+```bash
+INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
+```
+
+也可以将`INTRANET_REMOTE_PORT`写入执行环境。
 
 两个目标都沿用`/home/test/recordingservice`部署目录，但各自保留独立的`.env`，
 构建脚本只上传`.env.example`，不会覆盖生产密钥。内网服务器首次部署前应在该目录
