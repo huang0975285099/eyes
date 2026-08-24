@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"image"
@@ -18,7 +19,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -104,6 +104,10 @@ func comQueryInterface(obj uintptr, iid *guid) (uintptr, error) {
 		return 0, fmt.Errorf("QueryInterface HRESULT 0x%08X", uint32(hr))
 	}
 	return out, nil
+}
+
+func shouldReplayCachedDDA(hr uintptr, hasCachedFrame bool) bool {
+	return hasCachedFrame && uint32(hr) == dxgiErrorWaitTimeout
 }
 
 // ── Structs matching Windows ABI ──────────────────────────────────────────────
@@ -290,6 +294,12 @@ func (d *DDA) Capture() (*image.RGBA, uint32, error) {
 		uintptr(unsafe.Pointer(&resource)),
 	)
 	if hr != 0 {
+		// 已成功采集过画面后，WAIT_TIMEOUT 只表示桌面静止。直接返回缓存帧，
+		// 确保新建/重连的 FFmpeg 会话立刻获得首帧；从未采集成功时仍返回
+		// timeout，让上层保留 VM/RDP 环境的 GDI 回退判断。
+		if shouldReplayCachedDDA(hr, d.imgBuf != nil) {
+			return d.imgBuf, 0, nil
+		}
 		return nil, 0, fmt.Errorf("AcquireNextFrame: 0x%08X", uint32(hr))
 	}
 	defer func() {
@@ -424,8 +434,9 @@ type GDICap struct {
 	oldObj    uintptr
 	bits      uintptr
 	imgBuf    *image.RGBA
-	prevHash  uint64 // 上一帧采样哈希，用于跳过未变化帧
 }
+
+var errGDIDisplayChanged = errors.New("GDI display dimensions changed")
 
 func newGDICap() (*GDICap, error) {
 	w, _, _ := procGetSystemMetrics.Call(0) // SM_CXSCREEN
@@ -475,11 +486,10 @@ func newGDICap() (*GDICap, error) {
 		return nil, fmt.Errorf("SelectObject(DIB) failed")
 	}
 	screenW, screenH = uint32(w), uint32(h)
-	// prevHash 初值设为不可能的值，避免首帧全黑（hash=0）与默认 prevHash=0 冲突，导致返回空缓冲
 	return &GDICap{
 		width: int32(w), height: int32(h),
 		hScreenDC: hScreenDC, memDC: memDC, hDIBmp: hDIBmp, oldObj: oldObj, bits: bits,
-		imgBuf: image.NewRGBA(image.Rect(0, 0, int(w), int(h))), prevHash: ^uint64(0),
+		imgBuf: image.NewRGBA(image.Rect(0, 0, int(w), int(h))),
 	}, nil
 }
 
@@ -487,30 +497,21 @@ func (g *GDICap) Capture() (*image.RGBA, bool, error) {
 	if g.hScreenDC == 0 || g.memDC == 0 || g.hDIBmp == 0 || g.bits == 0 {
 		return nil, false, fmt.Errorf("GDI capture resources are closed")
 	}
+	currentW, _, _ := procGetSystemMetrics.Call(0) // SM_CXSCREEN
+	currentH, _, _ := procGetSystemMetrics.Call(1) // SM_CYSCREEN
+	if int32(currentW) != g.width || int32(currentH) != g.height {
+		return nil, false, errGDIDisplayChanged
+	}
 	const srccopy = 0x00CC0020
 	r, _, errNo := procBitBlt.Call(g.memDC, 0, 0, uintptr(g.width), uintptr(g.height), g.hScreenDC, 0, 0, srccopy)
 	if r == 0 {
 		return nil, false, fmt.Errorf("BitBlt(%dx%d) failed errno=%v", g.width, g.height, errNo)
 	}
 
-	// 快速采样哈希：每隔 ~500 像素取一个像素，用于判断帧是否变化
-	// 采样而非全量比较，避免额外 8MB 内存复制
+	// GDI 没有可靠的脏区信息。始终复制完整帧，避免稀疏采样遗漏文字、
+	// 状态图标等小范围变化。GDI 会话已限制为最多 8 FPS。
 	total := int(g.width) * int(g.height)
 	src32 := unsafe.Slice((*uint32)(unsafe.Pointer(g.bits)), total)
-	var hash uint64
-	step := total / 512
-	if step < 1 {
-		step = 1
-	}
-	for i := 0; i < total; i += step {
-		hash = hash*2654435761 + uint64(src32[i])
-	}
-	if hash == g.prevHash {
-		// 画面未变化，跳过像素复制
-		return g.imgBuf, false, nil
-	}
-	g.prevHash = hash
-
 	// Windows DIB 原生就是 BGRA，直接 copy 给 FFmpeg（-pix_fmt bgra）。
 	dst32 := unsafe.Slice((*uint32)(unsafe.Pointer(&g.imgBuf.Pix[0])), total)
 	copy(dst32, src32)
@@ -957,23 +958,10 @@ func assignToJobObject(pid int) {
 	pCloseH.Call(procHandle)
 }
 
-var encoderCache struct {
-	sync.Mutex
-	width   uint32
-	height  uint32
-	encoder string
-	pixFmt  string
-}
-
 func selectEncoder(width, height uint32) (encoder, pixFmt string) {
-	encoderCache.Lock()
-	defer encoderCache.Unlock()
-	if encoderCache.encoder != "" && encoderCache.width == width && encoderCache.height == height {
-		return encoderCache.encoder, encoderCache.pixFmt
-	}
-
 	// 使用实际桌面分辨率和 BGRA 输入路径探测，避免 320x240 探测成功、实际
-	// 2K/4K 会话却不受硬件支持而反复启动失败。分辨率变化后会自动重新探测。
+	// 2K/4K 会话却不受硬件支持而反复启动失败。每个新推流会话都重新探测，
+	// 这样驱动重置或 GPU 临时不可用后不会继续使用陈旧的成功缓存。
 	pixFmt = "bgra"
 	source := fmt.Sprintf("nullsrc=s=%dx%d:d=0.1", width, height)
 	encoders := []string{"h264_nvenc", "h264_qsv", "h264_amf"}
@@ -992,8 +980,6 @@ func selectEncoder(width, height uint32) (encoder, pixFmt string) {
 		cmd.Stderr = &errBuf
 		if err := cmd.Run(); err == nil {
 			log.Printf("[FFmpeg] Hardware encoder available at %dx%d: %s", width, height, enc)
-			encoderCache.width, encoderCache.height = width, height
-			encoderCache.encoder, encoderCache.pixFmt = enc, pixFmt
 			return enc, pixFmt
 		} else {
 			reason := strings.TrimSpace(errBuf.String())
@@ -1004,9 +990,7 @@ func selectEncoder(width, height uint32) (encoder, pixFmt string) {
 		}
 	}
 	log.Printf("[FFmpeg] No hardware encoder available at %dx%d, falling back to libx264", width, height)
-	encoderCache.width, encoderCache.height = width, height
-	encoderCache.encoder, encoderCache.pixFmt = "libx264", pixFmt
-	return encoderCache.encoder, encoderCache.pixFmt
+	return "libx264", pixFmt
 }
 
 // probeCapturer 做一次真实截图，验证 capturer 不只是"创建成功"而是"真能采集"。
@@ -1309,6 +1293,10 @@ func runFFmpegSession(cap capturer, fps int, interval time.Duration, rtmpURL str
 
 		img, _, captureErr := cap.captureFrame()
 		if captureErr != nil {
+			if errors.Is(captureErr, errGDIDisplayChanged) {
+				log.Println("[Screen] GDI display dimensions changed, rebuilding capture resources")
+				return captureErr
+			}
 			if _, ok := cap.(*ddaCapt); ok {
 				code := uint32(0)
 				fmt.Sscanf(captureErr.Error(), "AcquireNextFrame: 0x%08X", &code)

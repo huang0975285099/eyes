@@ -54,3 +54,15 @@ func TestBuildFFmpegArgsLibx264DoesNotUpscale(t *testing.T) {
 		t.Fatal("small libx264 source unexpectedly contains a scale filter")
 	}
 }
+
+func TestShouldReplayCachedDDA(t *testing.T) {
+	if !shouldReplayCachedDDA(uintptr(dxgiErrorWaitTimeout), true) {
+		t.Fatal("DDA timeout with a cached frame must replay the cached frame")
+	}
+	if shouldReplayCachedDDA(uintptr(dxgiErrorWaitTimeout), false) {
+		t.Fatal("DDA timeout without a cached frame must remain an error for fallback detection")
+	}
+	if shouldReplayCachedDDA(uintptr(dxgiErrorAccessLost), true) {
+		t.Fatal("DDA access loss must not replay a cached frame")
+	}
+}
