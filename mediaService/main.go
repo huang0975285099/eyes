@@ -73,7 +73,6 @@ func main() {
 			recordEnabled,
 			mgr.UpdateRetainDays, // 热更新回调
 			mgr.UpdateRecordEnabled,
-			cfg.Security.ClientAPIKey,
 		).Start(cfg.Recording.WebPort)
 	}
 

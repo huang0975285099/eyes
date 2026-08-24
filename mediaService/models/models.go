@@ -15,29 +15,6 @@ type RecordingSetting struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
-type User struct {
-	ID      uint   `gorm:"primaryKey"`
-	Account string `gorm:"size:50"`
-	Name    string `gorm:"size:100"`
-}
-
-type Computer struct {
-	ID          uint   `gorm:"primaryKey"`
-	IP          string `gorm:"size:50"`
-	MAC         string `gorm:"size:50;uniqueIndex"`
-	OS          string `gorm:"size:200"`
-	Hostname    string `gorm:"size:100"`
-	UserName    string `gorm:"size:20"`
-	PublicIP    string `gorm:"size:50"`
-	CPU         string `gorm:"size:200"`
-	TotalMemory int64
-	DiskSerial  string `gorm:"size:200"`
-	UserID      *uint  `gorm:"uniqueIndex"`
-	User        User   `gorm:"foreignKey:UserID"`
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-}
-
 // VideoSource describes a logical video source belonging to a computer. It is
 // deliberately vendor-neutral: brand-specific connection details stay on the
 // client and never enter MediaService.

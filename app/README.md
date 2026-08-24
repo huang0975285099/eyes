@@ -1,6 +1,6 @@
 # 千里眼客户端
 
-Windows Electron 客户端，负责设备信息登记、托盘/状态页和多视频源推流。电脑桌面由同目录的 `screen-helper.exe` 采集；USB 摄像头和支持RTSP/HTTP的网络摄像头由`ffmpeg.exe`采集并统一编码后推送到MediaService管理的SRS。
+Windows Electron 客户端，负责托盘/状态页和多视频源推流。电脑桌面由同目录的 `screen-helper.exe` 采集；USB 摄像头和支持RTSP/HTTP的网络摄像头由`ffmpeg.exe`采集并统一编码后推送到MediaService管理的SRS。
 
 ## 运行配置
 
@@ -9,7 +9,6 @@ Windows Electron 客户端，负责设备信息登记、托盘/状态页和多�
 ```json
 {
     "mediaServiceURL": "http://<服务器地址>:22222",
-    "apiKey": "与服务端 CLIENT_API_KEY 完全一致",
     "videoSources": [
         {
             "id": "desktop",
@@ -23,12 +22,14 @@ Windows Electron 客户端，负责设备信息登记、托盘/状态页和多�
 ```
 
 - `mediaServiceURL`是MediaService的HTTP地址，不要填写RTMP地址。
-- `apiKey` 必须与服务端 `.env` 中的 `CLIENT_API_KEY` 一致。
-- 客户端启动后登记设备，并按固定周期更新设备信息；永久推流地址由服务端统一生成和下发。
+- 客户端不登记设备信息；只使用MAC和视频源信息获取稳定推流地址。
+- 状态页的“当前用户”仅保存在本机用户配置中，可在“本机信息”中修改，不上传MediaService。
 - 未配置 `videoSources` 时自动启用一个桌面源。
 - 所有视频源都使用“MAC、来源类型、来源 ID 哈希”组成的安全流名，不在服务器或日志中暴露摄像头地址和密码。
 
-品牌摄像头如果支持主动RTMP推流，也可以不经过客户端：在MediaService管理后台的“品牌摄像头直推”中登记摄像头，将生成的永久地址复制到品牌后台即可。该地址不含token。
+品牌摄像头如果支持主动RTMP推流，可以直接填写
+`rtmp://<服务器>:1935/live/<唯一流名>`，不需要客户端、登记、token或API Key。
+管理后台的“品牌摄像头直推”登记功能仅用于生成固定流名和保存设备名称。
 
 ## 摄像头配置
 

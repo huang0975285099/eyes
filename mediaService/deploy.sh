@@ -68,19 +68,13 @@ if ! ${COMPOSE} version > /dev/null 2>&1; then
 fi
 echo "  ✓ docker compose 可用"
 
-# 验证生产环境密钥。build.sh 只上传示例文件，不覆盖服务器上的 .env。
+# build.sh 只上传示例文件，不覆盖服务器上的 .env。
 if [ ! -f ".env" ]; then
     echo "✗ 错误: 当前目录缺少 .env"
-    echo "  请执行: cp .env.example .env，然后填写 CLIENT_API_KEY"
+    echo "  请执行: cp .env.example .env，然后填写运行配置"
     exit 1
 fi
-
-CLIENT_API_KEY_VALUE=$(sed -n 's/^CLIENT_API_KEY=//p' .env | tail -n 1 | tr -d '\r')
-if [ -z "${CLIENT_API_KEY_VALUE}" ] || [ "${CLIENT_API_KEY_VALUE}" = "replace-me" ]; then
-    echo "✗ 错误: .env 中 CLIENT_API_KEY 未配置"
-    exit 1
-fi
-echo "  ✓ 生产环境密钥已配置"
+echo "  ✓ .env 配置文件已加载"
 
 if ! ${COMPOSE} config -q; then
     echo "✗ 错误: docker-compose.yml 或 .env 配置无效"
@@ -228,7 +222,7 @@ REMOTE_IP=$(hostname -I | awk '{print $1}')
 echo "    - MediaService:  http://${REMOTE_IP}:22222"
 echo "    - AIService:     http://${REMOTE_IP}:11111/health"
 echo "    - RTMP 推流:     rtmp://${REMOTE_IP}:1935/live/{流名}"
-echo "    - HTTP-FLV:      http://${REMOTE_IP}:8090/live/{流名}.flv"
+echo "    - HTTP-FLV:      http://${REMOTE_IP}:8080/live/{流名}.flv"
 echo "    - SRS HTTP API:  仅 Docker 内部 http://srs:1985"
 echo "    - MySQL:         仅 Docker 内部 mysql:3306（数据库 eyes）"
 echo "    - 录像存储目录:   ${RECORDING_DIR}"

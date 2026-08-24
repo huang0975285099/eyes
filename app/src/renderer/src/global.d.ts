@@ -10,6 +10,7 @@ type SystemInfo = {
     total_memory: number
     disk_serial: string
     username: string
+    user_name: string
     app_version: string
 }
 
@@ -28,21 +29,17 @@ type StreamStatus = {
     error: string
     sources: VideoSourceStatus[]
 }
-type RegistrationStatus = { ok: boolean; message: string; at: string | null; info?: SystemInfo }
-
 declare global {
     interface Window {
         eyesAPI: {
             getStatus: () => Promise<{
                 config: { mediaServiceURL: string }
                 system: SystemInfo
-                registration: RegistrationStatus
                 stream: StreamStatus
             }>
-            registerDevice: () => Promise<RegistrationStatus>
+            setUserName: (value: string) => Promise<string>
             restartStream: () => Promise<{ ok: boolean; error?: string }>
             onStreamStatus: (callback: (status: StreamStatus) => void) => () => void
-            onRegistration: (callback: (status: RegistrationStatus) => void) => () => void
         }
     }
 }

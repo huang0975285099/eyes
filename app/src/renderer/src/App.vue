@@ -3,7 +3,7 @@ import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import flvjs from 'flv.js'
 
 const loading = ref(true)
-const status = ref({ system: {}, registration: {}, stream: {}, config: {} })
+const status = ref({ system: {}, stream: {}, config: {} })
 const videoRef = ref(null)
 const selectedSourceID = ref('')
 const playbackStatus = ref('等待推流')
@@ -14,7 +14,6 @@ const userNameError = ref('')
 const userNameSaving = ref(false)
 const userNameInputRef = ref(null)
 let offStream
-let offRegistration
 let flvPlayer
 let retryTimer
 
@@ -68,7 +67,7 @@ function playbackURL() {
         const parsed = new URL(rtmpURL)
         const streamName = parsed.pathname.split('/').filter(Boolean).pop()
         if (!streamName) return ''
-        return `http://${parsed.hostname}:8090/live/${streamName}.flv`
+        return `http://${parsed.hostname}:8080/live/${streamName}.flv`
     } catch {
         return ''
     }
@@ -121,10 +120,6 @@ async function refresh() {
     status.value = await window.eyesAPI.getStatus()
     ensureSelectedSource()
     loading.value = false
-}
-
-async function registerAgain() {
-    status.value.registration = await window.eyesAPI.registerDevice()
 }
 
 async function editUserName() {
@@ -184,15 +179,11 @@ onMounted(async () => {
         ensureSelectedSource()
         startPlayback()
     })
-    offRegistration = window.eyesAPI.onRegistration((value) => {
-        status.value.registration = value
-    })
 })
 
 onUnmounted(() => {
     destroyPlayer()
     offStream?.()
-    offRegistration?.()
 })
 </script>
 
@@ -268,56 +259,51 @@ onUnmounted(() => {
             </section>
 
             <section class="grid">
-                <article class="card">
-                    <div class="card-title">
-                        <h2>设备登记</h2>
-                        <span :class="['dot', status.registration.ok ? 'ok' : 'bad']"></span>
-                    </div>
-                    <p>{{ status.registration.message || '尚未登记' }}</p>
-                    <small>{{ status.config.mediaServiceURL }}</small>
-                    <div class="user-name-row">
-                        <template v-if="!editingUserName">
-                            当前用户：<strong>{{ status.system.user_name || '无' }}</strong>
-                            <button type="button" class="link-button" @click="editUserName">
-                                修改
-                            </button>
-                        </template>
-                        <form v-else class="user-name-form" @submit.prevent="saveUserName">
-                            <input
-                                ref="userNameInputRef"
-                                v-model="userNameInput"
-                                type="text"
-                                maxlength="20"
-                                placeholder="请输入姓名或者编号"
-                                :disabled="userNameSaving"
-                                @keydown.esc.prevent="cancelEditUserName"
-                            />
-                            <button type="submit" class="link-button" :disabled="userNameSaving">
-                                {{ userNameSaving ? '保存中…' : '保存' }}
-                            </button>
-                            <button
-                                type="button"
-                                class="link-button muted"
-                                :disabled="userNameSaving"
-                                @click="cancelEditUserName"
-                            >
-                                取消
-                            </button>
-                        </form>
-                    </div>
-                    <small v-if="userNameError" class="field-error">{{ userNameError }}</small>
-                    <small>请输入姓名或者编号，不超过20个字符。</small>
-                    <button class="secondary" @click="registerAgain">重新登记</button>
-                </article>
                 <article class="card details">
                     <h2>本机信息</h2>
                     <dl>
+                        <dt>当前用户</dt>
+                        <dd class="user-name-cell">
+                            <template v-if="!editingUserName">
+                                <span>{{ status.system.user_name || '无' }}</span>
+                                <button type="button" class="link-button" @click="editUserName">
+                                    修改
+                                </button>
+                            </template>
+                            <form v-else class="user-name-form" @submit.prevent="saveUserName">
+                                <input
+                                    ref="userNameInputRef"
+                                    v-model="userNameInput"
+                                    type="text"
+                                    maxlength="20"
+                                    placeholder="请输入姓名或者编号"
+                                    :disabled="userNameSaving"
+                                    @keydown.esc.prevent="cancelEditUserName"
+                                />
+                                <button
+                                    type="submit"
+                                    class="link-button"
+                                    :disabled="userNameSaving"
+                                >
+                                    {{ userNameSaving ? '保存中…' : '保存' }}
+                                </button>
+                                <button
+                                    type="button"
+                                    class="link-button muted"
+                                    :disabled="userNameSaving"
+                                    @click="cancelEditUserName"
+                                >
+                                    取消
+                                </button>
+                            </form>
+                            <small v-if="userNameError" class="field-error">
+                                {{ userNameError }}
+                            </small>
+                        </dd>
                         <dt>主机名</dt>
                         <dd>{{ status.system.hostname || '-' }}</dd>
-                        <dt>公网 IP - 内网 IP</dt>
-                        <dd>
-                            {{ status.system.public_ip || '-' }} - {{ status.system.ip || '-' }}
-                        </dd>
+                        <dt>内网 IP</dt>
+                        <dd>{{ status.system.ip || '-' }}</dd>
                         <dt>MAC 地址</dt>
                         <dd>{{ status.system.mac || '-' }}</dd>
                         <dt>操作系统</dt>

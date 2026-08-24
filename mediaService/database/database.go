@@ -70,8 +70,6 @@ func Init(cfg *config.Config) error {
 	sqlDB.SetConnMaxIdleTime(10 * time.Minute)
 
 	if err := db.AutoMigrate(
-		&models.User{},
-		&models.Computer{},
 		&models.VideoSource{},
 		&models.RecordingSetting{},
 		&models.RecordingSegment{},

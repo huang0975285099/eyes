@@ -28,7 +28,7 @@ services:
     restart: always
     ports:
       - "1935:1935"   # RTMP 推流
-      - "8080:8080"   # HTTP-FLV 拉流
+      - "8080:8080"   # HTTP-FLV/HLS 拉流
     volumes:
       - ./srs.conf:/usr/local/srs/conf/docker.conf:ro
     networks:
@@ -50,7 +50,6 @@ services:
       DB_PASSWORD: "all_seeing_eyes"
       DB_NAME: "eyes"
       DB_CHARSET: "utf8mb4"
-      CLIENT_API_KEY: "${CLIENT_API_KEY}"
       RECORDING_SRS_API: "http://srs:1985"
       RECORDING_RTMP_HOST: "srs:1935"
       PUBLIC_RTMP_HOST: "${PUBLIC_RTMP_HOST:-112.18.238.6:1935}"
@@ -61,7 +60,7 @@ services:
       RECORDING_RETAIN_DAYS: "2"
       RECORDING_FRAME_RETAIN_DAYS: "30"
       MEDIA_WEB_PORT: "22222"
-      MEDIA_SRS_HTTP_HOST: "${MEDIA_SRS_HTTP_HOST:-112.18.238.6:8090}"
+      MEDIA_SRS_HTTP_HOST: "${MEDIA_SRS_HTTP_HOST:-112.18.238.6:8080}"
       UPDATE_ADMIN_KEY: "${UPDATE_ADMIN_KEY:-}"
       CLIENT_UPDATE_DIR: "/var/client-updates"
     ports:

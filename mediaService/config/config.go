@@ -9,11 +9,6 @@ import (
 type Config struct {
 	Database  DatabaseConfig
 	Recording RecordingConfig
-	Security  SecurityConfig
-}
-
-type SecurityConfig struct {
-	ClientAPIKey string
 }
 
 type DatabaseConfig struct {
@@ -40,7 +35,6 @@ type RecordingConfig struct {
 }
 
 func Load() *Config {
-	clientAPIKey := getEnv("CLIENT_API_KEY", "")
 	return &Config{
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
@@ -62,9 +56,6 @@ func Load() *Config {
 			WebPort:         atoi("MEDIA_WEB_PORT", "22222"),
 			SRSHttpHost:     getEnv("MEDIA_SRS_HTTP_HOST", ""),
 			PublicRTMPHost:  getEnv("PUBLIC_RTMP_HOST", "112.18.238.6:1935"),
-		},
-		Security: SecurityConfig{
-			ClientAPIKey: clientAPIKey,
 		},
 	}
 }

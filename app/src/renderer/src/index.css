@@ -179,13 +179,8 @@ small {
     color: #91a6c1;
     overflow-wrap: anywhere;
 }
-.user-name-row {
-    margin-top: 16px;
-    color: #d7e5f8;
-    font-size: 13px;
-}
-.user-name-row strong {
-    color: #71aefb;
+.user-name-cell {
+    min-height: 32px;
 }
 .user-name-form {
     display: flex;
@@ -231,29 +226,8 @@ small {
 }
 .grid {
     display: grid;
-    grid-template-columns: 0.8fr 1.2fr;
+    grid-template-columns: 1fr;
     gap: 18px;
-}
-.card-title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-.dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-}
-.ok {
-    background: #39d98a;
-    box-shadow: 0 0 12px #39d98a;
-}
-.bad {
-    background: #ff6577;
-}
-.secondary {
-    margin-top: 22px;
-    background: #253a55;
 }
 .details dl {
     display: grid;

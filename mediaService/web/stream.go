@@ -1,14 +1,12 @@
 package web
 
 import (
-	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"media-service/database"
 	"media-service/models"
 	"media-service/streamsource"
 	"net/http"
-	"strings"
 
 	"gorm.io/gorm/clause"
 )
@@ -20,20 +18,9 @@ type publishConfigRequest struct {
 	DisplayName string `json:"display_name"`
 }
 
-type srsHookRequest struct {
-	Action string `json:"action"`
-	App    string `json:"app"`
-	Stream string `json:"stream"`
-	Param  string `json:"param"`
-}
-
 func (s *Server) handlePublishConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !s.authorizeClient(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"message": "客户端密钥无效"})
 		return
 	}
 	if s.PublicRTMPHost == "" {
@@ -77,49 +64,4 @@ func (s *Server) handlePublishConfig(w http.ResponseWriter, r *http.Request) {
 		"playback_url": playbackURL,
 		"source_type":  sourceType, "source_id": sourceID, "display_name": displayName,
 	})
-}
-
-func (s *Server) handleSRSPublish(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	defer r.Body.Close()
-	var hook srsHookRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&hook); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"code": 1, "message": "invalid hook"})
-		return
-	}
-	if hook.App != "live" || !s.allowedPublishStream(hook.Stream) {
-		writeJSON(w, http.StatusOK, map[string]any{"code": 1, "message": "unregistered or invalid stream"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"code": 0})
-}
-
-// allowedPublishStream performs no token authentication. Every stream must
-// belong to an enabled video source registered in MediaService.
-func (s *Server) allowedPublishStream(streamName string) bool {
-	var count int64
-	database.DB.Model(&models.VideoSource{}).
-		Where("stream_name = ? AND enabled = ?", streamName, true).
-		Count(&count)
-	return count > 0
-}
-
-func (s *Server) handleSRSLifecycle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"code": 0})
-}
-
-func (s *Server) authorizeClient(r *http.Request) bool {
-	provided := r.Header.Get("X-Client-Key")
-	return s.ClientAPIKey != "" && hmac.Equal([]byte(provided), []byte(s.ClientAPIKey))
-}
-
-func normalizeMAC(value string) string {
-	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "-", ":"))
 }

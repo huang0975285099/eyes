@@ -10,7 +10,6 @@ import { getPreferredNICAsync } from './network-util'
 
 const DEFAULT_CONFIG = {
     mediaServiceURL: 'http://10.0.20.219:22222',
-    apiKey: 'Yx7pK4vN9mQ2tR8wF6cH3sD5jL1aZ0eB',
     userName: '',
     videoSources: [{ id: 'desktop', type: 'screen', displayName: '电脑桌面', enabled: true }]
 }
@@ -18,10 +17,7 @@ const DEFAULT_CONFIG = {
 let mainWindow
 let tray
 let screenController
-let registerTimer
-let lastRegistration = { ok: false, message: '尚未登记', at: null }
 let startHidden = false
-let publicIP = ''
 
 function configureAutoLaunch() {
     // 仅对安装后的正式版本启用，开发环境不应修改用户的登录启动项。
@@ -95,7 +91,6 @@ async function collectSystemInfo() {
         disk_serial: await getDiskSerial(),
         username: os.userInfo().username,
         user_name: config.userName || '',
-        public_ip: publicIP,
         app_version: app.getVersion()
     }
 }
@@ -183,51 +178,6 @@ async function promptClientUpdate() {
     }
 }
 
-async function registerDevice() {
-    if (!config.mediaServiceURL) {
-        lastRegistration = {
-            ok: false,
-            message: '未配置 mediaServiceURL',
-            at: new Date().toISOString()
-        }
-        return lastRegistration
-    }
-    try {
-        const info = await collectSystemInfo()
-        if (!info.mac) throw new Error('未找到可用网卡 MAC 地址')
-        // public_ip 由服务端根据连接来源判定，只用于本地状态展示，不能随登记请求提交。
-        const registrationPayload = { ...info }
-        delete registrationPayload.public_ip
-        const response = await fetch(
-            `${config.mediaServiceURL.replace(/\/$/, '')}/api/clients/register`,
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Client-Key': config.apiKey || ''
-                },
-                body: JSON.stringify(registrationPayload),
-                signal: AbortSignal.timeout(8000)
-            }
-        )
-        const body = await response.json().catch(() => ({}))
-        if (!response.ok) throw new Error(body.message || `HTTP ${response.status}`)
-        publicIP = body.public_ip || ''
-        info.public_ip = publicIP
-        lastRegistration = {
-            ok: true,
-            message: '设备信息已登记',
-            at: new Date().toISOString(),
-            info
-        }
-    } catch (error) {
-        lastRegistration = { ok: false, message: error.message, at: new Date().toISOString() }
-        console.error('[device] 登记失败:', error.message)
-    }
-    mainWindow?.webContents.send('device:registration-changed', lastRegistration)
-    return lastRegistration
-}
-
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 760,
@@ -289,13 +239,10 @@ ipcMain.handle('app:get-status', async () => ({
         mediaServiceURL: config.mediaServiceURL
     },
     system: await collectSystemInfo(),
-    registration: lastRegistration,
     stream: screenController?.status() || { running: false, url: '', error: '' }
 }))
-ipcMain.handle('device:register', () => registerDevice())
 ipcMain.handle('device:set-user-name', (_event, value) => {
-    const userName = saveUserName(value)
-    return registerDevice().then(() => userName)
+    return saveUserName(value)
 })
 ipcMain.handle('stream:restart', () => screenController?.restart('ipc'))
 ipcMain.handle('update:check', () => checkClientUpdate())
@@ -311,19 +258,15 @@ app.whenReady().then(async () => {
     createTray()
     screenController = setupScreenHelper({
         mediaServiceURL: config.mediaServiceURL,
-        clientApiKey: config.apiKey,
         videoSources: config.videoSources,
         onStatus: (status) => mainWindow?.webContents.send('stream:status-changed', status)
     })
-    await registerDevice()
     await screenController.start('app_boot')
-    registerTimer = setInterval(registerDevice, 5 * 60 * 1000)
     setTimeout(promptClientUpdate, 3000)
 })
 
 app.on('before-quit', () => {
     app.isQuiting = true
-    if (registerTimer) clearInterval(registerTimer)
     screenController?.stop('app_quit')
 })
 

@@ -135,7 +135,7 @@
     </div>
     <table id="streamTable" style="display:none">
       <thead>
-        <tr><th>状态</th><th>设备名称</th><th>视频源</th><th>MAC 地址</th><th>公网 IP - 内网 IP</th><th>用户</th><th>流名称</th></tr>
+        <tr><th>状态</th><th>视频源</th><th>MAC 地址</th><th>流名称</th></tr>
       </thead>
       <tbody id="streamTbody"></tbody>
     </table>
@@ -164,7 +164,7 @@
     <div id="segHint" class="empty">请选择日期后点击「查询」</div>
     <table id="segTable" style="display:none">
       <thead>
-        <tr><th>开始时间</th><th>时长</th><th>大小</th><th>设备</th><th>视频源</th><th>用户</th><th>操作</th></tr>
+        <tr><th>开始时间</th><th>时长</th><th>大小</th><th>MAC 地址</th><th>视频源</th><th>操作</th></tr>
       </thead>
       <tbody id="segTbody"></tbody>
     </table>
@@ -229,7 +229,7 @@
         <input type="text" id="directCameraBrand" placeholder="品牌（可选）">
         <button class="btn btn-primary" onclick="createDirectCamera()">生成推流地址</button>
       </div>
-      <p style="font-size:12px;color:#999;margin-bottom:10px">将生成的永久 RTMP 地址填入摄像头品牌后台。地址不含 token，但只有已登记的视频源或已登记电脑的桌面流可以发布。</p>
+      <p style="font-size:12px;color:#999;margin-bottom:10px">将生成的永久 RTMP 地址填入摄像头品牌后台。推流不需要 token、API Key 或设备登记，不同设备请使用不同的流名。</p>
       <p id="directCameraStatus" style="font-size:12px;margin-bottom:10px"></p>
       <table id="directCameraTable" style="display:none">
         <thead><tr><th>状态</th><th>名称</th><th>品牌</th><th>唯一编号</th><th>RTMP 服务器</th><th>串流密钥</th><th>操作</th></tr></thead>
@@ -318,8 +318,8 @@
       <div class="monitor-cell">
         <video id="v-${s.stream_name}" muted autoplay playsinline></video>
         <div class="monitor-info">
-          <div class="name">${escapeHTML(s.display_name || s.hostname || s.user_name || s.mac || s.stream_name)}</div>
-          <div class="mac">${escapeHTML(s.display_name || sourceTypeName(s.source_type))} · ${escapeHTML(s.mac || '')} ${s.ip ? '· ' + escapeHTML(s.ip) : ''}</div>
+          <div class="name">${escapeHTML(s.display_name || sourceTypeName(s.source_type))}</div>
+          <div class="mac">${escapeHTML(s.mac || s.stream_name)}</div>
         </div>
       </div>
     `).join('');
@@ -374,11 +374,8 @@
     tbody.innerHTML = streams.map(s => `
       <tr>
         <td><span class="badge badge-online">在线</span></td>
-        <td>${s.hostname || (s.source_type === 'direct_camera' ? '独立摄像头' : '-')}</td>
         <td>${escapeHTML(s.display_name || sourceTypeName(s.source_type))}</td>
         <td class="mac">${s.mac || '-'}</td>
-        <td>${s.public_ip || '-'} - ${s.ip || '-'}</td>
-        <td>${s.user_name || '-'}</td>
         <td class="mac">${s.stream_name}</td>
       </tr>
     `).join('');
@@ -395,7 +392,7 @@
       (macs || []).forEach(m => {
         const opt = document.createElement('option');
         opt.value = m.mac;
-        opt.textContent = m.user_name ? `${m.user_name}（${m.hostname || m.mac}）` : (m.hostname || m.mac);
+        opt.textContent = m.mac;
         sel.appendChild(opt);
       });
     } catch {}
@@ -443,9 +440,8 @@
         <td class="time">${new Date(seg.started_at).toLocaleString('zh-CN', {hour12:false})}</td>
         <td>${formatDuration(seg.duration)}</td>
         <td style="color:#999;font-size:12px">${formatSize(seg.file_size)}</td>
-        <td><span>${seg.hostname || seg.mac || '独立摄像头'}</span><br><span class="mac">${seg.mac || '-'}</span></td>
+        <td class="mac">${seg.mac || '-'}</td>
         <td>${escapeHTML(seg.display_name || sourceTypeName(seg.source_type))}</td>
-        <td>${seg.user_name || '-'}</td>
         <td><button class="btn btn-primary btn-sm" onclick="playSegment(${seg.id}, this)">播放</button></td>
       </tr>
     `).join('');

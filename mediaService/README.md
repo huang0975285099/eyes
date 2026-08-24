@@ -1,11 +1,11 @@
 # MediaService
 
-MediaService 为千里眼客户端和品牌摄像头提供设备登记、永久 RTMP 推流地址、实时流查看、录像录制、AI控制面和客户端更新服务。数据保存在独立的 `eyes` MySQL 数据库中，不依赖其他业务数据库。
+MediaService 为千里眼客户端和品牌摄像头提供视频源管理、永久 RTMP 推流地址、实时流查看、录像录制、AI控制面和客户端更新服务。数据保存在独立的 `eyes` MySQL 数据库中，不依赖其他业务数据库。
 
 ```text
 Electron -> HTTP :22222 -> MediaService -> MySQL 8.1.0 / eyes
 Electron desktop/USB/IP camera -> FFmpeg -> RTMP :1935 -> SRS
-                                      |-> HTTP-FLV/HLS :8090
+                                      |-> HTTP-FLV/HLS :8080
                                       |-> MediaService -> 录像文件
                                       |-> AIService -> 抽帧/后续实时AI
 ```
@@ -18,11 +18,13 @@ cp .env.example .env
 
 生产环境至少修改以下配置：
 
-- `CLIENT_API_KEY`：客户端登记和推流配置接口的共享密钥，必须与 `app/config.json` 的 `apiKey` 一致。
 - `PUBLIC_RTMP_HOST`：客户端可访问的 RTMP 地址，例如 `example.com:1935`。
-- `MEDIA_SRS_HTTP_HOST`：客户端/管理页可访问的SRS HTTP-FLV/HLS地址，例如`example.com:8090`。
+- `MEDIA_SRS_HTTP_HOST`：客户端/管理页可访问的SRS HTTP-FLV/HLS地址，例如`example.com:8080`。
 - `UPDATE_ADMIN_KEY`：客户端更新 ZIP 上传密钥；为空时禁用上传。
 - `RECORDING_DIR`：宿主机录像目录，默认 `/home/test/recordings`，应改为实际磁盘挂载点。
+
+客户端不进行设备登记，也不上传主机名、IP、CPU、内存、磁盘序列号或当前用户。品牌摄像头无需登记，可直接配置 RTMP 地址。请通过防火墙限制 `22222` 管理端口和
+`1935` 推流端口的访问范围。
 
 录像默认分段 600 秒；Compose 当前默认录像保留 2 天、截图保留 30 天。管理页保存的录制开关和录像保留天数会写入数据库，并覆盖环境变量、立即生效。每台电脑可以登记多个独立视频源，当前内置来源类型为 `screen`、`usb_camera` 和 `ip_camera`；符合小写字母、数字和下划线命名规则的新适配器类型也可直接登记，无需再次修改服务端流名协议。
 
@@ -71,16 +73,16 @@ INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
 `/home/administrator/eyes/`，两者各自保留独立的`.env`。构建脚本只上传`.env.example`，
 不会覆盖生产密钥。内网服务器首次部署前应在该目录
 创建`.env`，并将`PUBLIC_RTMP_HOST`设为`10.0.20.219:1935`、
-`MEDIA_SRS_HTTP_HOST`设为`10.0.20.219:8090`；公网服务器继续使用公网地址。
+`MEDIA_SRS_HTTP_HOST`设为`10.0.20.219:8080`；公网服务器继续使用公网地址。
 
 对外端口：
 
 - `22222`：MediaService管理后台和API
 - `11111`：AIService健康状态和模块列表
 - `1935`：SRS RTMP 推流
-- `8090`：SRS HTTP-FLV/HLS 播放
+- `8080`：SRS HTTP-FLV/HLS 播放
 
-SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `22222`、`11111`、`8090` 的来源，并通过 HTTPS 反向代理保护管理接口。
+SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `22222`、`11111`、`8080` 的来源，并通过 HTTPS 反向代理保护管理接口。
 
 MediaService在录像片段入库后创建持久化抽帧任务，AIService领取任务、执行FFmpeg并
 回报图片；两个容器共享 `recordings` 卷。
@@ -94,7 +96,6 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 ## 常用接口
 
 - `GET /api/health`：服务和数据库健康检查，数据库不可用时返回 HTTP 503。
-- `POST /api/clients/register`：客户端登记/更新设备信息。
 - `POST /api/streams/publish-config`：APP 按设备和视频源获取永久 RTMP 推流配置，必须提交 `mac`、`source_type`、`source_id` 和 `display_name`。
 - `GET /api/streams`、`GET /api/stats`：实时流和系统统计。
 - `GET /api/video-sources`：查看已登记的视频源、在线状态及品牌摄像头直推地址。
@@ -109,9 +110,12 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 
 管理后台地址为 `http://<服务器地址>:22222`。更新 ZIP 必须包含 `latest.yml`、对应的 `*-setup.exe`，并且其中的版本、路径和 SHA-512 必须匹配；客户端侧 ZIP 可由 `app` 目录的 `pnpm run build:update` 生成。
 
-RTMP 发布不使用 token。SRS 发布回调只接受 `video_sources` 中已登记且启用的视频源。品牌摄像头后台填写的地址形如 `rtmp://<服务器>:1935/live/camera--<固定标识>`，配置一次即可长期使用。因为地址本身不再提供身份认证，生产环境应限制1935端口来源IP，管理端口22222也应仅允许可信内网访问。
+RTMP 发布不使用 token、API Key、数据库登记或回调校验。任何能够访问1935端口的设备都可以向 `live` 应用推流；品牌摄像头后台可填写形如 `rtmp://<服务器>:1935/live/<自定义流名>` 的地址。不同设备必须使用不同流名，避免互相覆盖。生产环境应限制1935端口来源IP，管理端口22222也应仅允许可信内网访问。
 
-部分摄像头后台提供一个“推流地址”输入框，直接填写接口返回的 `rtmp_url`；部分后台将其拆成两个输入框，则分别填写 `rtmp_server`（例如 `rtmp://example.com:1935/live`）和 `stream_key`。也可以通过接口登记：
+部分摄像头后台提供一个“推流地址”输入框，可直接填写
+`rtmp://example.com:1935/live/camera-001`；部分后台将其拆成两个输入框，则分别填写
+`rtmp_server`（例如 `rtmp://example.com:1935/live`）和唯一的`stream_key`。如需在管理
+后台保存摄像头名称和固定地址，也可以选择通过接口登记：
 
 ```bash
 curl -X POST http://<服务器地址>:22222/api/video-sources \
@@ -129,7 +133,7 @@ docker compose exec -T mysql mysql -uroot -pall_seeing_eyes \
   eyes < eyes-backup.sql
 ```
 
-数据库表由服务启动时自动创建或更新，包括设备、录像、抽帧以及
+数据库表由服务启动时自动创建或更新，包括视频源、录像、抽帧以及
 `ai_algorithms`、`video_analysis_rules`、`ai_jobs`、`ai_workers`、`ai_events` 等AI平台表。
 备份时还应保留宿主机 `RECORDING_DIR` 中的录像和AI证据文件；数据库记录和文件需要
 同时恢复才能正常播放。

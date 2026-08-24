@@ -32,12 +32,11 @@ type Server struct {
 	RecordEnabled       bool       // 全局录制开关
 	UpdateRetainDays    func(int)  // 热更新 RecorderManager 的回调
 	UpdateRecordEnabled func(bool) // 热更新全局录制开关
-	ClientAPIKey        string     // Electron 设备登记接口共享密钥
 	PublicRTMPHost      string     // 下发给客户端的 RTMP 公网地址
 	RecordingOutputDir  string     // 录像和AI证据共享目录
 }
 
-func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, recordingOutputDir string, retainDays int, recordEnabled bool, updateRetainDays func(int), updateRecordEnabled func(bool), clientAPIKey string) *Server {
+func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, recordingOutputDir string, retainDays int, recordEnabled bool, updateRetainDays func(int), updateRecordEnabled func(bool)) *Server {
 	return &Server{
 		SRSApiBase:          srsApiBase,
 		SRSHttpHost:         srsHttpHost,
@@ -46,7 +45,6 @@ func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, recordingOutputDir strin
 		RecordEnabled:       recordEnabled,
 		UpdateRetainDays:    updateRetainDays,
 		UpdateRecordEnabled: updateRecordEnabled,
-		ClientAPIKey:        clientAPIKey,
 		PublicRTMPHost:      publicRTMPHost,
 		RecordingOutputDir:  recordingOutputDir,
 	}
@@ -64,15 +62,10 @@ func (s *Server) Start(port int) {
 	mux.HandleFunc("/api/recording-settings", s.handleRecordingSettings)
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/health", s.handleHealth)
-	mux.HandleFunc("/api/clients/register", s.handleClientRegister)
 	mux.HandleFunc("/api/client-updates/latest", s.handleClientUpdateLatest)
 	mux.HandleFunc("/api/client-updates/upload", s.handleClientUpdateUpload)
 	mux.Handle("/client-updates/", http.StripPrefix("/client-updates/", http.FileServer(http.Dir(updateDir()))))
 	mux.HandleFunc("/api/streams/publish-config", s.handlePublishConfig)
-	mux.HandleFunc("/api/srs/on-publish", s.handleSRSPublish)
-	mux.HandleFunc("/api/srs/on-unpublish", s.handleSRSLifecycle)
-	mux.HandleFunc("/api/srs/on-play", s.handleSRSLifecycle)
-	mux.HandleFunc("/api/srs/on-stop", s.handleSRSLifecycle)
 	mux.HandleFunc("/api/ai/algorithms", s.handleAIAlgorithms)
 	mux.HandleFunc("/api/ai/jobs/stats", s.handleAIJobStats)
 	mux.HandleFunc("/api/internal/ai/jobs/claim", s.handleAIJobClaim)
@@ -113,10 +106,6 @@ type streamStatusRow struct {
 	SourceType  string `json:"source_type"`
 	SourceID    string `json:"source_id"`
 	DisplayName string `json:"display_name"`
-	IP          string `json:"ip"`
-	PublicIP    string `json:"public_ip"`
-	Hostname    string `json:"hostname"`
-	UserName    string `json:"user_name"`
 	Active      bool   `json:"active"`
 }
 
@@ -134,50 +123,12 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 	}
 	sourceMap := loadVideoSourceMap(streamNames)
 
-	// 批量查设备信息
-	macSet := map[string]struct{}{}
-	for _, st := range streams {
-		mac, _, _, _ := resolveVideoSource(st.Name, sourceMap)
-		if mac != "" {
-			macSet[mac] = struct{}{}
-		}
-	}
-
-	type compRow struct {
-		MAC      string
-		IP       string
-		PublicIP string
-		Hostname string
-		UserName string
-	}
-	compMap := map[string]compRow{}
-	if len(macSet) > 0 {
-		macs := make([]string, 0, len(macSet))
-		for m := range macSet {
-			macs = append(macs, m)
-		}
-		var comps []compRow
-		database.DB.Table("computers").
-			Select("computers.mac, computers.ip, computers.public_ip, computers.hostname, computers.user_name").
-			Where("computers.mac IN ?", macs).
-			Scan(&comps)
-		for _, c := range comps {
-			compMap[c.MAC] = c
-		}
-	}
-
 	rows := make([]streamStatusRow, 0, len(streams))
 	for _, st := range streams {
 		mac, sourceType, sourceID, displayName := resolveVideoSource(st.Name, sourceMap)
 		row := streamStatusRow{
 			StreamName: st.Name, MAC: mac, SourceType: sourceType,
 			SourceID: sourceID, DisplayName: displayName, Active: st.Publish.Active,
-		}
-		if c, ok := compMap[mac]; ok {
-			row.IP = c.IP
-			row.PublicIP = c.PublicIP
-			row.Hostname = c.Hostname
-			row.UserName = c.UserName
 		}
 		rows = append(rows, row)
 	}
@@ -430,8 +381,6 @@ type segmentRow struct {
 	SourceType  string    `json:"source_type"`
 	SourceID    string    `json:"source_id"`
 	DisplayName string    `json:"display_name"`
-	Hostname    string    `json:"hostname"`
-	UserName    string    `json:"user_name"`
 	StartedAt   time.Time `json:"started_at"`
 	EndedAt     time.Time `json:"ended_at"`
 	Duration    float64   `json:"duration"`
@@ -548,34 +497,6 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 	var segs []models.RecordingSegment
 	query.Order("started_at DESC").Limit(500).Find(&segs)
 
-	// 批量查设备信息
-	macSet := map[string]struct{}{}
-	for _, seg := range segs {
-		if seg.MAC != "" {
-			macSet[seg.MAC] = struct{}{}
-		}
-	}
-	type compRow struct {
-		MAC      string
-		Hostname string
-		UserName string
-	}
-	compMap := map[string]compRow{}
-	if len(macSet) > 0 {
-		macs := make([]string, 0, len(macSet))
-		for m := range macSet {
-			macs = append(macs, m)
-		}
-		var comps []compRow
-		database.DB.Table("computers").
-			Select("computers.mac, computers.hostname, computers.user_name").
-			Where("computers.mac IN ?", macs).
-			Scan(&comps)
-		for _, c := range comps {
-			compMap[c.MAC] = c
-		}
-	}
-
 	rows := make([]segmentRow, 0, len(segs))
 	streamNames := make([]string, 0, len(segs))
 	for _, seg := range segs {
@@ -596,10 +517,6 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 			Duration:    seg.Duration,
 			FileSize:    seg.FileSize,
 		}
-		if c, ok := compMap[seg.MAC]; ok {
-			row.Hostname = c.Hostname
-			row.UserName = c.UserName
-		}
 		rows = append(rows, row)
 	}
 
@@ -608,15 +525,11 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 }
 
 type macInfo struct {
-	MAC      string `json:"mac"`
-	Hostname string `json:"hostname"`
-	UserName string `json:"user_name"`
+	MAC string `json:"mac"`
 }
 
 type videoSourceRow struct {
 	models.VideoSource
-	Hostname   string `json:"hostname"`
-	UserName   string `json:"user_name"`
 	Active     bool   `json:"active"`
 	RTMPURL    string `json:"rtmp_url,omitempty"`
 	RTMPServer string `json:"rtmp_server,omitempty"`
@@ -693,26 +606,8 @@ func (s *Server) listVideoSources(w http.ResponseWriter, r *http.Request) {
 	for _, stream := range s.fetchSRSStreams() {
 		activeSet[stream.Name] = stream.Publish.Active
 	}
-	macs := make([]string, 0, len(sources))
-	seenMAC := make(map[string]bool)
-	for _, source := range sources {
-		if source.MAC != "" && !seenMAC[source.MAC] {
-			macs = append(macs, source.MAC)
-			seenMAC[source.MAC] = true
-		}
-	}
-	type computerName struct{ Hostname, UserName string }
-	computerMap := make(map[string]computerName)
-	if len(macs) > 0 {
-		var computers []struct{ MAC, Hostname, UserName string }
-		database.DB.Table("computers").Select("mac, hostname, user_name").Where("mac IN ?", macs).Scan(&computers)
-		for _, computer := range computers {
-			computerMap[computer.MAC] = computerName{computer.Hostname, computer.UserName}
-		}
-	}
 	rows := make([]videoSourceRow, 0, len(sources))
 	for _, source := range sources {
-		computer := computerMap[source.MAC]
 		rtmpURL := ""
 		rtmpServer := ""
 		streamKey := ""
@@ -722,8 +617,7 @@ func (s *Server) listVideoSources(w http.ResponseWriter, r *http.Request) {
 			streamKey = source.StreamName
 		}
 		rows = append(rows, videoSourceRow{
-			VideoSource: source, Hostname: computer.Hostname,
-			UserName: computer.UserName, Active: activeSet[source.StreamName], RTMPURL: rtmpURL,
+			VideoSource: source, Active: activeSet[source.StreamName], RTMPURL: rtmpURL,
 			RTMPServer: rtmpServer, StreamKey: streamKey,
 		})
 	}
@@ -741,23 +635,8 @@ func (s *Server) handleMACs(w http.ResponseWriter, r *http.Request) {
 	macQuery.Distinct("mac").Pluck("mac", &macs)
 
 	result := make([]macInfo, 0, len(macs))
-	if len(macs) > 0 {
-		var comps []macInfo
-		database.DB.Table("computers").
-			Select("computers.mac, computers.hostname, computers.user_name").
-			Where("computers.mac IN ?", macs).
-			Scan(&comps)
-
-		found := map[string]bool{}
-		for _, c := range comps {
-			result = append(result, c)
-			found[c.MAC] = true
-		}
-		for _, m := range macs {
-			if !found[m] {
-				result = append(result, macInfo{MAC: m})
-			}
-		}
+	for _, mac := range macs {
+		result = append(result, macInfo{MAC: mac})
 	}
 
 	w.Header().Set("Content-Type", "application/json")

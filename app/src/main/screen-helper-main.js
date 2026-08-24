@@ -132,7 +132,7 @@ function cameraFFmpegArgs(source, rtmpURL) {
     return args
 }
 
-export function setupScreenHelper({ mediaServiceURL, clientApiKey, videoSources, onStatus }) {
+export function setupScreenHelper({ mediaServiceURL, videoSources, onStatus }) {
     let sources
     let configurationError = ''
     try {
@@ -180,12 +180,12 @@ export function setupScreenHelper({ mediaServiceURL, clientApiKey, videoSources,
     }
 
     async function getPublishConfig(mac, source) {
-        if (!mediaServiceURL || !clientApiKey) throw new Error('MediaService 配置不完整')
+        if (!mediaServiceURL) throw new Error('MediaService 配置不完整')
         const response = await fetch(
             `${mediaServiceURL.replace(/\/$/, '')}/api/streams/publish-config`,
             {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Client-Key': clientApiKey },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     mac,
                     source_type: source.type,
