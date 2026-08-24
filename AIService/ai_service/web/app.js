@@ -103,7 +103,17 @@ function renderSources() {
         <tr data-source-id="${Number(source.video_source_id)}">
             <td><span class="source-name">${escapeHTML(source.display_name || source.stream_name)}</span><span class="source-meta">${escapeHTML(sourceType(source.source_type))} · ${escapeHTML(source.stream_name)}</span></td>
             ${admin ? `<td><select class="customer-select source-owner" data-current="${Number(source.customer_id || 0)}">${customerOptions(source.customer_id)}</select></td>` : ''}
-            <td><div class="operator-editor"><input class="operator-name" maxlength="20" value="${escapeHTML(source.operator_name || '')}" placeholder="姓名或编号" /><button class="ghost operator-save" type="button">保存</button></div><span class="source-meta">${escapeHTML(source.hostname || '-')} · ${escapeHTML(source.local_ip || '-')} · ${escapeHTML(source.mac || '-')}</span></td>
+            <td class="device-info-cell">
+                <div class="operator-editor">
+                    <input class="operator-name" maxlength="20" value="${escapeHTML(source.operator_name || '')}" placeholder="填写负责人姓名或编号" aria-label="点位负责人" />
+                    <button class="ghost operator-save" type="button">保存</button>
+                </div>
+                <dl class="device-meta-grid">
+                    <div><dt>主机名</dt><dd title="${escapeHTML(source.hostname || '未上报')}">${escapeHTML(source.hostname || '未上报')}</dd></div>
+                    <div><dt>内网 IP</dt><dd title="${escapeHTML(source.local_ip || '未上报')}">${escapeHTML(source.local_ip || '未上报')}</dd></div>
+                    <div class="device-meta-wide"><dt>MAC 地址</dt><dd title="${escapeHTML(source.mac || '未上报')}">${escapeHTML(source.mac || '未上报')}</dd></div>
+                </dl>
+            </td>
             <td><span class="pill ${source.active ? 'online' : 'offline'}">${source.active ? '在线' : '离线'}</span></td>
             <td><input class="recording-enabled" type="checkbox" ${source.recording_enabled ? 'checked' : ''} aria-label="开启录像" /></td>
             <td><input class="compact-input retain-days" type="number" min="1" max="3650" value="${Number(source.recording_retain_days || 7)}" /> 天</td>

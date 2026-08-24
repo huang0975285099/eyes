@@ -94,10 +94,23 @@ button.ghost { border: 1px solid #315063; color: #b9cad5; background: #0d202b; }
 button.ghost:hover { border-color: #547589; }
 .table-wrap { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; }
 .service-table-wrap { margin-top: 22px; overflow-x: auto; }
-.service-table-wrap table { min-width: 1280px; }
-.operator-editor { display: flex; align-items: center; gap: 6px; min-width: 190px; }
-.operator-editor input { min-width: 110px; width: 120px; }
+.service-table-wrap table { min-width: 1380px; }
+.device-info-cell { min-width: 300px; vertical-align: top; }
+.operator-editor { display: flex; align-items: center; gap: 7px; width: 100%; }
+.operator-editor input { min-width: 0; width: 100%; color: #f2f8fc; }
 .operator-editor button { padding: 8px 10px; white-space: nowrap; }
+.device-meta-grid {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 9px 16px;
+    margin: 13px 0 0; padding-top: 11px; border-top: 1px solid #29414f;
+}
+.device-meta-grid div { min-width: 0; }
+.device-meta-grid dt { margin: 0 0 3px; color: #819aa8; font-size: 11px; line-height: 1.3; }
+.device-meta-grid dd {
+    margin: 0; overflow: hidden; color: #d9e8ef; font-family: Consolas, "Microsoft YaHei UI", monospace;
+    font-size: 12px; font-weight: 600; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap;
+}
+.device-meta-grid dd[title="未上报"] { color: #b59665; font-family: inherit; font-weight: 500; }
+.device-meta-wide { grid-column: 1 / -1; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { padding: 11px 13px; color: #77909f; text-align: left; font-size: 11px; letter-spacing: .04em; background: #091720; }
 td { padding: 13px; border-top: 1px solid #1b303d; color: #c8d7df; }

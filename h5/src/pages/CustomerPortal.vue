@@ -56,6 +56,7 @@
               <div><dt>设备编号</dt><dd>{{ source.source_id || '-' }}</dd></div>
               <div><dt>接入方式</dt><dd>{{ sourceType(source.source_type) }}</dd></div>
             </dl>
+            <div v-if="metadataMissing(source)" class="device-metadata-notice"><q-icon name="info_outline" /><span>本机信息尚未上报，请升级并启动千里眼客户端 v1.0.3+</span></div>
             <div class="device-detail-link"><span>查看抽帧、录像和点位详情</span><q-icon name="chevron_right" /></div>
           </article>
         </div>
@@ -144,6 +145,7 @@ const pageTitle = computed(() => ({ live: '实时视频', devices: '设备管理
 
 function sourceType(value: string) { return ({ screen: '电脑桌面', usb_camera: 'USB摄像头', ip_camera: 'RTSP/NVR', direct_camera: '网络摄像头' } as Record<string, string>)[value] || '视频点位' }
 function codec(value: string) { return /hevc|h265/i.test(value) ? 'H.265' : /avc|h264/i.test(value) ? 'H.264' : value || '-' }
+function metadataMissing(source: VideoSource) { return source.publish_mode === 'app' && !source.hostname && !source.local_ip }
 function openDevice(source: VideoSource) { selectedDevice.value = source; deviceDetailOpen.value = true }
 
 async function login() {

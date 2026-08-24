@@ -22,3 +22,12 @@ func TestNormalizePublishMetadata(t *testing.T) {
 		t.Fatal("expected long operator name to fail")
 	}
 }
+
+func TestPrivateRemoteIP(t *testing.T) {
+	if got := privateRemoteIP("10.0.20.59:52341"); got != "10.0.20.59" {
+		t.Fatalf("unexpected private remote IP: %q", got)
+	}
+	if got := privateRemoteIP("112.18.238.6:52341"); got != "" {
+		t.Fatalf("public IP must not be exposed as local IP: %q", got)
+	}
+}

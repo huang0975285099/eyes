@@ -40,6 +40,18 @@ func normalizePublishMetadata(input publishConfigRequest) (string, string, strin
 	return operatorName, hostname, localIP, nil
 }
 
+func privateRemoteIP(remoteAddress string) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddress))
+	if err != nil {
+		host = strings.Trim(strings.TrimSpace(remoteAddress), "[]")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsPrivate() {
+		return ""
+	}
+	return ip.String()
+}
+
 func (s *Server) handlePublishConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -66,6 +78,9 @@ func (s *Server) handlePublishConfig(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "本机信息无效: " + err.Error()})
 		return
+	}
+	if localIP == "" {
+		localIP = privateRemoteIP(r.RemoteAddr)
 	}
 	streamName := streamsource.Name(mac, sourceType, sourceID)
 	source := models.VideoSource{
