@@ -32,7 +32,7 @@ INTRANET_REMOTE_PORT="${INTRANET_REMOTE_PORT:-22}"
 PUBLIC_REMOTE_DIR="/home/test/eyes/"
 INTRANET_REMOTE_DIR="/home/administrator/eyes/"
 PUBLIC_RECORDING_DIR="/home/test/recordings"
-INTRANET_RECORDING_DIR="/home/administrator/recordings"
+INTRANET_RECORDING_DIR="/home/administrator/eyesecordings"
 # =================================================
 
 # SRS 镜像（与 docker-compose.yml 中一致）
