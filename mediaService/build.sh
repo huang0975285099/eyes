@@ -32,12 +32,12 @@ INTRANET_REMOTE_PORT="${INTRANET_REMOTE_PORT:-22}"
 PUBLIC_REMOTE_DIR="/home/test/eyes/"
 INTRANET_REMOTE_DIR="/home/administrator/eyes/"
 PUBLIC_RECORDING_DIR="/home/test/recordings"
-INTRANET_RECORDING_DIR="/home/administrator/eyesecordings"
+INTRANET_RECORDING_DIR="/home/administrator/recordings"
 # =================================================
 
 # SRS 镜像（与 docker-compose.yml 中一致）
-SRS_IMAGE="ossrs/srs:5"
-SRS_TAR="srs-5.tar"
+SRS_IMAGE="ossrs/srs:6"
+SRS_TAR="srs-6.tar"
 MYSQL_IMAGE="mysql:8.1.0"
 MYSQL_TAR="mysql-8.1.0.tar"
 

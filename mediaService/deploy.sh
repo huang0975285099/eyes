@@ -11,9 +11,9 @@ set -e
 IMAGE_NAME="media-service"
 AI_IMAGE_NAME="eyes-ai-service"
 TAG="latest"
-SRS_IMAGE="ossrs/srs:5"
+SRS_IMAGE="ossrs/srs:6"
 MYSQL_IMAGE="mysql:8.1.0"
-SRS_TAR="srs-5.tar"
+SRS_TAR="srs-6.tar"
 MYSQL_TAR="mysql-8.1.0.tar"
 # 录像存储目录（4T 硬盘挂载点，按需修改）
 # docker-compose.yml 中 volumes.device 指向此目录

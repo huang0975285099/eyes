@@ -1,8 +1,10 @@
 <script setup>
 import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import flvjs from 'flv.js'
+import NvrForwardPage from './NvrForwardPage.vue'
 
 const loading = ref(true)
+const currentPage = ref('status')
 const status = ref({ system: {}, stream: {}, config: {} })
 const videoRef = ref(null)
 const selectedSourceID = ref('')
@@ -14,6 +16,7 @@ const userNameError = ref('')
 const userNameSaving = ref(false)
 const userNameInputRef = ref(null)
 let offStream
+let offNavigate
 let flvPlayer
 let retryTimer
 
@@ -167,6 +170,20 @@ async function restartStream() {
     }, 1200)
 }
 
+function navigateTo(page) {
+    currentPage.value = page === 'nvr' ? 'nvr' : 'status'
+    if (currentPage.value === 'nvr') {
+        destroyPlayer()
+        return
+    }
+    nextTick(startPlayback)
+}
+
+function handleNVRSave(stream) {
+    if (stream) status.value.stream = stream
+    ensureSelectedSource()
+}
+
 function memory(bytes) {
     return bytes ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB` : '-'
 }
@@ -177,13 +194,15 @@ onMounted(async () => {
     offStream = window.eyesAPI.onStreamStatus((value) => {
         status.value.stream = value
         ensureSelectedSource()
-        startPlayback()
+        if (currentPage.value === 'status') startPlayback()
     })
+    offNavigate = window.eyesAPI.onNavigate(navigateTo)
 })
 
 onUnmounted(() => {
     destroyPlayer()
     offStream?.()
+    offNavigate?.()
 })
 </script>
 
@@ -192,7 +211,7 @@ onUnmounted(() => {
         <header>
             <div>
                 <p class="eyebrow">ALL-SEEING EYES</p>
-                <h1>千里眼客户端</h1>
+                <h1>{{ currentPage === 'nvr' ? 'NVR / RTSP 转推配置' : '千里眼客户端' }}</h1>
                 <p class="app-version">当前版本 v{{ status.system.app_version || '-' }}</p>
             </div>
             <span :class="['badge', status.stream.running ? 'online' : 'offline']">
@@ -201,7 +220,13 @@ onUnmounted(() => {
         </header>
 
         <p v-if="loading" class="loading">正在读取客户端状态…</p>
-        <template v-else>
+        <NvrForwardPage
+            v-if="!loading && currentPage === 'nvr'"
+            :stream-status="status.stream"
+            @back="navigateTo('status')"
+            @saved="handleNVRSave"
+        />
+        <template v-else-if="!loading">
             <section class="card hero">
                 <div>
                     <span class="label">MediaService</span>

@@ -81,7 +81,7 @@ MediaService是系统控制中心，负责：
 - 保存每个视频源启用哪些AI算法及算法参数。
 - 创建离线AI任务并接收AIService执行结果。
 - 保存AI Worker心跳、AI异常事件和人工复核状态。
-- 提供统一管理后台。
+- 提供统一HTTP API，由C++ `adminService` 完成集中管理和播放。
 
 MediaService不负责执行深度学习模型。录像完整性检查仍可使用FFprobe，但抽帧和未来AI推理由AIService执行。
 
@@ -108,6 +108,20 @@ AIService不负责：
 - 控制MediaService是否录制完整录像。
 - 直接修改MediaService的MySQL数据。
 
+### 3.4 AdminService
+
+目录：`D:\project\eyes\adminService`
+
+AdminService是Windows原生C++集中管理和观看客户端，负责：
+
+- 通过MediaService HTTP API查询在线流、录像、抽帧和AI Worker状态。
+- 使用FFmpeg原生解码H.264/H.265，不依赖浏览器或厂商Web插件。
+- 同一时间选择并观看一路实时画面或录像。
+- 开启/关闭MediaService录像，修改录像保留天数。
+- 为品牌摄像头生成固定RTMP推流地址。
+
+MediaService不再嵌入浏览器管理页，`mediaService/web` Go包仅保留HTTP API实现。
+
 ## 4. 多种设备如何接入
 
 系统使用统一的`VideoSource`描述视频来源。主要来源类型为：
@@ -116,7 +130,7 @@ AIService不负责：
 |---|---|---|
 | `screen` | 电脑桌面 | 电脑APP采集并推送RTMP |
 | `usb_camera` | 电脑外接USB摄像头 | 电脑APP调用FFmpeg采集并推送RTMP |
-| `ip_camera` | 电脑能够访问的RTSP摄像头 | 电脑APP拉取RTSP并转推RTMP |
+| `ip_camera` | 电脑能够访问的RTSP/NVR通道 | 电脑APP保留原始H.264/H.265，只重封装转推RTMP |
 | `direct_camera` | 独立品牌摄像头 | 摄像头后台直接填写系统提供的RTMP地址 |
 
 所有视频源最终都必须转换成：
@@ -133,10 +147,12 @@ RTMP入口不使用token、API Key、数据库登记或回调校验。电脑APP�
 
 如果摄像头只支持RTSP拉流、不支持主动RTMP推流，需要由以下任意组件完成协议转换：
 
-- 部署在现场电脑上的现有APP。
+- 部署在现场电脑或NVR同网段Windows电脑上的现有APP。客户端托盘菜单提供“NVR / RTSP 转推配置”页面，可配置多个通道、启停转推并自动重连。
 - NVR。
 - 独立边缘网关。
 - 后续增加的摄像头接入网关服务。
+
+现有APP对RTSP/NVR视频不做重新编码：H.264和H.265均使用FFmpeg原码流copy，只将RTSP重封装为SRS 6支持的Enhanced RTMP。每个启用通道使用一个独立FFmpeg进程，某个通道断线不会中断其他通道或电脑桌面推流。
 
 不建议让每一种AI算法直接连接不同品牌摄像头，否则账号、协议、重连和品牌兼容问题会进入所有AI模块。
 
@@ -171,7 +187,7 @@ PUT /api/recording-settings
 
 ## 6. AI算法配置逻辑
 
-业务人员在MediaService管理后台选择具体摄像头，然后配置需要启用的算法。配置保存在MediaService，AIService只读取和执行。
+业务人员在C++ `adminService` 选择具体摄像头，然后配置需要启用的算法。配置通过MediaService API保存，AIService只读取和执行。
 
 示例：
 
@@ -421,6 +437,10 @@ Worker通过心跳报告：
 - AI Worker心跳和管理后台状态展示。
 - `fight`、`helmet`、`fire`算法目录及通用规则、事件数据结构。
 - Docker Compose和离线构建部署脚本支持AIService。
+- 电脑桌面使用显示器原始分辨率100%采集，保持H.264编码。
+- RTSP/NVR摄像头的H.264/H.265原码直通转推。
+- SRS升级到6.x，离线部署包使用`ossrs/srs:6`。
+- C++ AdminService支持实时H.264/H.265播放、录像、抽帧和录制设置。
 
 尚未完成：
 

@@ -95,6 +95,28 @@ function cameraFFmpegArgs(source, rtmpURL) {
         args.push('-i', source.url)
     }
 
+    // RTSP/NVR网络摄像头保留原始H.264/H.265码流，只从RTSP重封装到
+    // Enhanced RTMP。不解码、不缩放、不重新编码，大幅降低现场电脑CPU占用。
+    if (source.type === 'ip_camera') {
+        args.push(
+            '-map',
+            '0:v:0',
+            '-an',
+            '-c:v',
+            'copy',
+            '-flvflags',
+            'no_duration_filesize',
+            '-rtmp_enhanced_codecs',
+            'hvc1',
+            '-loglevel',
+            'warning',
+            '-f',
+            'flv',
+            rtmpURL
+        )
+        return args
+    }
+
     const bitrate = `${source.bitrateKbps}k`
     const bufferSize = `${source.bitrateKbps * 2}k`
     args.push(
@@ -231,8 +253,6 @@ export function setupScreenHelper({ mediaServiceURL, videoSources, onStatus }) {
                 executable = helperPath()
                 args = [
                     '--electron-spawned',
-                    '--mode',
-                    'monitor',
                     '--fps',
                     String(source.fps),
                     '--server-url',
@@ -353,9 +373,18 @@ export function setupScreenHelper({ mediaServiceURL, videoSources, onStatus }) {
         return start(reason)
     }
 
+    const handleUnlockScreen = () => setTimeout(resumeScreenSources, 2000)
+    const handleResume = () => setTimeout(() => restart('resume'), 2000)
     powerMonitor.on('lock-screen', suspendScreenSources)
-    powerMonitor.on('unlock-screen', () => setTimeout(resumeScreenSources, 2000))
-    powerMonitor.on('resume', () => setTimeout(() => restart('resume'), 2000))
+    powerMonitor.on('unlock-screen', handleUnlockScreen)
+    powerMonitor.on('resume', handleResume)
 
-    return { start, stop, restart, status }
+    function dispose() {
+        stop()
+        powerMonitor.removeListener('lock-screen', suspendScreenSources)
+        powerMonitor.removeListener('unlock-screen', handleUnlockScreen)
+        powerMonitor.removeListener('resume', handleResume)
+    }
+
+    return { start, stop, restart, status, dispose }
 }

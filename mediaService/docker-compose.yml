@@ -24,7 +24,7 @@ services:
       start_period: 20s
 
   srs:
-    image: ossrs/srs:5
+    image: ossrs/srs:6
     restart: always
     ports:
       - "1935:1935"   # RTMP 推流

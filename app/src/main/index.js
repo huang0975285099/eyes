@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, dialog } from 'electron'
 import { execFile, spawn } from 'child_process'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import os from 'os'
 import { join } from 'path'
@@ -18,6 +18,7 @@ let mainWindow
 let tray
 let screenController
 let startHidden = false
+let streamConfigurationPromise = Promise.resolve()
 
 function configureAutoLaunch() {
     // 仅对安装后的正式版本启用，开发环境不应修改用户的登录启动项。
@@ -34,6 +35,14 @@ function showMainWindow() {
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
     mainWindow.focus()
+}
+
+function showMainPage(page = 'status') {
+    showMainWindow()
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    const navigate = () => mainWindow?.webContents.send('app:navigate', page)
+    if (mainWindow.webContents.isLoading()) mainWindow.webContents.once('did-finish-load', navigate)
+    else navigate()
 }
 
 function loadConfig() {
@@ -59,6 +68,18 @@ function loadConfig() {
 }
 
 const config = loadConfig()
+
+function saveUserConfig(patch) {
+    const file = join(app.getPath('userData'), 'config.json')
+    let userConfig = {}
+    try {
+        if (existsSync(file)) userConfig = JSON.parse(readFileSync(file, 'utf8'))
+    } catch (error) {
+        console.error(`[config] 保留用户配置失败 ${file}:`, error.message)
+    }
+    Object.assign(config, patch)
+    writeFileSync(file, JSON.stringify({ ...userConfig, ...patch }, null, 2), 'utf8')
+}
 
 function getDiskSerial() {
     if (process.platform !== 'win32') return Promise.resolve('')
@@ -98,16 +119,72 @@ async function collectSystemInfo() {
 function saveUserName(value) {
     const userName = String(value || '').trim()
     if ([...userName].length > 20) throw new Error('姓名或编号不能超过20个字符')
-    config.userName = userName
-    const file = join(app.getPath('userData'), 'config.json')
-    let userConfig = {}
-    try {
-        if (existsSync(file)) userConfig = JSON.parse(readFileSync(file, 'utf8'))
-    } catch (error) {
-        console.error(`[config] 保留用户配置失败 ${file}:`, error.message)
-    }
-    writeFileSync(file, JSON.stringify({ ...userConfig, userName }, null, 2), 'utf8')
+    saveUserConfig({ userName })
     return userName
+}
+
+function nvrSources() {
+    return (Array.isArray(config.videoSources) ? config.videoSources : []).filter(
+        (source) => source?.type === 'ip_camera'
+    )
+}
+
+function normalizeNVRSource(value, index, occupiedIDs) {
+    if (!value || typeof value !== 'object') throw new Error(`第 ${index + 1} 个通道配置无效`)
+    let id = String(value.id || '').trim()
+    if (!id) id = `nvr-${randomUUID().slice(0, 8)}`
+    if ([...id].length > 100) throw new Error(`第 ${index + 1} 个通道ID不能超过100个字符`)
+    if (occupiedIDs.has(id)) throw new Error(`通道ID重复：${id}`)
+    occupiedIDs.add(id)
+
+    const displayName = String(value.displayName || '').trim()
+    if (!displayName) throw new Error(`第 ${index + 1} 个通道缺少名称`)
+    if ([...displayName].length > 100)
+        throw new Error(`第 ${index + 1} 个通道名称不能超过100个字符`)
+
+    const cameraURL = String(value.url || '').trim()
+    let parsedURL
+    try {
+        parsedURL = new URL(cameraURL)
+    } catch {
+        throw new Error(`第 ${index + 1} 个通道RTSP地址格式错误`)
+    }
+    if (!['rtsp:', 'rtsps:'].includes(parsedURL.protocol.toLowerCase())) {
+        throw new Error(`第 ${index + 1} 个通道必须使用rtsp://或rtsps://地址`)
+    }
+
+    return {
+        id,
+        type: 'ip_camera',
+        displayName,
+        url: cameraURL,
+        transport: value.transport === 'udp' ? 'udp' : 'tcp',
+        enabled: value.enabled !== false
+    }
+}
+
+function createScreenController() {
+    return setupScreenHelper({
+        mediaServiceURL: config.mediaServiceURL,
+        videoSources: config.videoSources,
+        onStatus: (status) => mainWindow?.webContents.send('stream:status-changed', status)
+    })
+}
+
+async function saveNVRConfiguration(values) {
+    if (!Array.isArray(values)) throw new Error('NVR通道配置必须是数组')
+    if (values.length > 64) throw new Error('单台客户端最多配置64个NVR通道')
+    const retainedSources = (Array.isArray(config.videoSources) ? config.videoSources : []).filter(
+        (source) => source?.type !== 'ip_camera'
+    )
+    const occupiedIDs = new Set(retainedSources.map((source) => String(source.id || '').trim()))
+    const normalized = values.map((source, index) => normalizeNVRSource(source, index, occupiedIDs))
+
+    saveUserConfig({ videoSources: [...retainedSources, ...normalized] })
+    screenController?.dispose()
+    screenController = createScreenController()
+    const result = await screenController.start('nvr_config_saved')
+    return { sources: nvrSources(), stream: screenController.status(), result }
 }
 
 function compareVersions(left, right) {
@@ -217,8 +294,13 @@ function createTray() {
         Menu.buildFromTemplate([
             {
                 label: '打开状态',
-                click: showMainWindow
+                click: () => showMainPage('status')
             },
+            {
+                label: 'NVR / RTSP 转推配置',
+                click: () => showMainPage('nvr')
+            },
+            { type: 'separator' },
             { label: '重新推流', click: () => screenController?.restart('tray') }
             // { type: 'separator' },
             // {
@@ -245,6 +327,15 @@ ipcMain.handle('device:set-user-name', (_event, value) => {
     return saveUserName(value)
 })
 ipcMain.handle('stream:restart', () => screenController?.restart('ipc'))
+ipcMain.handle('nvr:get-config', () => ({
+    sources: nvrSources(),
+    stream: screenController?.status() || { running: false, sources: [] }
+}))
+ipcMain.handle('nvr:save-config', (_event, sources) => {
+    const apply = () => saveNVRConfiguration(sources)
+    streamConfigurationPromise = streamConfigurationPromise.then(apply, apply)
+    return streamConfigurationPromise
+})
 ipcMain.handle('update:check', () => checkClientUpdate())
 ipcMain.handle('update:install', (_event, update) => downloadAndInstallUpdate(update))
 
@@ -256,18 +347,14 @@ app.whenReady().then(async () => {
     createWindow()
     // Windows 登录启动时保持后台运行，用户可从托盘打开窗口。
     createTray()
-    screenController = setupScreenHelper({
-        mediaServiceURL: config.mediaServiceURL,
-        videoSources: config.videoSources,
-        onStatus: (status) => mainWindow?.webContents.send('stream:status-changed', status)
-    })
+    screenController = createScreenController()
     await screenController.start('app_boot')
     setTimeout(promptClientUpdate, 3000)
 })
 
 app.on('before-quit', () => {
     app.isQuiting = true
-    screenController?.stop('app_quit')
+    screenController?.dispose()
 })
 
 app.on('window-all-closed', () => {})

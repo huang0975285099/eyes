@@ -4,8 +4,8 @@ MediaService 为千里眼客户端和品牌摄像头提供视频源管理、永�
 
 ```text
 Electron -> HTTP :22222 -> MediaService -> MySQL 8.1.0 / eyes
-Electron desktop/USB/IP camera -> FFmpeg -> RTMP :1935 -> SRS
-                                      |-> HTTP-FLV/HLS :8080
+Electron desktop/USB/IP camera -> FFmpeg -> RTMP :1935 -> SRS 6
+                                      |-> Native AdminService viewer
                                       |-> MediaService -> 录像文件
                                       |-> AIService -> 抽帧/后续实时AI
 ```
@@ -19,7 +19,7 @@ cp .env.example .env
 生产环境至少修改以下配置：
 
 - `PUBLIC_RTMP_HOST`：客户端可访问的 RTMP 地址，例如 `example.com:1935`。
-- `MEDIA_SRS_HTTP_HOST`：客户端/管理页可访问的SRS HTTP-FLV/HLS地址，例如`example.com:8080`。
+- `MEDIA_SRS_HTTP_HOST`：客户端自预览可访问的SRS HTTP地址，例如`example.com:8080`。
 - `UPDATE_ADMIN_KEY`：客户端更新 ZIP 上传密钥；为空时禁用上传。
 - `RECORDING_DIR`：宿主机录像目录，默认 `/home/test/recordings`，应改为实际磁盘挂载点。
 
@@ -77,10 +77,10 @@ INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
 
 对外端口：
 
-- `22222`：MediaService管理后台和API
+- `22222`：MediaService HTTP API，供APP、AdminService和AIService调用
 - `11111`：AIService健康状态和模块列表
 - `1935`：SRS RTMP 推流
-- `8080`：SRS HTTP-FLV/HLS 播放
+- `8080`：SRS HTTP-FLV/HLS，仅保留给电脑推流APP自预览和兼容工具
 
 SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `22222`、`11111`、`8080` 的来源，并通过 HTTPS 反向代理保护管理接口。
 
@@ -108,7 +108,7 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 - `GET /api/client-updates/latest`：客户端检查更新。
 - `POST /api/client-updates/upload`：上传更新 ZIP，必须提供 `X-Update-Key: <UPDATE_ADMIN_KEY>`。
 
-管理后台地址为 `http://<服务器地址>:22222`。更新 ZIP 必须包含 `latest.yml`、对应的 `*-setup.exe`，并且其中的版本、路径和 SHA-512 必须匹配；客户端侧 ZIP 可由 `app` 目录的 `pnpm run build:update` 生成。
+集中管理和H.264/H.265观看使用`adminService/Viewer.exe`，MediaService不再提供浏览器管理页。`22222`仅提供HTTP API。更新ZIP必须包含`latest.yml`、对应的`*-setup.exe`，并且版本、路径和SHA-512匹配。
 
 RTMP 发布不使用 token、API Key、数据库登记或回调校验。任何能够访问1935端口的设备都可以向 `live` 应用推流；品牌摄像头后台可填写形如 `rtmp://<服务器>:1935/live/<自定义流名>` 的地址。不同设备必须使用不同流名，避免互相覆盖。生产环境应限制1935端口来源IP，管理端口22222也应仅允许可信内网访问。
 

@@ -29,6 +29,14 @@ type StreamStatus = {
     error: string
     sources: VideoSourceStatus[]
 }
+type NVRSource = {
+    id: string
+    type: 'ip_camera'
+    displayName: string
+    url: string
+    transport: 'tcp' | 'udp'
+    enabled: boolean
+}
 declare global {
     interface Window {
         eyesAPI: {
@@ -39,7 +47,14 @@ declare global {
             }>
             setUserName: (value: string) => Promise<string>
             restartStream: () => Promise<{ ok: boolean; error?: string }>
+            getNVRConfig: () => Promise<{ sources: NVRSource[]; stream: StreamStatus }>
+            saveNVRConfig: (sources: NVRSource[]) => Promise<{
+                sources: NVRSource[]
+                stream: StreamStatus
+                result: { ok: boolean; error?: string }
+            }>
             onStreamStatus: (callback: (status: StreamStatus) => void) => () => void
+            onNavigate: (callback: (page: 'status' | 'nvr') => void) => () => void
         }
     }
 }

@@ -1,6 +1,6 @@
 # 千里眼客户端
 
-Windows Electron 客户端，负责托盘/状态页和多视频源推流。电脑桌面由同目录的 `screen-helper.exe` 采集；USB 摄像头和支持RTSP/HTTP的网络摄像头由`ffmpeg.exe`采集并统一编码后推送到MediaService管理的SRS。
+Windows Electron 客户端，负责托盘/状态页和多视频源推流。电脑桌面由同目录的 `screen-helper.exe` 采集并编码为H.264（硬件编码保持原始分辨率；宽度超过1280且只能使用`libx264`软编码时缩放到1280）；USB摄像头由`ffmpeg.exe`编码为H.264；RTSP/NVR网络摄像头保留原始H.264/H.265码流，只重封装后推送到SRS 6。
 
 ## 运行配置
 
@@ -29,9 +29,19 @@ Windows Electron 客户端，负责托盘/状态页和多视频源推流。电�
 
 品牌摄像头如果支持主动RTMP推流，可以直接填写
 `rtmp://<服务器>:1935/live/<唯一流名>`，不需要客户端、登记、token或API Key。
-管理后台的“品牌摄像头直推”登记功能仅用于生成固定流名和保存设备名称。
+`adminService/Viewer.exe`的“品牌摄像头直推”功能仅用于生成固定流名和保存设备名称。
 
 ## 摄像头配置
+
+### NVR / RTSP图形化配置
+
+安装客户端后，在Windows托盘中右键“千里眼”，选择“NVR / RTSP 转推配置”。页面支持新增、编辑、启停和删除多个RTSP通道；填写通道名称、RTSP地址和TCP/UDP传输方式，点击“保存并应用”后立即生效，不需要重启客户端。
+
+每个启用通道运行一个后台FFmpeg进程。H.264和H.265均使用原码流copy，只完成RTSP到Enhanced RTMP的重封装，不进行解码、缩放或重新编码。通道ID由客户端首次保存时自动生成并保持稳定。
+
+图形化配置保存在当前Windows用户的Electron用户数据目录中。包含密码的RTSP地址不会写入日志，但会以明文保存在本机配置文件中，因此应限制Windows账户和配置目录的访问权限。
+
+### 手动配置
 
 USB 摄像头使用 Windows DirectShow。先在客户端机器执行以下命令获取 FFmpeg 识别到的设备名称：
 
@@ -71,9 +81,9 @@ USB 摄像头使用 Windows DirectShow。先在客户端机器执行以下命令
 }
 ```
 
-多个源可以同时启用。`id` 必须在本机唯一且长期稳定，不要把 URL、用户名或密码放进 `id`。Windows 锁屏时桌面推流会暂停，摄像头推流保持运行。具体品牌到货后，优先使用厂商提供的标准 RTSP 地址；只支持私有 SDK 的品牌可在现有视频源适配层中增加新的输入实现。当前版本只推视频，不采集摄像头麦克风。
+多个源可以同时启用。`id` 必须在本机唯一且长期稳定，不要把 URL、用户名或密码放进 `id`。Windows 锁屏时桌面推流会暂停，摄像头推流保持运行。网络摄像头的`fps`、`bitrateKbps`和`maxWidth`在原码直通模式下不生效；如果需要改变分辨率或码率，必须显式启用转码。具体品牌到货后，优先使用厂商提供的标准RTSP地址。当前版本只推视频，不采集摄像头麦克风。
 
-配置变更后重启客户端。不要把生产环境的 `config.json` 或 API 密钥提交到公开仓库。
+直接修改安装目录`config.json`后需要重启客户端；通过NVR配置页面保存则会自动应用。不要把包含生产RTSP密码的配置文件提交到公开仓库。
 
 ## 开发与构建
 
@@ -96,7 +106,7 @@ pnpm run build:win    # 构建 Windows 安装包
 pnpm run build:update
 ```
 
-该命令会生成`dist/<版本>.zip`，其中包含安装包、`latest.yml`及可选的Electron Builder配置文件。将ZIP上传到MediaService管理后台，或调用：
+该命令会生成`dist/<版本>.zip`，其中包含安装包、`latest.yml`及可选的Electron Builder配置文件。客户端更新ZIP通过MediaService API上传：
 
 ```powershell
 curl.exe -X POST `

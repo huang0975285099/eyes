@@ -1,7 +1,6 @@
 package web
 
 import (
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,12 +16,6 @@ import (
 
 	"gorm.io/gorm/clause"
 )
-
-//go:embed index.html
-var indexHTML []byte
-
-//go:embed hls.min.js
-var hlsJS []byte
 
 type Server struct {
 	SRSApiBase          string     // SRS HTTP API 地址
@@ -52,8 +45,6 @@ func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, recordingOutputDir strin
 
 func (s *Server) Start(port int) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/hls.min.js", s.handleHlsJS)
 	mux.HandleFunc("/api/segments", s.handleSegments)
 	mux.HandleFunc("/api/frames", s.handleFrames)
 	mux.HandleFunc("/api/macs", s.handleMACs)
@@ -75,25 +66,10 @@ func (s *Server) Start(port int) {
 	mux.HandleFunc("/frames/", s.handleFrameImage)
 
 	addr := fmt.Sprintf(":%d", port)
-	log.Printf("[web] 内网管理后台：http://0.0.0.0%s", addr)
+	log.Printf("[api] MediaService HTTP API：http://0.0.0.0%s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Printf("[web] HTTP 服务器退出: %v", err)
 	}
-}
-
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(indexHTML)
-}
-
-func (s *Server) handleHlsJS(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=86400")
-	w.Write(hlsJS)
 }
 
 // ============================================================
@@ -106,6 +82,10 @@ type streamStatusRow struct {
 	SourceType  string `json:"source_type"`
 	SourceID    string `json:"source_id"`
 	DisplayName string `json:"display_name"`
+	Codec       string `json:"codec"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	RTMPURL     string `json:"rtmp_url"`
 	Active      bool   `json:"active"`
 }
 
@@ -128,7 +108,11 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 		mac, sourceType, sourceID, displayName := resolveVideoSource(st.Name, sourceMap)
 		row := streamStatusRow{
 			StreamName: st.Name, MAC: mac, SourceType: sourceType,
-			SourceID: sourceID, DisplayName: displayName, Active: st.Publish.Active,
+			SourceID: sourceID, DisplayName: displayName, Codec: st.Video.Codec,
+			Width: st.Video.Width, Height: st.Video.Height, Active: st.Publish.Active,
+		}
+		if s.PublicRTMPHost != "" {
+			row.RTMPURL = fmt.Sprintf("rtmp://%s/live/%s", s.PublicRTMPHost, st.Name)
 		}
 		rows = append(rows, row)
 	}
@@ -186,6 +170,11 @@ type srsStream struct {
 	Publish struct {
 		Active bool `json:"active"`
 	} `json:"publish"`
+	Video struct {
+		Codec  string `json:"codec"`
+		Width  int    `json:"width"`
+		Height int    `json:"height"`
+	} `json:"video"`
 }
 
 func (s *Server) fetchSRSStreams() []srsStream {
