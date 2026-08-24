@@ -68,7 +68,7 @@ services:
     networks:
       - rec-net
     volumes:
-      - "${RECORDING_DIR:-/home/test/recordings}:/var/recordings"
+      - recordings:/var/recordings
       - client_updates:/var/client-updates
     depends_on:
       mysql:
@@ -107,7 +107,7 @@ services:
     networks:
       - rec-net
     volumes:
-      - "${RECORDING_DIR:-/home/test/recordings}:/var/recordings"
+      - recordings:/var/recordings
     depends_on:
       media-service:
         condition: service_healthy
@@ -121,6 +121,13 @@ services:
 volumes:
   mysql_data:
     name: eyes_mysql_data
+  recordings:
+    name: eyes_recordings
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${RECORDING_DIR:-/home/test/recordings}"
   client_updates:
     name: eyes_client_updates
     driver: local

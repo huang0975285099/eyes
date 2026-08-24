@@ -90,6 +90,23 @@ echo "  ✓ 录像目录已就绪: ${RECORDING_DIR}"
 echo "  ℹ️  请确认 4T 硬盘已挂载到该目录：df -h ${RECORDING_DIR}"
 echo "     若挂载点不同，请修改 docker-compose.yml 中 volumes.device 后重新执行"
 
+# 已有录像卷绝不能由Compose交互式重建。若部署参数与现有卷绑定目录不同，
+# 在启动服务前明确失败，避免操作者误选确认后丢失录像卷元数据。
+EXISTING_RECORDING_DIR=$(${DOCKER} volume inspect eyes_recordings \
+    --format '{{index .Options "device"}}' 2>/dev/null || true)
+if [ -n "${EXISTING_RECORDING_DIR}" ] && [ "${EXISTING_RECORDING_DIR}" != "<no value>" ]; then
+    EXISTING_RECORDING_DIR=$(readlink -f "${EXISTING_RECORDING_DIR}")
+    REQUESTED_RECORDING_DIR=$(readlink -f "${RECORDING_DIR}")
+    if [ "${EXISTING_RECORDING_DIR}" != "${REQUESTED_RECORDING_DIR}" ]; then
+        echo "✗ 错误: 现有eyes_recordings卷与本次录像目录不一致"
+        echo "  现有目录: ${EXISTING_RECORDING_DIR}"
+        echo "  本次目录: ${REQUESTED_RECORDING_DIR}"
+        echo "  为保护录像数据，部署已停止；请修正RECORDING_DIR后重试。"
+        exit 1
+    fi
+    echo "  ✓ 现有录像卷目录匹配: ${EXISTING_RECORDING_DIR}"
+fi
+
 # 加载依赖镜像
 echo ""
 echo "[3/6] 加载 SRS、MySQL 镜像..."
