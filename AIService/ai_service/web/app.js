@@ -1,4 +1,6 @@
-const state = { rules: [], health: null, jobs: null, frames: [] }
+const state = { rules: [], health: null, jobs: null, frames: [], streams: [] }
+let livePlayer
+let liveRetryTimer
 
 const $ = (selector) => document.querySelector(selector)
 const $$ = (selector) => [...document.querySelectorAll(selector)]
@@ -20,6 +22,17 @@ function localTime(value) {
 
 function sourceType(value) {
     return { screen: '电脑桌面', usb_camera: 'USB摄像头', ip_camera: 'RTSP/NVR', direct_camera: '摄像头直推' }[value] || value || '-'
+}
+
+function codecName(value) {
+    const normalized = String(value || '').trim().toUpperCase()
+    if (normalized === 'HEVC' || normalized === 'H265' || normalized === 'H.265') return 'H.265'
+    if (normalized === 'AVC' || normalized === 'H264' || normalized === 'H.264') return 'H.264'
+    return normalized || '-'
+}
+
+function isHEVC(value) {
+    return codecName(value) === 'H.265'
 }
 
 async function request(path, options = {}) {
@@ -86,6 +99,166 @@ function renderSourceFilter() {
         `<option value="${escapeHTML(source.stream_name)}">${escapeHTML(source.display_name || source.stream_name)}</option>`
     ).join('')
     if ([...select.options].some((option) => option.value === current)) select.value = current
+}
+
+function selectedLiveStream() {
+    const streamName = $('#liveSource').value
+    return state.streams.find((stream) => stream.stream_name === streamName)
+}
+
+function updateLiveMetadata(stream) {
+    $('#liveCodec').textContent = `编码 ${stream ? codecName(stream.codec) : '-'}`
+    $('#liveResolution').textContent = stream?.width && stream?.height
+        ? `分辨率 ${Number(stream.width)} × ${Number(stream.height)}`
+        : '分辨率 -'
+}
+
+function setLiveStatus(message, error = false) {
+    const status = $('#liveStatus')
+    status.textContent = message
+    status.className = `message${error ? ' error' : ''}`
+}
+
+function showLivePlaceholder(title, detail = '') {
+    const placeholder = $('#livePlaceholder')
+    placeholder.classList.remove('hidden')
+    placeholder.firstElementChild.textContent = title
+    placeholder.lastElementChild.textContent = detail
+}
+
+function hideLivePlaceholder() {
+    $('#livePlaceholder').classList.add('hidden')
+}
+
+function destroyLivePlayer() {
+    clearTimeout(liveRetryTimer)
+    liveRetryTimer = undefined
+    if (livePlayer) {
+        try {
+            livePlayer.pause()
+            livePlayer.unload()
+            livePlayer.detachMediaElement()
+            livePlayer.destroy()
+        } catch (error) {
+            console.warn('[live] 销毁播放器失败', error)
+        }
+        livePlayer = undefined
+    }
+    const video = $('#liveVideo')
+    video.onplaying = null
+    video.onwaiting = null
+    video.removeAttribute('src')
+    video.load()
+}
+
+function renderLiveSources() {
+    const select = $('#liveSource')
+    const previous = select.value
+    if (!state.streams.length) {
+        select.innerHTML = '<option value="">当前没有在线流</option>'
+        updateLiveMetadata(null)
+        return
+    }
+    select.innerHTML = state.streams.map((stream) => {
+        const name = stream.display_name || stream.stream_name
+        const details = [codecName(stream.codec), stream.width && stream.height ? `${Number(stream.width)}×${Number(stream.height)}` : '']
+            .filter(Boolean)
+            .join(' · ')
+        return `<option value="${escapeHTML(stream.stream_name)}">${escapeHTML(name)}（${escapeHTML(details)}）</option>`
+    }).join('')
+    if (state.streams.some((stream) => stream.stream_name === previous)) select.value = previous
+    updateLiveMetadata(selectedLiveStream())
+}
+
+async function startLivePlayback() {
+    const stream = selectedLiveStream()
+    destroyLivePlayer()
+    updateLiveMetadata(stream)
+    if (!stream) {
+        setLiveStatus('当前没有可播放的在线流')
+        showLivePlaceholder('当前没有在线流', '请确认客户端或摄像头已经推流到SRS')
+        return
+    }
+    if (!stream.playback_url) {
+        setLiveStatus('SRS网页播放地址未配置', true)
+        showLivePlaceholder('播放地址不可用', '请配置AI_SRS_PUBLIC_BASE')
+        return
+    }
+    if (!window.mpegts) {
+        setLiveStatus('mpegts.js加载失败', true)
+        showLivePlaceholder('播放器加载失败', '请检查AIService播放器资源是否完整')
+        return
+    }
+
+    const features = window.mpegts.getFeatureList()
+    if (!features.mseLivePlayback) {
+        setLiveStatus('当前Chrome不支持MSE实时流播放', true)
+        showLivePlaceholder('浏览器不支持实时播放', '请升级Chrome并启用硬件加速')
+        return
+    }
+    if (isHEVC(stream.codec) && !features.mseH265Playback) {
+        setLiveStatus('当前电脑不支持H.265硬件解码', true)
+        showLivePlaceholder('无法播放H.265', '请启用Chrome硬件加速、更新显卡驱动，或使用H.264子码流')
+        return
+    }
+
+    const video = $('#liveVideo')
+    showLivePlaceholder('正在连接实时视频…', `${codecName(stream.codec)} · HTTP-FLV`)
+    setLiveStatus('正在连接SRS…')
+    const player = window.mpegts.createPlayer(
+        {
+            type: 'flv',
+            isLive: true,
+            hasAudio: false,
+            hasVideo: true,
+            url: stream.playback_url,
+        },
+        {
+            enableWorker: false,
+            enableStashBuffer: false,
+            stashInitialSize: 128,
+            lazyLoad: false,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 10,
+            autoCleanupMinBackwardDuration: 5,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 1.5,
+            liveBufferLatencyMinRemain: 0.3,
+        },
+    )
+    livePlayer = player
+    video.onplaying = () => {
+        if (livePlayer !== player) return
+        hideLivePlaceholder()
+        setLiveStatus(`正在播放 ${stream.display_name || stream.stream_name}`)
+    }
+    video.onwaiting = () => {
+        if (livePlayer === player) setLiveStatus('网络缓冲中…')
+    }
+    player.on(window.mpegts.Events.ERROR, (type, detail, info) => {
+        if (livePlayer !== player) return
+        const errorDetail = info?.msg || detail || type || '未知错误'
+        setLiveStatus(`播放中断：${String(errorDetail)}`, true)
+        showLivePlaceholder('视频连接中断', '3秒后自动重连')
+        clearTimeout(liveRetryTimer)
+        liveRetryTimer = setTimeout(() => {
+            if ($('#livePage').classList.contains('active') && $('#liveSource').value === stream.stream_name) {
+                startLivePlayback().catch((error) => setLiveStatus(error.message, true))
+            }
+        }, 3000)
+    })
+    player.attachMediaElement(video)
+    player.load()
+    await player.play().catch(() => {})
+}
+
+async function loadStreams(autoplay = false) {
+    const payload = await request('/api/dashboard/streams')
+    state.streams = Array.isArray(payload.streams)
+        ? payload.streams.filter((stream) => stream?.active !== false && stream?.stream_name)
+        : []
+    renderLiveSources()
+    if (autoplay) await startLivePlayback()
 }
 
 function renderFrames() {
@@ -176,6 +349,15 @@ function bindEvents() {
         $$('.page').forEach((page) => page.classList.remove('active'))
         $(`#${button.dataset.page}Page`).classList.add('active')
         if (button.dataset.page === 'results') loadFrames().catch((error) => toast(error.message, true))
+        if (button.dataset.page === 'live') {
+            loadStreams(true).catch((error) => {
+                setLiveStatus(error.message, true)
+                showLivePlaceholder('读取在线流失败', error.message)
+                toast(error.message, true)
+            })
+        } else {
+            destroyLivePlayer()
+        }
     }))
     $('#selectAll').addEventListener('change', (event) => {
         $$('.source-check').forEach((input) => { input.checked = event.target.checked })
@@ -187,12 +369,20 @@ function bindEvents() {
     })
     $('#saveRulesButton').addEventListener('click', saveRules)
     $('#refreshResultsButton').addEventListener('click', () => loadFrames().catch((error) => toast(error.message, true)))
+    $('#refreshStreamsButton').addEventListener('click', () => {
+        loadStreams(true).catch((error) => toast(error.message, true))
+    })
+    $('#liveSource').addEventListener('change', () => {
+        startLivePlayback().catch((error) => setLiveStatus(error.message, true))
+    })
+    window.addEventListener('beforeunload', destroyLivePlayer)
 }
 
 async function initialize() {
     bindEvents()
     try {
         await Promise.all([loadRules(), loadRuntime()])
+        await loadStreams()
         await loadFrames()
     } catch (error) {
         toast(error.message, true)

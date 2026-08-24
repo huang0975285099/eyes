@@ -31,6 +31,7 @@ def _positive_float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     media_api: str
+    srs_public_base: str
     evidence_root: Path
     worker_id: str
     concurrency: int
@@ -47,6 +48,7 @@ class Settings:
         default_worker = f"{socket.gethostname()}-{os.getpid()}"
         return cls(
             media_api=os.getenv("AI_MEDIA_API", "http://media-service:22222").rstrip("/"),
+            srs_public_base=os.getenv("AI_SRS_PUBLIC_BASE", "").strip().rstrip("/"),
             evidence_root=Path(
                 os.getenv("AI_EVIDENCE_ROOT", "/var/recordings")
             ),

@@ -19,6 +19,17 @@ class FakeMediaClient:
             return []
         if path == "/api/ai/jobs/stats":
             return {"jobs": [], "workers": []}
+        if path == "/api/streams":
+            return [
+                {
+                    "stream_name": "camera-main",
+                    "display_name": "大门摄像头",
+                    "codec": "HEVC",
+                    "width": 1920,
+                    "height": 1080,
+                    "active": True,
+                }
+            ]
         raise AssertionError(path)
 
     def put_json(self, path: str, payload: dict[str, object]) -> dict[str, object]:
@@ -47,9 +58,17 @@ class DashboardServerTests(unittest.TestCase):
             return response.status, response.headers.get_content_type(), response.read()
 
     def test_serves_dashboard_and_rules(self) -> None:
-        status, content_type, body = self.get("/")
+        request = urllib.request.Request(self.base + "/")
+        with urllib.request.urlopen(request, timeout=3) as response:
+            status = response.status
+            content_type = response.headers.get_content_type()
+            content_security_policy = response.headers["Content-Security-Policy"]
+            body = response.read()
         self.assertEqual((status, content_type), (200, "text/html"))
         self.assertIn("AI分析平台".encode(), body)
+        self.assertIn("实时监控".encode(), body)
+        self.assertIn(b"/mpegts.min.js", body)
+        self.assertIn("http://127.0.0.1:8080", content_security_policy)
 
         status, content_type, body = self.get("/api/dashboard/rules")
         self.assertEqual((status, content_type), (200, "application/json"))
@@ -73,6 +92,17 @@ class DashboardServerTests(unittest.TestCase):
 
         status, content_type, body = self.get("/api/dashboard/frames/9/image")
         self.assertEqual((status, content_type, body), (200, "image/jpeg", b"jpeg-data"))
+
+    def test_returns_browser_playback_urls_for_online_streams(self) -> None:
+        status, content_type, body = self.get("/api/dashboard/streams")
+        self.assertEqual((status, content_type), (200, "application/json"))
+        streams = json.loads(body)["streams"]
+        self.assertEqual(len(streams), 1)
+        self.assertEqual(streams[0]["codec"], "HEVC")
+        self.assertEqual(
+            streams[0]["playback_url"],
+            "http://127.0.0.1:8080/live/camera-main.flv",
+        )
 
 
 if __name__ == "__main__":

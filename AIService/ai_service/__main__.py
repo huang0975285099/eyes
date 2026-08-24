@@ -29,7 +29,12 @@ def main() -> None:
     client = MediaAPIClient(
         settings.media_api, settings.request_timeout_seconds
     )
-    health_server = start_health_server(state, client, settings.health_port)
+    health_server = start_health_server(
+        state,
+        client,
+        settings.health_port,
+        settings.srs_public_base,
+    )
     worker = AnalysisWorker(settings, client, registry, state)
 
     def stop(_signum: int, _frame: object) -> None:

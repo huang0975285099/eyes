@@ -41,6 +41,7 @@
 
             <nav class="tabs" aria-label="AI平台页面">
                 <button class="tab active" data-page="configuration">服务配置</button>
+                <button class="tab" data-page="live">实时监控</button>
                 <button class="tab" data-page="results">分析结果</button>
             </nav>
 
@@ -92,6 +93,38 @@
                 <p id="saveMessage" class="message" role="status"></p>
             </section>
 
+            <section id="livePage" class="page">
+                <div class="section-heading live-heading">
+                    <div>
+                        <p class="section-kicker">LIVE MONITOR</p>
+                        <h2>实时视频</h2>
+                        <p>通过SRS HTTP-FLV低延迟播放H.264/H.265在线流。</p>
+                    </div>
+                    <div class="live-toolbar">
+                        <label for="liveSource">在线视频源</label>
+                        <select id="liveSource" aria-label="选择在线视频源">
+                            <option value="">正在读取在线流…</option>
+                        </select>
+                        <button id="refreshStreamsButton" class="ghost">刷新</button>
+                    </div>
+                </div>
+
+                <div class="live-stage">
+                    <video id="liveVideo" controls muted playsinline preload="none"></video>
+                    <div id="livePlaceholder" class="live-placeholder">
+                        <strong>选择在线视频源开始播放</strong>
+                        <span>H.265需要Chrome和显卡支持HEVC硬件解码</span>
+                    </div>
+                </div>
+                <div class="live-footer">
+                    <div>
+                        <span id="liveCodec" class="stream-chip">编码 -</span>
+                        <span id="liveResolution" class="stream-chip">分辨率 -</span>
+                    </div>
+                    <p id="liveStatus" class="message" role="status">等待选择视频源</p>
+                </div>
+            </section>
+
             <section id="resultsPage" class="page">
                 <div class="section-heading results-heading">
                     <div>
@@ -118,6 +151,12 @@
         </main>
 
         <div id="toast" class="toast" role="status"></div>
+        <script
+            src="/mpegts.min.js"
+            integrity="sha384-lUyV7hLicoTyv6bvfYqrGlhj26lFlaig1x0rD5/ntvHk+jiOX2oUTbNjrVE4cUXQ"
+            crossorigin="anonymous"
+            defer
+        ></script>
         <script src="/app.js" defer></script>
     </body>
 </html>

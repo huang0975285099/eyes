@@ -98,6 +98,25 @@ tbody tr:hover { background: rgba(34, 67, 82, .18); }
 .message { min-height: 20px; margin: 13px 0 0; color: var(--muted); font-size: 12px; }
 .message.success { color: #75e2cf; }
 .message.error { color: #ff9ca5; }
+.live-heading { align-items: flex-end; }
+.live-toolbar { display: grid; grid-template-columns: minmax(260px, 360px) auto; gap: 7px 9px; align-items: end; }
+.live-toolbar label { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
+.live-toolbar select { min-width: 320px; }
+.live-stage {
+    position: relative; overflow: hidden; margin-top: 24px; aspect-ratio: 16 / 9;
+    border: 1px solid #294454; border-radius: 13px; background: #020608;
+}
+.live-stage video { display: block; width: 100%; height: 100%; object-fit: contain; background: #020608; }
+.live-placeholder {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; padding: 24px; color: #d8e5ec; text-align: center; pointer-events: none;
+    background: radial-gradient(circle at center, rgba(25, 58, 72, .32), rgba(2, 6, 8, .92));
+}
+.live-placeholder.hidden { display: none; }
+.live-placeholder span { color: var(--muted); font-size: 12px; }
+.live-footer { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-top: 12px; }
+.live-footer .message { margin: 0; text-align: right; }
+.stream-chip { display: inline-block; margin-right: 7px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; color: #a9bdc8; font-size: 11px; background: #091720; }
 .results-heading { align-items: flex-end; }
 .filters { display: flex; align-items: flex-end; gap: 10px; }
 .filters label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }
@@ -114,6 +133,7 @@ tbody tr:hover { background: rgba(34, 67, 82, .18); }
 .toast.error { color: #ffe8ea; background: #5a2830; }
 @media (max-width: 1100px) {
     .result-grid { grid-template-columns: repeat(3, 1fr); }
-    .section-heading, .results-heading { align-items: stretch; flex-direction: column; }
+    .section-heading, .results-heading, .live-heading { align-items: stretch; flex-direction: column; }
+    .live-toolbar { grid-template-columns: minmax(260px, 1fr) auto; }
     .filters { flex-wrap: wrap; }
 }
