@@ -22,10 +22,11 @@ BUILD_NO_CACHE=false
 DEPLOY_TARGET=""
 
 # ================= 目标服务器配置 =================
-# 两台服务器都使用同一部署用户和历史目录；生产 .env 只保存在各自服务器上。
-REMOTE_USER="test"
+# 两台服务器分别配置登录用户；生产 .env 只保存在各自服务器上。
+PUBLIC_REMOTE_USER="test"
 PUBLIC_REMOTE_IP="112.18.238.6"
 PUBLIC_REMOTE_PORT="${PUBLIC_REMOTE_PORT:-2202}"
+INTRANET_REMOTE_USER="administrator"
 INTRANET_REMOTE_IP="10.0.20.219"
 INTRANET_REMOTE_PORT="${INTRANET_REMOTE_PORT:-22}"
 # 保留现有服务器目录，避免升级时丢失其中的生产 .env。
@@ -76,8 +77,8 @@ while [[ $# -gt 0 ]]; do
             echo "  -h, --help    显示帮助信息"
             echo ""
             echo "目标服务器:"
-            echo "  1) 公网 ${REMOTE_USER}@${PUBLIC_REMOTE_IP}:${PUBLIC_REMOTE_PORT}"
-            echo "  2) 内网 ${REMOTE_USER}@${INTRANET_REMOTE_IP}:${INTRANET_REMOTE_PORT}"
+            echo "  1) 公网 ${PUBLIC_REMOTE_USER}@${PUBLIC_REMOTE_IP}:${PUBLIC_REMOTE_PORT}"
+            echo "  2) 内网 ${INTRANET_REMOTE_USER}@${INTRANET_REMOTE_IP}:${INTRANET_REMOTE_PORT}"
             echo "远程目录: ${REMOTE_DIR}"
             exit 0
             ;;
@@ -90,8 +91,8 @@ done
 
 if [ -z "${DEPLOY_TARGET}" ]; then
     echo "请选择部署目标："
-    echo "  1) 公网 ${REMOTE_USER}@${PUBLIC_REMOTE_IP}:${PUBLIC_REMOTE_PORT}"
-    echo "  2) 内网 ${REMOTE_USER}@${INTRANET_REMOTE_IP}:${INTRANET_REMOTE_PORT}"
+    echo "  1) 公网 ${PUBLIC_REMOTE_USER}@${PUBLIC_REMOTE_IP}:${PUBLIC_REMOTE_PORT}"
+    echo "  2) 内网 ${INTRANET_REMOTE_USER}@${INTRANET_REMOTE_IP}:${INTRANET_REMOTE_PORT}"
     if ! read -r -p "请输入 1 或 2: " DEPLOY_TARGET; then
         echo "错误: 无法读取部署目标；非交互执行请使用 --target 1 或 --target 2"
         exit 1
@@ -104,11 +105,13 @@ DEPLOY_TARGET="${DEPLOY_TARGET//$'\r'/}"
 case "${DEPLOY_TARGET}" in
     1)
         TARGET_NAME="公网"
+        REMOTE_USER="${PUBLIC_REMOTE_USER}"
         REMOTE_IP="${PUBLIC_REMOTE_IP}"
         REMOTE_PORT="${PUBLIC_REMOTE_PORT}"
         ;;
     2)
         TARGET_NAME="内网"
+        REMOTE_USER="${INTRANET_REMOTE_USER}"
         REMOTE_IP="${INTRANET_REMOTE_IP}"
         REMOTE_PORT="${INTRANET_REMOTE_PORT}"
         ;;

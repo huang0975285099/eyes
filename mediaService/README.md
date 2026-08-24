@@ -58,7 +58,7 @@ AIService；不传`--target`时会要求输入部署目标：
 ```bash
 ./build.sh                         # 交互选择：1=公网，2=内网
 ./build.sh --target 1              # 公网 test@112.18.238.6:2202
-./build.sh --target 2              # 内网 test@10.0.20.219:22
+./build.sh --target 2              # 内网 administrator@10.0.20.219:22
 ./build.sh --target 2 --tag v1.0.0 # 指定镜像标签
 ```
 
