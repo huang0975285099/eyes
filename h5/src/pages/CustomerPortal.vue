@@ -66,7 +66,25 @@
         <div class="service-hero"><p>AI & STORAGE</p><h2>点位服务配置</h2><span>录像与实时抽帧彼此独立，可按点位分别开启。</span></div>
         <div class="service-list">
           <article v-for="source in sources" :key="source.video_source_id" class="service-card">
-            <header><div><strong>{{ source.display_name || source.stream_name }}</strong><span>{{ source.active ? '当前在线' : '当前离线' }}</span></div><q-icon :name="source.source_type === 'screen' ? 'desktop_windows' : 'videocam'" /></header>
+            <header class="service-device-header">
+              <div class="service-device-title">
+                <div class="service-device-icon"><q-icon :name="source.source_type === 'screen' ? 'desktop_windows' : 'videocam'" /></div>
+                <div class="service-device-name">
+                  <strong>{{ source.display_name || source.stream_name }}</strong>
+                  <span>{{ sourceType(source.source_type) }} · {{ source.brand || '通用设备' }}</span>
+                </div>
+                <q-badge :color="source.active ? 'positive' : 'grey-7'" rounded>{{ source.active ? '在线' : '离线' }}</q-badge>
+              </div>
+              <small class="service-stream-name" :title="source.stream_name">{{ source.stream_name }}</small>
+              <dl class="service-device-meta">
+                <div><dt>点位负责人</dt><dd :title="source.operator_name || '未设置'">{{ source.operator_name || '未设置' }}</dd></div>
+                <div><dt>内网 IP</dt><dd :title="source.local_ip || '未上报'">{{ source.local_ip || '未上报' }}</dd></div>
+                <div><dt>主机名</dt><dd :title="source.hostname || '未上报'">{{ source.hostname || '未上报' }}</dd></div>
+                <div><dt>MAC 地址</dt><dd :title="source.mac || '未上报'">{{ source.mac || '未上报' }}</dd></div>
+                <div><dt>编码 / 分辨率</dt><dd>{{ codec(source.codec) }} · {{ source.width ? `${source.width}×${source.height}` : '未知' }}</dd></div>
+                <div><dt>接入方式</dt><dd>{{ sourceType(source.source_type) }}</dd></div>
+              </dl>
+            </header>
             <div class="service-row"><div><q-icon name="fiber_smart_record" /><span><strong>录像存储</strong><small>分段保存完整视频</small></span></div><q-toggle v-model="source.recording_enabled" color="primary" /></div>
             <q-slide-transition><div v-show="source.recording_enabled" class="option-row"><span>录像保留天数</span><q-input v-model.number="source.recording_retain_days" dense outlined dark type="number" min="1" max="3650" suffix="天" /></div></q-slide-transition>
             <div class="service-row"><div><q-icon name="photo_camera" /><span><strong>实时抽帧</strong><small>从在线流定时保存图片</small></span></div><q-toggle v-model="source.sampling_enabled" color="primary" /></div>
