@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import unittest
 import urllib.error
 import urllib.request
@@ -12,9 +13,12 @@ from ai_service.state import ServiceState
 class FakeMediaClient:
     def __init__(self) -> None:
         self.saved: dict[str, object] | None = None
+        self.saved_path = ""
         self.authorization = ""
         self.sources: list[dict[str, object]] = []
         self.logout_count = 0
+        self.stream_path = ""
+        self.stream_headers: dict[str, str] = {}
 
     def get_json(self, path: str, headers: dict[str, str] | None = None) -> dict[str, object] | list[object]:
         self.authorization = (headers or {}).get("Authorization", "")
@@ -27,6 +31,8 @@ class FakeMediaClient:
             return {"sources": self.sources}
         if path.startswith("/api/portal/frames"):
             return []
+        if path.startswith("/api/portal/segments"):
+            return {"segments": []}
         if path == "/api/portal/jobs":
             return {"jobs": []}
         if path == "/api/portal/customers":
@@ -48,12 +54,29 @@ class FakeMediaClient:
 
     def put_json(self, path: str, payload: dict[str, object], headers: dict[str, str] | None = None) -> dict[str, object]:
         self.authorization = (headers or {}).get("Authorization", "")
+        self.saved_path = path
         self.saved = payload
         return {"ok": True}
 
     def get_bytes(self, path: str, headers: dict[str, str] | None = None) -> tuple[bytes, str]:
         self.authorization = (headers or {}).get("Authorization", "")
         return b"jpeg-data", "image/jpeg"
+
+    def open_stream(self, path: str, headers: dict[str, str] | None = None) -> object:
+        self.authorization = (headers or {}).get("Authorization", "")
+        self.stream_path = path
+        self.stream_headers = dict(headers or {})
+
+        class Response(io.BytesIO):
+            status = 206
+            headers = {
+                "Content-Type": "video/mp4",
+                "Content-Length": "9",
+                "Content-Range": "bytes 0-8/9",
+                "Accept-Ranges": "bytes",
+            }
+
+        return Response(b"mp4-bytes")
 
 
 class DashboardServerTests(unittest.TestCase):
@@ -122,6 +145,20 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual((status, content_type, body), (200, "image/jpeg", b"jpeg-data"))
         self.assertEqual(self.client.authorization, "Bearer session-123")
 
+    def test_platform_admin_can_update_source_operator(self) -> None:
+        cookie = self.login()
+        payload = {"video_source_id": 7, "operator_name": "张三"}
+        request = urllib.request.Request(
+            self.base + "/api/dashboard/source-operator",
+            data=json.dumps(payload).encode(),
+            method="PUT",
+            headers={"Content-Type": "application/json", "Cookie": cookie},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(self.client.saved_path, "/api/portal/source-operator")
+        self.assertEqual(self.client.saved, payload)
+
     def test_live_streams_are_built_from_authorized_portal_sources(self) -> None:
         self.client.sources = [
             {
@@ -163,6 +200,28 @@ class DashboardServerTests(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=3) as response:
             self.assertEqual(response.headers["Access-Control-Allow-Origin"], "capacitor://localhost")
             self.assertEqual(json.loads(response.read()), {"sources": []})
+        self.assertEqual(self.client.authorization, "Bearer customer-session")
+
+    def test_customer_recording_list_and_range_video_are_proxied(self) -> None:
+        request = urllib.request.Request(
+            self.base + "/api/customer/segments?stream_name=camera-01",
+            headers={"Authorization": "Bearer customer-session"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(json.loads(response.read()), {"segments": []})
+        request = urllib.request.Request(
+            self.base + "/api/customer/segments/12/video",
+            headers={
+                "Authorization": "Bearer customer-session",
+                "Range": "bytes=0-8",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(response.status, 206)
+            self.assertEqual(response.headers["Content-Range"], "bytes 0-8/9")
+            self.assertEqual(response.read(), b"mp4-bytes")
+        self.assertEqual(self.client.stream_path, "/api/portal/segments/12/video")
+        self.assertEqual(self.client.stream_headers["Range"], "bytes=0-8")
         self.assertEqual(self.client.authorization, "Bearer customer-session")
 
     def test_customer_cannot_enter_platform_dashboard(self) -> None:

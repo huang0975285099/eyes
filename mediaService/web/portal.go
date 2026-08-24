@@ -26,6 +26,9 @@ type portalSourceRow struct {
 	SourceType          string     `json:"source_type"`
 	SourceID            string     `json:"source_id"`
 	MAC                 string     `json:"mac"`
+	OperatorName        string     `json:"operator_name"`
+	Hostname            string     `json:"hostname"`
+	LocalIP             string     `json:"local_ip"`
 	Brand               string     `json:"brand"`
 	PublishMode         string     `json:"publish_mode"`
 	Enabled             bool       `json:"enabled"`
@@ -151,7 +154,8 @@ func (s *Server) listPortalSources(w http.ResponseWriter, p principal) {
 		rows = append(rows, portalSourceRow{
 			VideoSourceID: source.ID, CustomerID: source.CustomerID, CustomerName: customerNames[source.CustomerID],
 			StreamName: source.StreamName, DisplayName: source.DisplayName, SourceType: source.SourceType,
-			SourceID: source.SourceID, MAC: source.MAC, Brand: source.Brand,
+			SourceID: source.SourceID, MAC: source.MAC, OperatorName: source.OperatorName,
+			Hostname: source.Hostname, LocalIP: source.LocalIP, Brand: source.Brand,
 			PublishMode: source.PublishMode, Enabled: source.Enabled, Active: isActive,
 			Codec: stream.Video.Codec, Width: stream.Video.Width, Height: stream.Video.Height,
 			RecordingEnabled: recordingRule.Enabled, RecordingRetainDays: retainDays,
@@ -160,6 +164,42 @@ func (s *Server) listPortalSources(w http.ResponseWriter, p principal) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sources": rows})
+}
+
+func (s *Server) handlePortalSourceOperator(w http.ResponseWriter, r *http.Request) {
+	p, ok := requirePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if !p.isPlatformAdmin() || r.Method != http.MethodPut {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅平台管理员可以修改点位负责人"})
+		return
+	}
+	var req struct {
+		VideoSourceID uint   `json:"video_source_id"`
+		OperatorName  string `json:"operator_name"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil || req.VideoSourceID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "点位负责人参数无效"})
+		return
+	}
+	operatorName := strings.TrimSpace(req.OperatorName)
+	if operatorName == "" || len([]rune(operatorName)) > 20 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "点位负责人必须为1到20个字符"})
+		return
+	}
+	result := database.DB.Model(&models.VideoSource{}).
+		Where("id = ?", req.VideoSourceID).
+		Update("operator_name", operatorName)
+	if result.Error != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "修改点位负责人失败"})
+		return
+	}
+	if result.RowsAffected != 1 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "视频源不存在"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "operator_name": operatorName})
 }
 
 func (s *Server) updatePortalSourceConfigs(w http.ResponseWriter, r *http.Request, p principal) {
@@ -476,6 +516,102 @@ func (s *Server) handlePortalFrames(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, rows)
+}
+
+func (s *Server) handlePortalSegments(w http.ResponseWriter, r *http.Request) {
+	p, ok := requirePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	query := database.DB.Model(&models.RecordingSegment{}).Where("storage = ?", "local")
+	if !p.isPlatformAdmin() {
+		query = query.Where("customer_id = ?", p.User.CustomerID)
+	}
+	if streamName := strings.TrimSpace(r.URL.Query().Get("stream_name")); streamName != "" {
+		query = query.Where("stream_name = ?", streamName)
+	}
+	if dateValue := r.URL.Query().Get("date"); dateValue != "" {
+		if date, err := time.ParseInLocation("2006-01-02", dateValue, time.Local); err == nil {
+			query = query.Where("started_at >= ? AND started_at < ?", date, date.AddDate(0, 0, 1))
+		}
+	}
+	var segments []models.RecordingSegment
+	if err := query.Order("started_at DESC").Limit(500).Find(&segments).Error; err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询录像列表失败"})
+		return
+	}
+	streamNames := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		streamNames = append(streamNames, segment.StreamName)
+	}
+	sourceNames := make(map[string]string)
+	if len(streamNames) > 0 {
+		var sources []models.VideoSource
+		database.DB.Where("stream_name IN ?", streamNames).Find(&sources)
+		for _, source := range sources {
+			sourceNames[source.StreamName] = source.DisplayName
+		}
+	}
+	rows := make([]segmentRow, 0, len(segments))
+	for _, segment := range segments {
+		rows = append(rows, segmentRow{
+			ID: segment.ID, StreamName: segment.StreamName, MAC: segment.MAC,
+			SourceType: segment.SourceType, SourceID: segment.SourceID,
+			DisplayName: sourceNames[segment.StreamName], StartedAt: segment.StartedAt,
+			EndedAt: segment.EndedAt, Duration: segment.Duration, FileSize: segment.FileSize,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"segments": rows})
+}
+
+func (s *Server) handlePortalSegmentVideo(w http.ResponseWriter, r *http.Request) {
+	p, ok := requirePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/portal/segments/")
+	parts := strings.SplitN(strings.Trim(path, "/"), "/", 2)
+	if len(parts) != 2 || parts[1] != "video" {
+		http.NotFound(w, r)
+		return
+	}
+	id, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	query := database.DB.Model(&models.RecordingSegment{}).
+		Where("id = ? AND storage = ?", id, "local")
+	if !p.isPlatformAdmin() {
+		query = query.Where("customer_id = ?", p.User.CustomerID)
+	}
+	var segment models.RecordingSegment
+	if err := query.First(&segment).Error; err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	file, err := os.Open(segment.FilePath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Disposition", "inline; filename=\""+filepath.Base(segment.FilePath)+"\"")
+	w.Header().Set("Content-Type", "video/mp4")
+	http.ServeContent(w, r, filepath.Base(segment.FilePath), info.ModTime(), file)
 }
 
 func (s *Server) handlePortalFrameImage(w http.ResponseWriter, r *http.Request) {

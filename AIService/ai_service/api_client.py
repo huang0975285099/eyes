@@ -126,6 +126,26 @@ class MediaAPIClient:
         raw, content_type = self._request("GET", path, None, headers)
         return raw, content_type
 
+    def open_stream(
+        self, path: str, headers: dict[str, str] | None = None
+    ) -> Any:
+        request_headers = {"Accept": "video/mp4"}
+        request_headers.update(headers or {})
+        request = urllib.request.Request(
+            self._base_url + path,
+            method="GET",
+            headers=request_headers,
+        )
+        try:
+            return urllib.request.urlopen(request, timeout=self._timeout)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise MediaAPIError(
+                f"MediaService returned HTTP {exc.code}: {detail}", exc.code
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise MediaAPIError(f"MediaService request failed: {exc}") from exc
+
     def request_json(
         self,
         method: str,

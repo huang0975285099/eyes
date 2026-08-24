@@ -154,7 +154,13 @@ function cameraFFmpegArgs(source, rtmpURL) {
     return args
 }
 
-export function setupScreenHelper({ mediaServiceURL, videoSources, onStatus }) {
+export function setupScreenHelper({
+    mediaServiceURL,
+    videoSources,
+    getDeviceMetadata,
+    onOperatorName,
+    onStatus
+}) {
     let sources
     let configurationError = ''
     try {
@@ -201,8 +207,9 @@ export function setupScreenHelper({ mediaServiceURL, videoSources, onStatus }) {
         onStatus?.(status())
     }
 
-    async function getPublishConfig(mac, source) {
+    async function getPublishConfig(mac, source, metadataOverride = {}) {
         if (!mediaServiceURL) throw new Error('MediaService 配置不完整')
+        const metadata = { ...(await getDeviceMetadata?.()), ...metadataOverride }
         const response = await fetch(
             `${mediaServiceURL.replace(/\/$/, '')}/api/streams/publish-config`,
             {
@@ -212,7 +219,11 @@ export function setupScreenHelper({ mediaServiceURL, videoSources, onStatus }) {
                     mac,
                     source_type: source.type,
                     source_id: source.id,
-                    display_name: source.displayName
+                    display_name: source.displayName,
+                    operator_name: metadata.operator_name || '',
+                    operator_name_force: metadata.operator_name_force === true,
+                    hostname: metadata.hostname || '',
+                    local_ip: metadata.local_ip || ''
                 }),
                 signal: AbortSignal.timeout(5000)
             }
@@ -221,7 +232,37 @@ export function setupScreenHelper({ mediaServiceURL, videoSources, onStatus }) {
         if (!response.ok)
             throw new Error(body.message || `申请推流地址失败 HTTP ${response.status}`)
         if (!body.rtmp_url) throw new Error('MediaService 未返回 rtmp_url')
+        if (source.type === 'screen' && typeof body.operator_name === 'string') {
+            onOperatorName?.(body.operator_name)
+        }
         return body
+    }
+
+    async function syncOperatorName(value) {
+        const operatorName = String(value || '').trim()
+        if (!operatorName) throw new Error('点位负责人不能为空')
+        const nic = await getPreferredNICAsync(mediaServiceURL)
+        if (!nic.mac) throw new Error('未找到可用网卡 MAC 地址')
+        const results = await Promise.all(
+            sources.map((source) =>
+                getPublishConfig(nic.mac, source, {
+                    operator_name: operatorName,
+                    operator_name_force: true,
+                    local_ip: nic.ip || ''
+                })
+            )
+        )
+        onOperatorName?.(operatorName)
+        return { ok: true, updated: results.length }
+    }
+
+    async function refreshOperatorName() {
+        const source = sources.find((item) => item.type === 'screen')
+        if (!source) return { ok: true, skipped: true }
+        const nic = await getPreferredNICAsync(mediaServiceURL)
+        if (!nic.mac) throw new Error('未找到可用网卡 MAC 地址')
+        await getPublishConfig(nic.mac, source, { local_ip: nic.ip || '' })
+        return { ok: true }
     }
 
     function scheduleRestart(source) {
@@ -386,5 +427,13 @@ export function setupScreenHelper({ mediaServiceURL, videoSources, onStatus }) {
         powerMonitor.removeListener('resume', handleResume)
     }
 
-    return { start, stop, restart, status, dispose }
+    return {
+        start,
+        stop,
+        restart,
+        syncOperatorName,
+        refreshOperatorName,
+        status,
+        dispose
+    }
 }

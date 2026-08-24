@@ -22,6 +22,8 @@ _CUSTOMER_WEB_ROOT = (
 )
 _FRAME_IMAGE = re.compile(r"^/api/dashboard/frames/(\d+)/image$")
 _CUSTOMER_FRAME_IMAGE = re.compile(r"^/api/customer/frames/(\d+)/image$")
+_DASHBOARD_SEGMENT_VIDEO = re.compile(r"^/api/dashboard/segments/(\d+)/video$")
+_CUSTOMER_SEGMENT_VIDEO = re.compile(r"^/api/customer/segments/(\d+)/video$")
 _SESSION_COOKIE = "eyes_session"
 _MPEGTS_CDN = "https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"
 
@@ -51,10 +53,12 @@ def start_health_server(
                 "/api/dashboard/customers": ("/api/portal/customers", True, "platform_admin"),
                 "/api/dashboard/jobs": ("/api/portal/jobs", True, "platform_admin"),
                 "/api/dashboard/frames": ("/api/portal/frames", True, "platform_admin"),
+                "/api/dashboard/segments": ("/api/portal/segments", True, "platform_admin"),
                 "/api/customer/auth/me": ("/api/portal/auth/me", True, "customer_admin"),
                 "/api/customer/sources": ("/api/portal/sources", True, "customer_admin"),
                 "/api/customer/jobs": ("/api/portal/jobs", True, "customer_admin"),
                 "/api/customer/frames": ("/api/portal/frames", True, "customer_admin"),
+                "/api/customer/segments": ("/api/portal/segments", True, "customer_admin"),
             }
             if parsed.path in get_routes:
                 target, authenticated, required_role = get_routes[parsed.path]
@@ -77,6 +81,18 @@ def start_health_server(
             customer_frame_match = _CUSTOMER_FRAME_IMAGE.match(parsed.path)
             if customer_frame_match:
                 self._proxy_frame(customer_frame_match.group(1), required_role="customer_admin")
+                return
+            dashboard_segment_match = _DASHBOARD_SEGMENT_VIDEO.match(parsed.path)
+            if dashboard_segment_match:
+                self._proxy_segment_video(
+                    dashboard_segment_match.group(1), required_role="platform_admin"
+                )
+                return
+            customer_segment_match = _CUSTOMER_SEGMENT_VIDEO.match(parsed.path)
+            if customer_segment_match:
+                self._proxy_segment_video(
+                    customer_segment_match.group(1), required_role="customer_admin"
+                )
                 return
             if parsed.path == "/customer" or parsed.path.startswith("/customer/"):
                 self._customer_static(parsed.path)
@@ -146,6 +162,7 @@ def start_health_server(
             routes = {
                 "/api/dashboard/sources": "/api/portal/sources",
                 "/api/dashboard/source-owner": "/api/portal/source-owner",
+                "/api/dashboard/source-operator": "/api/portal/source-operator",
                 "/api/dashboard/customers": "/api/portal/customers",
                 "/api/customer/sources": "/api/portal/sources",
                 "/api/customer/auth/password": "/api/portal/auth/password",
@@ -208,6 +225,45 @@ def start_health_server(
                 self._cors_headers()
             self.end_headers()
             self.wfile.write(body)
+
+        def _proxy_segment_video(
+            self, segment_id: str, required_role: str = ""
+        ) -> None:
+            upstream = None
+            try:
+                headers = self._authorized_headers(required_role)
+                range_value = self.headers.get("Range", "").strip()
+                if range_value:
+                    headers["Range"] = range_value
+                upstream = client.open_stream(
+                    f"/api/portal/segments/{segment_id}/video", headers
+                )
+                status = int(getattr(upstream, "status", 200))
+                self.send_response(status)
+                for name in (
+                    "Content-Type", "Content-Length", "Content-Range",
+                    "Accept-Ranges", "Last-Modified", "ETag",
+                ):
+                    value = upstream.headers.get(name)
+                    if value:
+                        self.send_header(name, value)
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                if urlsplit(self.path).path.startswith("/api/customer/"):
+                    self._cors_headers()
+                self.end_headers()
+                while True:
+                    chunk = upstream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except MediaAPIError as exc:
+                self._media_error(exc)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                if upstream is not None:
+                    upstream.close()
 
         def _streams(self, required_role: str = "") -> None:
             try:

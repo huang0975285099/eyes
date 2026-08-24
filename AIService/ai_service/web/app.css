@@ -94,7 +94,10 @@ button.ghost { border: 1px solid #315063; color: #b9cad5; background: #0d202b; }
 button.ghost:hover { border-color: #547589; }
 .table-wrap { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; }
 .service-table-wrap { margin-top: 22px; overflow-x: auto; }
-.service-table-wrap table { min-width: 1060px; }
+.service-table-wrap table { min-width: 1280px; }
+.operator-editor { display: flex; align-items: center; gap: 6px; min-width: 190px; }
+.operator-editor input { min-width: 110px; width: 120px; }
+.operator-editor button { padding: 8px 10px; white-space: nowrap; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { padding: 11px 13px; color: #77909f; text-align: left; font-size: 11px; letter-spacing: .04em; background: #091720; }
 td { padding: 13px; border-top: 1px solid #1b303d; color: #c8d7df; }

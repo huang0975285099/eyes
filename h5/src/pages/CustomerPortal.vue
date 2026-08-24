@@ -34,7 +34,7 @@
         <EmptyState v-else icon="videocam_off" title="暂无在线视频" description="设备开始推流后，画面会显示在这里。" />
       </q-page>
 
-      <q-page v-show="tab === 'devices'" padding class="content-page">
+      <q-page v-show="tab === 'devices'" class="content-page">
         <section class="summary-card">
           <div><span>全部点位</span><strong>{{ sources.length }}</strong></div>
           <div><span>在线</span><strong class="positive-text">{{ onlineCount }}</strong></div>
@@ -42,16 +42,26 @@
         </section>
         <div class="section-title"><div><p>DEVICE POINTS</p><h2>设备点位</h2></div></div>
         <div class="device-list">
-          <article v-for="source in sources" :key="source.video_source_id" class="device-card">
+          <article v-for="source in sources" :key="source.video_source_id" class="device-card" role="button" tabindex="0" @click="openDevice(source)" @keydown.enter.prevent="openDevice(source)">
             <div class="device-icon"><q-icon :name="source.source_type === 'screen' ? 'desktop_windows' : 'videocam'" /></div>
             <div class="device-main"><strong>{{ source.display_name || source.stream_name }}</strong><span>{{ sourceType(source.source_type) }} · {{ source.brand || '通用设备' }}</span><small>{{ source.stream_name }}</small></div>
             <q-badge :color="source.active ? 'positive' : 'grey-7'" rounded>{{ source.active ? '在线' : '离线' }}</q-badge>
-            <dl><div><dt>编码</dt><dd>{{ codec(source.codec) }}</dd></div><div><dt>分辨率</dt><dd>{{ source.width ? `${source.width}×${source.height}` : '-' }}</dd></div><div><dt>MAC</dt><dd>{{ source.mac || '-' }}</dd></div><div><dt>设备编号</dt><dd>{{ source.source_id || '-' }}</dd></div></dl>
+            <dl>
+              <div><dt>点位负责人</dt><dd>{{ source.operator_name || '未设置' }}</dd></div>
+              <div><dt>内网 IP</dt><dd>{{ source.local_ip || '-' }}</dd></div>
+              <div><dt>主机名</dt><dd>{{ source.hostname || '-' }}</dd></div>
+              <div><dt>MAC</dt><dd>{{ source.mac || '-' }}</dd></div>
+              <div><dt>编码</dt><dd>{{ codec(source.codec) }}</dd></div>
+              <div><dt>分辨率</dt><dd>{{ source.width ? `${source.width}×${source.height}` : '-' }}</dd></div>
+              <div><dt>设备编号</dt><dd>{{ source.source_id || '-' }}</dd></div>
+              <div><dt>接入方式</dt><dd>{{ sourceType(source.source_type) }}</dd></div>
+            </dl>
+            <div class="device-detail-link"><span>查看抽帧、录像和点位详情</span><q-icon name="chevron_right" /></div>
           </article>
         </div>
       </q-page>
 
-      <q-page v-show="tab === 'services'" padding class="content-page">
+      <q-page v-show="tab === 'services'" class="content-page">
         <div class="service-hero"><p>AI & STORAGE</p><h2>点位服务配置</h2><span>录像与实时抽帧彼此独立，可按点位分别开启。</span></div>
         <div class="service-list">
           <article v-for="source in sources" :key="source.video_source_id" class="service-card">
@@ -65,7 +75,7 @@
         <q-btn unelevated color="primary" text-color="dark" class="save-services" icon="check" label="保存全部配置" :loading="busy" @click="saveServices" />
       </q-page>
 
-      <q-page v-show="tab === 'profile'" padding class="content-page profile-page">
+      <q-page v-show="tab === 'profile'" class="content-page profile-page">
         <section class="profile-card">
           <div class="avatar">{{ accountInitial }}</div><div><p>{{ customerName }}</p><h2>{{ me?.username }}</h2><span>客户管理员</span></div>
         </section>
@@ -80,7 +90,7 @@
     </q-page-container>
 
     <q-footer class="bottom-nav">
-      <q-tabs v-model="tab" dense no-caps indicator-color="transparent" active-color="primary">
+      <q-tabs v-model="tab" dense no-caps align="justify" indicator-color="transparent" active-color="primary">
         <q-tab name="live" icon="smart_display" label="实时" />
         <q-tab name="devices" icon="devices_other" label="设备" />
         <q-tab name="services" icon="auto_awesome" label="AI服务" />
@@ -92,6 +102,10 @@
   <q-dialog v-model="passwordDialog">
     <q-card dark class="password-card"><q-card-section><div class="text-h6">修改登录密码</div><div class="text-caption text-grey-5">修改后需要重新登录所有设备。</div></q-card-section><q-card-section class="q-gutter-md"><q-input v-model="currentPassword" dark outlined type="password" label="当前密码" /><q-input v-model="newPassword" dark outlined type="password" label="新密码（8～72位）" /></q-card-section><q-card-actions align="right"><q-btn flat label="取消" v-close-popup /><q-btn color="primary" text-color="dark" label="确认修改" :loading="busy" @click="changePassword" /></q-card-actions></q-card>
   </q-dialog>
+
+  <q-dialog v-model="deviceDetailOpen" maximized transition-show="slide-left" transition-hide="slide-right">
+    <DeviceDetail v-if="selectedDevice" :source="selectedDevice" :server="server" @close="deviceDetailOpen = false" />
+  </q-dialog>
 </template>
 
 <script setup lang="ts">
@@ -99,6 +113,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import LiveFeed from '../components/LiveFeed.vue'
 import EmptyState from '../components/EmptyState.vue'
+import DeviceDetail from '../components/DeviceDetail.vue'
 import { api, clearSession, defaultServer, saveServer, type AccountUser, type VideoSource } from '../services/api'
 
 const $q = useQuasar()
@@ -115,6 +130,8 @@ const activeFeed = ref(0)
 const passwordDialog = ref(false)
 const currentPassword = ref('')
 const newPassword = ref('')
+const selectedDevice = ref<VideoSource>()
+const deviceDetailOpen = ref(false)
 let observer: IntersectionObserver | undefined
 
 const authenticated = computed(() => Boolean(me.value))
@@ -127,6 +144,7 @@ const pageTitle = computed(() => ({ live: '实时视频', devices: '设备管理
 
 function sourceType(value: string) { return ({ screen: '电脑桌面', usb_camera: 'USB摄像头', ip_camera: 'RTSP/NVR', direct_camera: '网络摄像头' } as Record<string, string>)[value] || '视频点位' }
 function codec(value: string) { return /hevc|h265/i.test(value) ? 'H.265' : /avc|h264/i.test(value) ? 'H.264' : value || '-' }
+function openDevice(source: VideoSource) { selectedDevice.value = source; deviceDetailOpen.value = true }
 
 async function login() {
   busy.value = true; errorMessage.value = ''

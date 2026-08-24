@@ -32,22 +32,25 @@ type UserSession struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// VideoSource describes a logical video source belonging to a computer. It is
-// deliberately vendor-neutral: brand-specific connection details stay on the
-// client and never enter MediaService.
+// VideoSource describes a vendor-neutral logical video point. Camera passwords
+// and connection URLs stay on the client; only the operator and basic network
+// identity needed by the management portals are synchronized to MediaService.
 type VideoSource struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	CustomerID  uint      `gorm:"not null;default:0;index" json:"customer_id"`
-	MAC         string    `gorm:"size:50;not null;uniqueIndex:idx_video_source_identity" json:"mac"`
-	SourceType  string    `gorm:"size:30;not null;uniqueIndex:idx_video_source_identity" json:"source_type"`
-	SourceID    string    `gorm:"size:100;not null;uniqueIndex:idx_video_source_identity" json:"source_id"`
-	DisplayName string    `gorm:"size:100;not null" json:"display_name"`
-	Brand       string    `gorm:"size:100" json:"brand"`
-	PublishMode string    `gorm:"size:20;not null;default:app;index" json:"publish_mode"`
-	Enabled     bool      `gorm:"not null;default:true;index" json:"enabled"`
-	StreamName  string    `gorm:"size:64;not null;uniqueIndex" json:"stream_name"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	CustomerID   uint      `gorm:"not null;default:0;index" json:"customer_id"`
+	MAC          string    `gorm:"size:50;not null;uniqueIndex:idx_video_source_identity" json:"mac"`
+	SourceType   string    `gorm:"size:30;not null;uniqueIndex:idx_video_source_identity" json:"source_type"`
+	SourceID     string    `gorm:"size:100;not null;uniqueIndex:idx_video_source_identity" json:"source_id"`
+	DisplayName  string    `gorm:"size:100;not null" json:"display_name"`
+	OperatorName string    `gorm:"size:20" json:"operator_name"`
+	Hostname     string    `gorm:"size:200" json:"hostname"`
+	LocalIP      string    `gorm:"size:45" json:"local_ip"`
+	Brand        string    `gorm:"size:100" json:"brand"`
+	PublishMode  string    `gorm:"size:20;not null;default:app;index" json:"publish_mode"`
+	Enabled      bool      `gorm:"not null;default:true;index" json:"enabled"`
+	StreamName   string    `gorm:"size:64;not null;uniqueIndex" json:"stream_name"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // VideoRecordingRule replaces the former global recording switch. Every

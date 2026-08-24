@@ -14,6 +14,9 @@ export interface VideoSource {
   source_type: string
   source_id: string
   mac: string
+  operator_name: string
+  hostname: string
+  local_ip: string
   brand: string
   publish_mode: string
   enabled: boolean
@@ -28,6 +31,24 @@ export interface VideoSource {
   frames_per_minute: number
   frame_count: number
   last_captured_at?: string
+}
+
+export interface FrameResult {
+  id: number
+  stream_name: string
+  display_name: string
+  captured_at: string
+  file_size: number
+}
+
+export interface RecordingSegment {
+  id: number
+  stream_name: string
+  display_name: string
+  started_at: string
+  ended_at: string
+  duration: number
+  file_size: number
 }
 
 const SERVER_KEY = 'eyes_customer_server'
@@ -49,6 +70,10 @@ export function saveServer(value: string): void {
 }
 
 export function clearSession(): void { localStorage.removeItem(TOKEN_KEY) }
+
+export function customerResourceURL(server: string, path: string): string {
+  return `${normalizedServer(server)}/api/customer${path}`
+}
 
 function isCrossOrigin(server: string): boolean {
   try { return new URL(server).origin !== location.origin } catch { return true }

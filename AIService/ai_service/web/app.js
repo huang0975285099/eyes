@@ -94,7 +94,7 @@ function renderSources() {
     const tbody = $('#sourceRows')
     const admin = state.me.user.role === 'platform_admin'
     if (!state.sources.length) {
-        tbody.innerHTML = `<tr><td colspan="${admin ? 8 : 7}" class="empty">当前账号还没有可管理的视频源。</td></tr>`
+        tbody.innerHTML = `<tr><td colspan="${admin ? 9 : 8}" class="empty">当前账号还没有可管理的视频源。</td></tr>`
         renderMetrics()
         renderSourceFilter()
         return
@@ -103,6 +103,7 @@ function renderSources() {
         <tr data-source-id="${Number(source.video_source_id)}">
             <td><span class="source-name">${escapeHTML(source.display_name || source.stream_name)}</span><span class="source-meta">${escapeHTML(sourceType(source.source_type))} · ${escapeHTML(source.stream_name)}</span></td>
             ${admin ? `<td><select class="customer-select source-owner" data-current="${Number(source.customer_id || 0)}">${customerOptions(source.customer_id)}</select></td>` : ''}
+            <td><div class="operator-editor"><input class="operator-name" maxlength="20" value="${escapeHTML(source.operator_name || '')}" placeholder="姓名或编号" /><button class="ghost operator-save" type="button">保存</button></div><span class="source-meta">${escapeHTML(source.hostname || '-')} · ${escapeHTML(source.local_ip || '-')} · ${escapeHTML(source.mac || '-')}</span></td>
             <td><span class="pill ${source.active ? 'online' : 'offline'}">${source.active ? '在线' : '离线'}</span></td>
             <td><input class="recording-enabled" type="checkbox" ${source.recording_enabled ? 'checked' : ''} aria-label="开启录像" /></td>
             <td><input class="compact-input retain-days" type="number" min="1" max="3650" value="${Number(source.recording_retain_days || 7)}" /> 天</td>
@@ -111,6 +112,7 @@ function renderSources() {
             <td>${Number(source.frame_count || 0)} 张<br><span class="source-meta">${escapeHTML(localTime(source.last_captured_at))}</span></td>
         </tr>`).join('')
     $$('.source-owner').forEach((select) => select.addEventListener('change', assignOwner))
+    $$('.operator-save').forEach((button) => button.addEventListener('click', saveOperatorName))
     renderMetrics()
     renderSourceFilter()
 }
@@ -358,6 +360,30 @@ async function assignOwner(event) {
         select.value = select.dataset.current
         toast(error.message, true)
     }
+}
+
+async function saveOperatorName(event) {
+    const button = event.currentTarget
+    const row = button.closest('tr')
+    const input = row.querySelector('.operator-name')
+    const operatorName = input.value.trim()
+    if (!operatorName || [...operatorName].length > 20) {
+        return toast('点位负责人必须为1～20个字符', true)
+    }
+    button.disabled = true
+    try {
+        await request('/api/dashboard/source-operator', {
+            method: 'PUT',
+            body: JSON.stringify({
+                video_source_id: Number(row.dataset.sourceId),
+                operator_name: operatorName,
+            }),
+        })
+        toast('点位负责人已更新')
+        await loadSources()
+    } catch (error) {
+        toast(error.message, true)
+    } finally { button.disabled = false }
 }
 
 async function loadFrames() {

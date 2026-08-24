@@ -12,7 +12,7 @@
       <div><q-badge :color="source.active ? 'positive' : 'grey-7'" rounded>{{ source.active ? '在线' : '离线' }}</q-badge></div>
       <h2>{{ source.display_name || source.stream_name }}</h2>
       <p>{{ sourceTypeLabel }} · {{ codecLabel }}<span v-if="source.width"> · {{ source.width }}×{{ source.height }}</span></p>
-      <small>上滑查看下一点位</small>
+      <small v-if="hintText">{{ hintText }}</small>
     </div>
   </article>
 </template>
@@ -23,7 +23,7 @@ import type { VideoSource } from '../services/api'
 
 type MpegtsModule = typeof import('mpegts.js')['default']
 
-const props = defineProps<{ source: VideoSource; active: boolean }>()
+const props = defineProps<{ source: VideoSource; active: boolean; hint?: string }>()
 const video = ref<HTMLVideoElement>()
 const status = ref<'idle' | 'loading' | 'playing' | 'offline' | 'error'>('idle')
 const errorText = ref('')
@@ -34,6 +34,7 @@ const sourceTypeLabel = computed(() => ({ screen: '电脑桌面', usb_camera: 'U
 const codecLabel = computed(() => /hevc|h265/i.test(props.source.codec) ? 'H.265' : /avc|h264/i.test(props.source.codec) ? 'H.264' : (props.source.codec || '编码未知'))
 const statusText = computed(() => status.value === 'offline' ? '点位当前离线' : status.value === 'error' ? '暂时无法播放' : status.value === 'loading' ? '正在连接视频…' : '等待播放')
 const detailText = computed(() => status.value === 'error' ? errorText.value : status.value === 'offline' ? '设备恢复推流后可继续查看' : codecLabel.value)
+const hintText = computed(() => props.hint === undefined ? '上滑查看下一点位' : props.hint)
 
 function stop() {
   lifecycle += 1

@@ -11,12 +11,14 @@ import { getPreferredNICAsync } from './network-util'
 const DEFAULT_CONFIG = {
     mediaServiceURL: 'http://10.0.20.219:22222',
     userName: '',
+    pendingUserNameSync: false,
     videoSources: [{ id: 'desktop', type: 'screen', displayName: '电脑桌面', enabled: true }]
 }
 
 let mainWindow
 let tray
 let screenController
+let metadataRefreshTimer
 let startHidden = false
 let streamConfigurationPromise = Promise.resolve()
 
@@ -119,7 +121,7 @@ async function collectSystemInfo() {
 function saveUserName(value) {
     const userName = String(value || '').trim()
     if ([...userName].length > 20) throw new Error('姓名或编号不能超过20个字符')
-    saveUserConfig({ userName })
+    saveUserConfig({ userName, pendingUserNameSync: true })
     return userName
 }
 
@@ -167,6 +169,22 @@ function createScreenController() {
     return setupScreenHelper({
         mediaServiceURL: config.mediaServiceURL,
         videoSources: config.videoSources,
+        getDeviceMetadata: async () => {
+            const nic = await getPreferredNICAsync(config.mediaServiceURL)
+            return {
+                operator_name: config.userName || '',
+                operator_name_force: config.pendingUserNameSync === true,
+                hostname: os.hostname(),
+                local_ip: nic.ip || ''
+            }
+        },
+        onOperatorName: (value) => {
+            const userName = String(value || '').trim()
+            if (!userName) return
+            if (config.userName !== userName || config.pendingUserNameSync) {
+                saveUserConfig({ userName, pendingUserNameSync: false })
+            }
+        },
         onStatus: (status) => mainWindow?.webContents.send('stream:status-changed', status)
     })
 }
@@ -323,8 +341,16 @@ ipcMain.handle('app:get-status', async () => ({
     system: await collectSystemInfo(),
     stream: screenController?.status() || { running: false, url: '', error: '' }
 }))
-ipcMain.handle('device:set-user-name', (_event, value) => {
-    return saveUserName(value)
+ipcMain.handle('device:set-user-name', async (_event, value) => {
+    const userName = saveUserName(value)
+    try {
+        await screenController?.syncOperatorName(userName)
+    } catch (error) {
+        // 本地修改不能因为服务器暂时离线而丢失。pendingUserNameSync 会在下次
+        // 推流时继续同步，客户端无需中断当前视频。
+        console.error('[device] 点位负责人将在下次推流时同步:', error.message)
+    }
+    return userName
 })
 ipcMain.handle('stream:restart', () => screenController?.restart('ipc'))
 ipcMain.handle('nvr:get-config', () => ({
@@ -349,11 +375,18 @@ app.whenReady().then(async () => {
     createTray()
     screenController = createScreenController()
     await screenController.start('app_boot')
+    metadataRefreshTimer = setInterval(() => {
+        screenController?.refreshOperatorName().catch((error) => {
+            console.error('[device] 刷新点位负责人失败:', error.message)
+        })
+    }, 60_000)
+    metadataRefreshTimer.unref?.()
     setTimeout(promptClientUpdate, 3000)
 })
 
 app.on('before-quit', () => {
     app.isQuiting = true
+    clearInterval(metadataRefreshTimer)
     screenController?.dispose()
 })
 
