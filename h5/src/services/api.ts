@@ -68,7 +68,9 @@ export function defaultServer(): string {
     }
     return stored
   }
-  if (location.pathname.startsWith('/customer')) return location.origin
+  // Browser deployment can use its own origin, but the packaged Tauri app
+  // is served from tauri.localhost and must connect to the remote API.
+  if (location.pathname.startsWith('/customer') && location.hostname !== 'tauri.localhost') return location.origin
   return 'http://112.18.238.6:18887'
 }
 
