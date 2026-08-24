@@ -82,6 +82,18 @@ if ! ${COMPOSE} config -q; then
 fi
 echo "  ✓ Compose 配置校验通过"
 
+# SRS在本Compose中固定发布宿主机8080端口。若服务器保留了旧的8090等配置，
+# 服务本身仍会健康，但浏览器会拿到一个无法连接的播放地址。
+SRS_PUBLIC_BASE=$(${COMPOSE} config | awk -F': ' '/AI_SRS_PUBLIC_BASE:/ {print $2; exit}' | tr -d '"')
+case "${SRS_PUBLIC_BASE}" in
+    *:8080) echo "  ✓ SRS公网播放地址: ${SRS_PUBLIC_BASE}" ;;
+    *)
+        echo "✗ 错误: SRS实际映射端口为8080，但配置的播放地址是 ${SRS_PUBLIC_BASE:-<空>}"
+        echo "  请把当前目录.env中的MEDIA_SRS_HTTP_HOST改为 <服务器IP或域名>:8080"
+        exit 1
+        ;;
+esac
+
 # 创建录像存储目录
 echo ""
 echo "[2/6] 创建录像存储目录..."

@@ -4,7 +4,9 @@ export default defineConfig((ctx) => {
   const nativeBuild = ctx.mode.capacitor || process.env.NATIVE_BUILD === '1'
   return {
   css: ['app.scss'],
-  extras: ['material-icons-round'],
+  // Quasar's default icon set uses the `material-icons` class. Loading only
+  // material-icons-round leaves icon names such as "refresh" visible as text.
+  extras: ['material-icons'],
   build: {
     target: { browser: ['es2022'], node: 'node22' },
     vueRouterMode: 'history',

@@ -93,6 +93,12 @@ class DashboardServerTests(unittest.TestCase):
         _, _, body = self.get("/api/dashboard/auth/status")
         self.assertFalse(json.loads(body)["setup_required"])
 
+    def test_dashboard_csp_allows_mse_blob_playback(self) -> None:
+        request = urllib.request.Request(self.base + "/")
+        with urllib.request.urlopen(request, timeout=3) as response:
+            policy = response.headers["Content-Security-Policy"]
+        self.assertIn("media-src 'self' blob:", policy)
+
     def test_login_forwards_bearer_session(self) -> None:
         cookie = self.login()
         _, _, body = self.get("/api/dashboard/sources", cookie)

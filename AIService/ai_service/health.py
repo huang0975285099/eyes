@@ -310,7 +310,7 @@ def start_health_server(
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'self'; img-src 'self' data:; "
+                "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; "
                 "style-src 'self'; script-src 'self' https://cdn.jsdelivr.net; "
                 f"connect-src 'self' {self._srs_origin()}",
             )

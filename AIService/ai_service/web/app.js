@@ -386,9 +386,10 @@ async function submitAuth(event) {
 
 async function createCustomer(event) {
     event.preventDefault()
+    const form = event.currentTarget
     try {
         await request('/api/dashboard/customers', { method: 'POST', body: JSON.stringify({ name: $('#customerName').value.trim(), username: $('#customerUsername').value.trim(), password: $('#customerPassword').value }) })
-        event.currentTarget.reset()
+        form.reset()
         toast('客户账号已创建')
         await loadCustomers()
         renderSources()
