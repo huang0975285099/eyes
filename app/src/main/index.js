@@ -40,17 +40,6 @@ function showMainWindow() {
     mainWindow.focus()
 }
 
-function migrateLegacyMediaServiceURL(value) {
-    try {
-        const url = new URL(String(value || ''))
-        if (url.hostname === '112.18.238.6') url.hostname = '10.0.20.219'
-        if (url.port === '52350') url.port = '22222'
-        return url.toString().replace(/\/$/, '')
-    } catch {
-        return String(value || '').trim()
-    }
-}
-
 function loadConfig() {
     const candidates =
         process.env.NODE_ENV === 'development'
@@ -64,17 +53,6 @@ function loadConfig() {
         try {
             if (existsSync(file)) {
                 const fileConfig = JSON.parse(readFileSync(file, 'utf8'))
-                // 兼容升级前已经安装客户端的旧配置字段。
-                if (!fileConfig.mediaServiceURL && fileConfig.recordingServiceURL) {
-                    fileConfig.mediaServiceURL = migrateLegacyMediaServiceURL(
-                        fileConfig.recordingServiceURL
-                    )
-                }
-                if (fileConfig.mediaServiceURL) {
-                    fileConfig.mediaServiceURL = migrateLegacyMediaServiceURL(
-                        fileConfig.mediaServiceURL
-                    )
-                }
                 loaded = { ...loaded, ...fileConfig }
             }
         } catch (error) {

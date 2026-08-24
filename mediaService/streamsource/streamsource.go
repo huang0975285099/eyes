@@ -23,7 +23,6 @@ var (
 )
 
 // Normalize validates and normalizes the source identity supplied by a client.
-// Empty source fields retain the legacy screen stream identity for old clients.
 func Normalize(mac, sourceType, sourceID, displayName string) (string, string, string, string, error) {
 	mac = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(mac), "-", ":"))
 	parsed, err := net.ParseMAC(mac)
@@ -33,7 +32,7 @@ func Normalize(mac, sourceType, sourceID, displayName string) (string, string, s
 
 	sourceType = strings.ToLower(strings.TrimSpace(sourceType))
 	if sourceType == "" {
-		sourceType = TypeScreen
+		return "", "", "", "", fmt.Errorf("source_type is required")
 	}
 	if !sourceTypePattern.MatchString(sourceType) {
 		return "", "", "", "", fmt.Errorf("unsupported source type %q", sourceType)
@@ -41,11 +40,7 @@ func Normalize(mac, sourceType, sourceID, displayName string) (string, string, s
 
 	sourceID = strings.TrimSpace(sourceID)
 	if sourceID == "" {
-		if sourceType == TypeScreen {
-			sourceID = "desktop"
-		} else {
-			return "", "", "", "", fmt.Errorf("source_id is required for cameras")
-		}
+		return "", "", "", "", fmt.Errorf("source_id is required")
 	}
 	if len([]rune(sourceID)) > 100 {
 		return "", "", "", "", fmt.Errorf("source_id is too long")
@@ -70,15 +65,11 @@ func Normalize(mac, sourceType, sourceID, displayName string) (string, string, s
 	return mac, sourceType, sourceID, displayName, nil
 }
 
-// Name returns a stable, SRS/filesystem-safe stream name. The default desktop
-// keeps the historical MAC-only name so deployed clients and recordings remain
-// compatible. Camera IDs are represented by a hash and never expose RTSP URLs,
-// credentials, or vendor-specific device names.
+// Name returns a stable, SRS/filesystem-safe stream name. Source IDs are
+// represented by a hash and never expose RTSP URLs, credentials, or vendor
+// specific device names.
 func Name(mac, sourceType, sourceID string) string {
 	compact := strings.ReplaceAll(strings.ToLower(mac), ":", "")
-	if sourceType == TypeScreen && sourceID == "desktop" {
-		return compact
-	}
 	typePart := strings.ReplaceAll(sourceType, "_", "-")
 	sum := sha256.Sum256([]byte(sourceID))
 	return fmt.Sprintf("%s--%s--%s", compact, typePart, hex.EncodeToString(sum[:6]))
@@ -113,9 +104,9 @@ func NormalizeDirect(sourceID, displayName, brand string) (string, string, strin
 	return sourceID, displayName, brand, nil
 }
 
-// Parse recovers routing metadata from both legacy and multi-source stream
-// names. SourceID and display name are intentionally stored in the database,
-// because the public stream name only contains a non-sensitive hash.
+// Parse recovers routing metadata from a multi-source stream name. SourceID
+// and display name are stored in the database because the public stream name
+// only contains a non-sensitive hash.
 func Parse(name string) (mac, sourceType string, ok bool) {
 	name = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(name, ".flv")))
 	parts := strings.Split(name, "--")
@@ -125,9 +116,6 @@ func Parse(name string) (mac, sourceType string, ok bool) {
 	}
 	mac = fmt.Sprintf("%s:%s:%s:%s:%s:%s",
 		compact[0:2], compact[2:4], compact[4:6], compact[6:8], compact[8:10], compact[10:12])
-	if len(parts) == 1 {
-		return mac, TypeScreen, true
-	}
 	if len(parts) != 3 || !sourceHashPattern.MatchString(parts[2]) {
 		return "", "", false
 	}

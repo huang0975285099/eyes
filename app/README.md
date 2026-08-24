@@ -22,11 +22,11 @@ Windows Electron 客户端，负责设备信息登记、托盘/状态页和多�
 }
 ```
 
-- `mediaServiceURL`是MediaService的HTTP地址，不要填写RTMP地址。旧版`recordingServiceURL`字段仍可自动迁移。
+- `mediaServiceURL`是MediaService的HTTP地址，不要填写RTMP地址。
 - `apiKey` 必须与服务端 `.env` 中的 `CLIENT_API_KEY` 一致。
 - 客户端启动后登记设备，并按固定周期更新设备信息；永久推流地址由服务端统一生成和下发。
-- 未配置 `videoSources` 时自动启用一个桌面源，与旧版本行为一致。
-- 默认桌面流继续使用纯 MAC 流名；摄像头使用“MAC、来源类型、来源 ID 哈希”组成的安全流名，不在服务器或日志中暴露摄像头地址和密码。
+- 未配置 `videoSources` 时自动启用一个桌面源。
+- 所有视频源都使用“MAC、来源类型、来源 ID 哈希”组成的安全流名，不在服务器或日志中暴露摄像头地址和密码。
 
 品牌摄像头如果支持主动RTMP推流，也可以不经过客户端：在MediaService管理后台的“品牌摄像头直推”中登记摄像头，将生成的永久地址复制到品牌后台即可。该地址不含token。
 

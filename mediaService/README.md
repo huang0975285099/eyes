@@ -38,11 +38,8 @@ docker compose ps
 docker compose logs -f media-service ai-service
 ```
 
-从旧RecordingService原地升级时，Compose会继续使用历史项目名和
-`recordingservice_mysql_data`、`recordingservice_recordings`数据卷，避免产生空数据库。
-首次启动必须保留`--remove-orphans`，用新的`media-service`容器替换旧
-`recording-service`容器。服务器原部署目录可以继续使用
-`/home/test/eyes`，目录名不会影响服务名称。
+这是全新的 MediaService 部署，Compose 使用 `eyes` 项目名和新的数据卷。
+首次启动使用 `--remove-orphans` 清理同一目录下的无效容器。
 
 也可以使用离线部署脚本（脚本会加载镜像 tar 并执行健康检查）：
 
@@ -85,10 +82,8 @@ INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
 
 SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `22222`、`11111`、`8090` 的来源，并通过 HTTPS 反向代理保护管理接口。
 
-录像抽帧已从 MediaService 的录制进程迁移到独立 `AIService`。MediaService
-在录像片段入库后创建持久化任务，AIService 领取任务、执行FFmpeg并回报图片；两个
-容器共享 `recordings` 卷。已有图片页面、保留期和访问地址保持不变。历史录像会在
-启动时自动补建幂等任务，因此升级时不会漏图或重复入库。
+MediaService在录像片段入库后创建持久化抽帧任务，AIService领取任务、执行FFmpeg并
+回报图片；两个容器共享 `recordings` 卷。
 
 两台目标服务器没有GPU不影响当前`frame_sampler`：抽帧由CPU上的FFmpeg完成。
 `.env`已经预留`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`和`QWEN_VL_MODEL`并传入
@@ -100,7 +95,7 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 
 - `GET /api/health`：服务和数据库健康检查，数据库不可用时返回 HTTP 503。
 - `POST /api/clients/register`：客户端登记/更新设备信息。
-- `POST /api/streams/publish-config`：APP 按设备和视频源获取永久 RTMP 推流配置。旧客户端只提交 `mac` 仍然有效；新客户端可同时提交 `source_type`、`source_id`、`display_name`。
+- `POST /api/streams/publish-config`：APP 按设备和视频源获取永久 RTMP 推流配置，必须提交 `mac`、`source_type`、`source_id` 和 `display_name`。
 - `GET /api/streams`、`GET /api/stats`：实时流和系统统计。
 - `GET /api/video-sources`：查看已登记的视频源、在线状态及品牌摄像头直推地址。
 - `POST /api/video-sources`：登记一个独立品牌摄像头并生成永久 RTMP 地址，请求字段为 `source_id`、`display_name` 和可选的 `brand`。
@@ -114,7 +109,7 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 
 管理后台地址为 `http://<服务器地址>:22222`。更新 ZIP 必须包含 `latest.yml`、对应的 `*-setup.exe`，并且其中的版本、路径和 SHA-512 必须匹配；客户端侧 ZIP 可由 `app` 目录的 `pnpm run build:update` 生成。
 
-RTMP 发布不再使用 token。SRS 发布回调只接受 `video_sources` 中已登记的视频源，以及已经完成电脑登记的旧版桌面流。品牌摄像头后台填写的地址形如 `rtmp://<服务器>:1935/live/camera--<固定标识>`，配置一次即可长期使用。因为地址本身不再提供身份认证，生产环境应限制1935端口来源IP，管理端口22222也应仅允许可信内网访问。
+RTMP 发布不使用 token。SRS 发布回调只接受 `video_sources` 中已登记且启用的视频源。品牌摄像头后台填写的地址形如 `rtmp://<服务器>:1935/live/camera--<固定标识>`，配置一次即可长期使用。因为地址本身不再提供身份认证，生产环境应限制1935端口来源IP，管理端口22222也应仅允许可信内网访问。
 
 部分摄像头后台提供一个“推流地址”输入框，直接填写接口返回的 `rtmp_url`；部分后台将其拆成两个输入框，则分别填写 `rtmp_server`（例如 `rtmp://example.com:1935/live`）和 `stream_key`。也可以通过接口登记：
 

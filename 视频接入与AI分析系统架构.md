@@ -412,7 +412,7 @@ Worker通过心跳报告：
 - 电脑桌面、USB摄像头、网络摄像头和品牌摄像头直推接入基础。
 - MediaService全局录像开关。
 - 独立AIService项目和模块注册机制。
-- 将原MediaService抽帧执行迁移为AIService的`frame_sampler`模块。
+- AIService提供录像抽帧的`frame_sampler`模块。
 - 持久化AI任务、任务租约、超时恢复、失败重试和结果幂等入库。
 - AI Worker心跳和管理后台状态展示。
 - `fight`、`helmet`、`fire`算法目录及通用规则、事件数据结构。

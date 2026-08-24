@@ -76,7 +76,7 @@ func EnqueueFrameSampler(segment models.RecordingSegment) error {
 }
 
 // BackfillFrameSamplerJobs makes the extraction move safe for already indexed
-// recordings. It intentionally keeps completed legacy frames: AIService will
+// recordings. It intentionally keeps completed frames: AIService will
 // reuse the existing JPEG and merely report it idempotently.
 func BackfillFrameSamplerJobs() error {
 	const batchSize = 500

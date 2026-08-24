@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-func TestLegacyDesktopNameAndParse(t *testing.T) {
+func TestDesktopNameAndParse(t *testing.T) {
 	name := Name("d8:5e:d3:9f:2a:17", TypeScreen, "desktop")
-	if name != "d85ed39f2a17" {
-		t.Fatalf("unexpected legacy name %q", name)
+	if name != "d85ed39f2a17--screen--68693d02ab4f" {
+		t.Fatalf("unexpected desktop name %q", name)
 	}
 	mac, sourceType, ok := Parse(name)
 	if !ok || mac != "d8:5e:d3:9f:2a:17" || sourceType != TypeScreen {

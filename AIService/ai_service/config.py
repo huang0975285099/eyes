@@ -47,10 +47,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         default_worker = f"{socket.gethostname()}-{os.getpid()}"
         return cls(
-            media_api=os.getenv(
-                "AI_MEDIA_API",
-                os.getenv("AI_RECORDING_API", "http://media-service:22222"),
-            ).rstrip("/"),
+            media_api=os.getenv("AI_MEDIA_API", "http://media-service:22222").rstrip("/"),
             recording_root=Path(
                 os.getenv("AI_RECORDING_ROOT", "/var/recordings")
             ),

@@ -123,7 +123,7 @@ else
     echo "  MySQL 镜像已存在，跳过加载"
 fi
 
-# 加载应用镜像（始终加载，确保覆盖旧版本）
+# 加载应用镜像
 echo ""
 echo "[4/6] 加载 media-service 镜像..."
 if [ -f "${TAR_FILE}" ]; then

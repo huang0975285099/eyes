@@ -12,7 +12,7 @@ class FramePlanTests(unittest.TestCase):
     def test_normal_segment_has_two_centered_frames(self) -> None:
         self.assertEqual(plan_frame_offsets(300), [75, 225])
 
-    def test_ten_minute_segment_matches_legacy_behavior(self) -> None:
+    def test_ten_minute_segment_uses_expected_sampling_rule(self) -> None:
         self.assertEqual(plan_frame_offsets(600), [150, 450])
 
     def test_long_segment_adds_one_frame_per_five_minutes(self) -> None:

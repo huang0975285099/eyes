@@ -97,22 +97,13 @@ func (s *Server) handleSRSPublish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"code": 0})
 }
 
-// allowedPublishStream performs no token authentication. It accepts registered
-// video sources and, for old desktop clients, a legacy MAC stream belonging to
-// a computer already registered in MediaService.
+// allowedPublishStream performs no token authentication. Every stream must
+// belong to an enabled video source registered in MediaService.
 func (s *Server) allowedPublishStream(streamName string) bool {
 	var count int64
 	database.DB.Model(&models.VideoSource{}).
 		Where("stream_name = ? AND enabled = ?", streamName, true).
 		Count(&count)
-	if count > 0 {
-		return true
-	}
-	mac, sourceType, ok := streamsource.Parse(streamName)
-	if !ok || sourceType != streamsource.TypeScreen {
-		return false
-	}
-	database.DB.Model(&models.Computer{}).Where("mac = ?", mac).Count(&count)
 	return count > 0
 }
 

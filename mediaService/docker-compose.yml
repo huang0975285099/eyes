@@ -1,6 +1,4 @@
-# Keep the historical Compose project name so an in-place upgrade reuses the
-# existing MySQL/recording volumes and can remove the old service container.
-name: recordingservice
+name: eyes
 
 services:
   mysql:
@@ -123,16 +121,16 @@ services:
 
 volumes:
   mysql_data:
-    name: recordingservice_mysql_data
+    name: eyes_mysql_data
   recordings:
-    name: recordingservice_recordings
+    name: eyes_recordings
     driver: local
     driver_opts:
       type: none
       o: bind
       device: "${RECORDING_DIR:-/home/test/recordings}"
   client_updates:
-    name: recordingservice_client_updates
+    name: eyes_client_updates
     driver: local
 
 networks:

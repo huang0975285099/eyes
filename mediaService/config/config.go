@@ -41,8 +41,6 @@ type RecordingConfig struct {
 
 func Load() *Config {
 	clientAPIKey := getEnv("CLIENT_API_KEY", "")
-	legacyWebPort := getEnv("RECORDING_WEB_PORT", "22222")
-	legacySRSHTTPHost := getEnv("RECORDING_SRS_HTTP_HOST", "")
 	return &Config{
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
@@ -61,8 +59,8 @@ func Load() *Config {
 			RetainDays:      atoi("RECORDING_RETAIN_DAYS", "7"),
 			FrameRetainDays: atoi("RECORDING_FRAME_RETAIN_DAYS", "30"),
 			FFmpegPath:      getEnv("RECORDING_FFMPEG_PATH", "ffmpeg"),
-			WebPort:         atoi("MEDIA_WEB_PORT", legacyWebPort),
-			SRSHttpHost:     getEnv("MEDIA_SRS_HTTP_HOST", legacySRSHTTPHost),
+			WebPort:         atoi("MEDIA_WEB_PORT", "22222"),
+			SRSHttpHost:     getEnv("MEDIA_SRS_HTTP_HOST", ""),
 			PublicRTMPHost:  getEnv("PUBLIC_RTMP_HOST", "112.18.238.6:1935"),
 		},
 		Security: SecurityConfig{
