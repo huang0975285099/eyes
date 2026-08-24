@@ -29,8 +29,10 @@ PUBLIC_REMOTE_PORT="${PUBLIC_REMOTE_PORT:-2202}"
 INTRANET_REMOTE_USER="administrator"
 INTRANET_REMOTE_IP="10.0.20.219"
 INTRANET_REMOTE_PORT="${INTRANET_REMOTE_PORT:-22}"
-# 保留现有服务器目录，避免升级时丢失其中的生产 .env。
-REMOTE_DIR="/home/test/recordingservice/"
+PUBLIC_REMOTE_DIR="/home/test/eyes/"
+INTRANET_REMOTE_DIR="/home/administrator/eyes/"
+PUBLIC_RECORDING_DIR="/home/test/recordings"
+INTRANET_RECORDING_DIR="/home/administrator/recordings"
 # =================================================
 
 # SRS 镜像（与 docker-compose.yml 中一致）
@@ -79,7 +81,8 @@ while [[ $# -gt 0 ]]; do
             echo "目标服务器:"
             echo "  1) 公网 ${PUBLIC_REMOTE_USER}@${PUBLIC_REMOTE_IP}:${PUBLIC_REMOTE_PORT}"
             echo "  2) 内网 ${INTRANET_REMOTE_USER}@${INTRANET_REMOTE_IP}:${INTRANET_REMOTE_PORT}"
-            echo "远程目录: ${REMOTE_DIR}"
+            echo "  公网目录: ${PUBLIC_REMOTE_DIR}"
+            echo "  内网目录: ${INTRANET_REMOTE_DIR}"
             exit 0
             ;;
         *)
@@ -108,12 +111,16 @@ case "${DEPLOY_TARGET}" in
         REMOTE_USER="${PUBLIC_REMOTE_USER}"
         REMOTE_IP="${PUBLIC_REMOTE_IP}"
         REMOTE_PORT="${PUBLIC_REMOTE_PORT}"
+        REMOTE_DIR="${PUBLIC_REMOTE_DIR}"
+        RECORDING_DIR="${PUBLIC_RECORDING_DIR}"
         ;;
     2)
         TARGET_NAME="内网"
         REMOTE_USER="${INTRANET_REMOTE_USER}"
         REMOTE_IP="${INTRANET_REMOTE_IP}"
         REMOTE_PORT="${INTRANET_REMOTE_PORT}"
+        REMOTE_DIR="${INTRANET_REMOTE_DIR}"
+        RECORDING_DIR="${INTRANET_RECORDING_DIR}"
         ;;
     *)
         echo "错误: 部署目标只能是 1（公网）或 2（内网），当前值: ${DEPLOY_TARGET}"
@@ -250,7 +257,7 @@ echo "  ✓ 上传完成"
 
 echo ""
 echo "  在服务器上执行 deploy.sh..."
-ssh -p "${REMOTE_PORT}" "${REMOTE_USER}@${REMOTE_IP}" "cd '${REMOTE_DIR}' && ./deploy.sh -t '${TAG}'"
+ssh -p "${REMOTE_PORT}" "${REMOTE_USER}@${REMOTE_IP}" "cd '${REMOTE_DIR}' && RECORDING_DIR='${RECORDING_DIR}' ./deploy.sh -t '${TAG}'"
 
 echo ""
 echo "=========================================="

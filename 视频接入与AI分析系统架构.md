@@ -375,6 +375,9 @@ AIService和MediaService共享`/var/recordings`存储卷。MediaService使用222
 - `1`：公网`test@112.18.238.6:2202`。
 - `2`：内网`administrator@10.0.20.219:22`。
 
+公网部署目录为`/home/test/eyes/`，内网部署目录为`/home/administrator/eyes/`，
+两台服务器分别保存自己的`.env`和录像配置。
+
 两台服务器均无GPU。现有录像、抽帧、任务调度和管理功能可以使用CPU运行；Qwen视觉
 API可用于低频抽帧、候选事件的二次复核和自然语言说明。它不直接承担75路视频的逐帧
 实时检测，避免网络上行、API并发、时延和费用成为主链路瓶颈。实时算法仍按

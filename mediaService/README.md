@@ -42,7 +42,7 @@ docker compose logs -f media-service ai-service
 `recordingservice_mysql_data`、`recordingservice_recordings`数据卷，避免产生空数据库。
 首次启动必须保留`--remove-orphans`，用新的`media-service`容器替换旧
 `recording-service`容器。服务器原部署目录可以继续使用
-`/home/test/recordingservice`，目录名不会影响服务名称。
+`/home/test/eyes`，目录名不会影响服务名称。
 
 也可以使用离线部署脚本（脚本会加载镜像 tar 并执行健康检查）：
 
@@ -70,8 +70,9 @@ INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
 
 也可以将`INTRANET_REMOTE_PORT`写入执行环境。
 
-两个目标都沿用`/home/test/recordingservice`部署目录，但各自保留独立的`.env`，
-构建脚本只上传`.env.example`，不会覆盖生产密钥。内网服务器首次部署前应在该目录
+公网部署目录为`/home/test/eyes/`，内网部署目录为
+`/home/administrator/eyes/`，两者各自保留独立的`.env`。构建脚本只上传`.env.example`，
+不会覆盖生产密钥。内网服务器首次部署前应在该目录
 创建`.env`，并将`PUBLIC_RTMP_HOST`设为`10.0.20.219:1935`、
 `MEDIA_SRS_HTTP_HOST`设为`10.0.20.219:8090`；公网服务器继续使用公网地址。
 

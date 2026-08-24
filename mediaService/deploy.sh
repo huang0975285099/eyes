@@ -18,7 +18,7 @@ MYSQL_TAR="mysql-8.1.0.tar"
 # 录像存储目录（4T 硬盘挂载点，按需修改）
 # docker-compose.yml 中 volumes.device 指向此目录
 # 注意：非 root 用户需要在有权限的目录下创建
-RECORDING_DIR="/home/test/recordings"
+RECORDING_DIR="${RECORDING_DIR:-/home/test/recordings}"
 export RECORDING_DIR
 
 if [ "${1:-}" = "-t" ] || [ "${1:-}" = "--tag" ]; then
