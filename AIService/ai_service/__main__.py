@@ -20,17 +20,16 @@ def main() -> None:
     registry = AnalyzerRegistry()
     registry.register(
         FrameSamplerAnalyzer(
-            recording_root=settings.recording_root,
+            evidence_root=settings.evidence_root,
             ffmpeg_path=settings.ffmpeg_path,
-            ffprobe_path=settings.ffprobe_path,
             command_timeout_seconds=settings.ffmpeg_timeout_seconds,
         )
     )
     state = ServiceState(settings.worker_id, registry.capabilities)
-    health_server = start_health_server(state, settings.health_port)
     client = MediaAPIClient(
         settings.media_api, settings.request_timeout_seconds
     )
+    health_server = start_health_server(state, client, settings.health_port)
     worker = AnalysisWorker(settings, client, registry, state)
 
     def stop(_signum: int, _frame: object) -> None:

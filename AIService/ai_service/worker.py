@@ -81,10 +81,10 @@ class AnalysisWorker:
             future = self._executor.submit(analyzer.analyze, job)
             self._futures[future] = job
             logger.info(
-                "claimed job=%s algorithm=%s segment=%s attempt=%s",
+                "claimed job=%s algorithm=%s source=%s attempt=%s",
                 job.get("id"),
                 job.get("algorithm_code"),
-                job.get("segment_id"),
+                job.get("video_source_id"),
                 job.get("attempt"),
             )
         self._state.update(active_jobs=len(self._futures))

@@ -31,7 +31,7 @@ def _positive_float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     media_api: str
-    recording_root: Path
+    evidence_root: Path
     worker_id: str
     concurrency: int
     poll_interval_seconds: float
@@ -39,7 +39,6 @@ class Settings:
     job_lease_seconds: int
     request_timeout_seconds: float
     ffmpeg_path: str
-    ffprobe_path: str
     ffmpeg_timeout_seconds: int
     health_port: int
 
@@ -48,8 +47,8 @@ class Settings:
         default_worker = f"{socket.gethostname()}-{os.getpid()}"
         return cls(
             media_api=os.getenv("AI_MEDIA_API", "http://media-service:22222").rstrip("/"),
-            recording_root=Path(
-                os.getenv("AI_RECORDING_ROOT", "/var/recordings")
+            evidence_root=Path(
+                os.getenv("AI_EVIDENCE_ROOT", "/var/recordings")
             ),
             worker_id=os.getenv("AI_WORKER_ID", default_worker).strip(),
             concurrency=_positive_int("AI_CONCURRENCY", 4),
@@ -60,7 +59,6 @@ class Settings:
             job_lease_seconds=_positive_int("AI_JOB_LEASE_SECONDS", 300),
             request_timeout_seconds=_positive_float("AI_REQUEST_TIMEOUT", 15),
             ffmpeg_path=os.getenv("AI_FFMPEG_PATH", "ffmpeg"),
-            ffprobe_path=os.getenv("AI_FFPROBE_PATH", "ffprobe"),
-            ffmpeg_timeout_seconds=_positive_int("AI_FFMPEG_TIMEOUT", 120),
+            ffmpeg_timeout_seconds=_positive_int("AI_FFMPEG_TIMEOUT", 30),
             health_port=_positive_int("AI_HEALTH_PORT", 11111),
         )

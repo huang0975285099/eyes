@@ -78,14 +78,15 @@ INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
 对外端口：
 
 - `22222`：MediaService HTTP API，供APP、AdminService和AIService调用
-- `11111`：AIService健康状态和模块列表
+- `11111`：AIService Web管理后台、健康状态和模块列表
 - `1935`：SRS RTMP 推流
 - `8080`：SRS HTTP-FLV/HLS，仅保留给电脑推流APP自预览和兼容工具
 
 SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `22222`、`11111`、`8080` 的来源，并通过 HTTPS 反向代理保护管理接口。
 
-MediaService在录像片段入库后创建持久化抽帧任务，AIService领取任务、执行FFmpeg并
-回报图片；两个容器共享 `recordings` 卷。
+MediaService按规则和SRS在线状态创建持久化实时抽帧任务；AIService领取任务后直接
+拉取SRS实时流、执行FFmpeg并回报图片。这个过程不读取录像片段，也不检查全局录像开关。
+两个容器只为持久化AI图片而共享`recordings`卷。
 
 两台目标服务器没有GPU不影响当前`frame_sampler`：抽帧由CPU上的FFmpeg完成。
 `.env`已经预留`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`和`QWEN_VL_MODEL`并传入
@@ -103,6 +104,7 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 - `GET /api/segments`、`GET /api/frames`：录像片段和截图列表，支持 `mac`、`source_type` 过滤；媒体分别通过 `/segments/{id}/video`、`/frames/{id}/image` 获取。
 - `GET/PUT /api/recording-settings`：查看或修改录制开关、录像保留天数。
 - `GET /api/ai/algorithms`：AI能力目录；当前抽帧已启用，打架、安全帽和火灾为后续模块。
+- `GET/PUT /api/ai/rules`：读取和保存按视频源启用的AI规则及抽帧频率。
 - `GET /api/ai/jobs/stats`：AI任务状态和Worker心跳概览。
 - `/api/internal/ai/*`：AIService任务领取、结果上报和心跳接口，仅供Docker内部网络或可信局域网调用。
 - `GET /api/client-updates/latest`：客户端检查更新。

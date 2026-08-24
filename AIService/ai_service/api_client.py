@@ -92,16 +92,56 @@ class MediaAPIClient:
         )
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        value = self.request_json("POST", path, payload)
+        if not isinstance(value, dict):
+            raise MediaAPIError("MediaService returned a non-object JSON value")
+        return value
+
+    def get_json(self, path: str) -> dict[str, Any] | list[Any]:
+        return self.request_json("GET", path)
+
+    def put_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        value = self.request_json("PUT", path, payload)
+        if not isinstance(value, dict):
+            raise MediaAPIError("MediaService returned a non-object JSON value")
+        return value
+
+    def get_bytes(self, path: str) -> tuple[bytes, str]:
+        raw, content_type = self._request("GET", path, None)
+        return raw, content_type
+
+    def request_json(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any] | list[Any]:
+        body = (
+            json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            if payload is not None
+            else None
+        )
+        raw, _ = self._request(method, path, body)
+        if not raw:
+            return {}
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MediaAPIError("MediaService returned invalid JSON") from exc
+        if not isinstance(value, (dict, list)):
+            raise MediaAPIError("MediaService returned invalid JSON data")
+        return value
+
+    def _request(
+        self, method: str, path: str, body: bytes | None
+    ) -> tuple[bytes, str]:
         request = urllib.request.Request(
             self._base_url + path,
             data=body,
-            method="POST",
+            method=method,
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 raw = response.read()
+                content_type = response.headers.get_content_type()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise MediaAPIError(
@@ -110,12 +150,4 @@ class MediaAPIClient:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise MediaAPIError(f"MediaService request failed: {exc}") from exc
 
-        if not raw:
-            return {}
-        try:
-            value = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise MediaAPIError("MediaService returned invalid JSON") from exc
-        if not isinstance(value, dict):
-            raise MediaAPIError("MediaService returned a non-object JSON value")
-        return value
+        return raw, content_type

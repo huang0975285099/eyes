@@ -68,6 +68,8 @@ func main() {
 			cfg.Recording.SRSApiBase,
 			cfg.Recording.SRSHttpHost,
 			cfg.Recording.PublicRTMPHost,
+			cfg.Recording.RTMPHost,
+			cfg.Recording.AIStreamBaseURL,
 			cfg.Recording.OutputDir,
 			cfg.Recording.RetainDays,
 			recordEnabled,

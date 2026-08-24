@@ -1,5 +1,7 @@
 param(
-    [switch]$Clean
+    [switch]$Clean,
+    [ValidatePattern('^[^\\/:*?"<>|]+\.exe$')]
+    [string]$OutputName = 'Viewer.exe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -7,7 +9,7 @@ $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $distDir = Join-Path $projectDir 'dist'
 $source = Join-Path $projectDir 'src\main.cpp'
 $ffmpegSource = Join-Path $projectDir '..\app\resources\ffmpeg.exe'
-$output = Join-Path $distDir 'Viewer.exe'
+$output = Join-Path $distDir $OutputName
 
 if ($Clean -and (Test-Path $distDir)) {
     Remove-Item -LiteralPath $distDir -Recurse -Force
@@ -22,7 +24,7 @@ if (-not (Test-Path $ffmpegSource)) {
     throw "未找到H.264/H.265解码器: $ffmpegSource"
 }
 
-Write-Host '[1/2] 编译 Viewer.exe...'
+Write-Host "[1/2] 编译 $OutputName..."
 & $compiler.Source `
     -std=c++20 `
     -O2 `
@@ -47,7 +49,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host '[2/2] 复制FFmpeg原生解码器...'
-Copy-Item -LiteralPath $ffmpegSource -Destination (Join-Path $distDir 'ffmpeg.exe') -Force
+$ffmpegDestination = Join-Path $distDir 'ffmpeg.exe'
+$needsFFmpegCopy = -not (Test-Path $ffmpegDestination)
+if (-not $needsFFmpegCopy) {
+    $sourceInfo = Get-Item -LiteralPath $ffmpegSource
+    $destinationInfo = Get-Item -LiteralPath $ffmpegDestination
+    $needsFFmpegCopy = $sourceInfo.Length -ne $destinationInfo.Length
+}
+if ($needsFFmpegCopy) {
+    Copy-Item -LiteralPath $ffmpegSource -Destination $ffmpegDestination -Force
+} else {
+    Write-Host 'FFmpeg已存在且大小一致，跳过复制。'
+}
 
 $configPath = Join-Path $distDir 'adminService.ini'
 if (-not (Test-Path $configPath)) {

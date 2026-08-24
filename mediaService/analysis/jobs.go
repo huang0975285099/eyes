@@ -1,8 +1,8 @@
 package analysis
 
 import (
+	"encoding/json"
 	"fmt"
-	"log"
 	"media-service/database"
 	"media-service/models"
 	"time"
@@ -12,7 +12,8 @@ import (
 
 const (
 	AlgorithmFrameSampler = "frame_sampler"
-	JobInputSegment       = "recording_segment"
+	JobInputSegment       = "recording_segment" // 仅用于清理旧版本任务
+	JobInputLiveStream    = "live_stream"
 	JobStatusPending      = "pending"
 	JobStatusRunning      = "running"
 	JobStatusSucceeded    = "succeeded"
@@ -21,9 +22,9 @@ const (
 
 var builtinAlgorithms = []models.AIAlgorithm{
 	{
-		Code: AlgorithmFrameSampler, Name: "录像抽帧", InputMode: "segment", Enabled: true,
-		Description:       "从已完成的录像片段抽取代表性图片，供人工查看。",
-		DefaultConfigJSON: `{"min_duration_seconds":30,"interval_seconds":300,"minimum_frames":2}`,
+		Code: AlgorithmFrameSampler, Name: "实时流抽帧", InputMode: "live_stream", Enabled: true,
+		Description:       "直接从SRS实时视频流按频率抽取JPEG图片，与录像开关无关。",
+		DefaultConfigJSON: `{"frames_per_minute":2}`,
 	},
 	{
 		Code: "fight", Name: "打架检测", InputMode: "video", Enabled: false,
@@ -39,9 +40,9 @@ var builtinAlgorithms = []models.AIAlgorithm{
 	},
 }
 
-// InitializeCatalog upserts platform-owned algorithm metadata and creates
-// frame-sampler jobs for existing local segments. Existing operator settings
-// are preserved: only descriptive fields are updated on a conflict.
+// InitializeCatalog updates platform-owned algorithm metadata. Segment-based
+// frame-sampler jobs belonged to the old design and must never be claimed by
+// the real-time sampler.
 func InitializeCatalog() error {
 	for _, algorithm := range builtinAlgorithms {
 		if err := database.DB.Clauses(clause.OnConflict{
@@ -53,71 +54,95 @@ func InitializeCatalog() error {
 			return fmt.Errorf("初始化算法 %s 失败: %w", algorithm.Code, err)
 		}
 	}
-
-	return BackfillFrameSamplerJobs()
-}
-
-// EnqueueFrameSampler creates an idempotent job for a local recording segment.
-func EnqueueFrameSampler(segment models.RecordingSegment) error {
-	if segment.ID == 0 || segment.Storage != "local" {
-		return nil
-	}
-	now := time.Now()
-	job := models.AIJob{
-		JobKey:        frameSamplerJobKey(segment.ID),
-		AlgorithmCode: AlgorithmFrameSampler,
-		InputType:     JobInputSegment,
-		InputRefID:    segment.ID,
-		Status:        JobStatusPending,
-		MaxAttempts:   3,
-		AvailableAt:   now,
-	}
-	return database.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&job).Error
-}
-
-// BackfillFrameSamplerJobs makes the extraction move safe for already indexed
-// recordings. It intentionally keeps completed frames: AIService will
-// reuse the existing JPEG and merely report it idempotently.
-func BackfillFrameSamplerJobs() error {
-	const batchSize = 500
-	var lastID uint
-	var created int64
-	for {
-		var segments []models.RecordingSegment
-		if err := database.DB.Where("storage = ? AND id > ?", "local", lastID).
-			Order("id ASC").Limit(batchSize).Find(&segments).Error; err != nil {
-			return fmt.Errorf("查询待补建抽帧任务的录像失败: %w", err)
-		}
-		if len(segments) == 0 {
-			break
-		}
-
-		jobs := make([]models.AIJob, 0, len(segments))
-		now := time.Now()
-		for _, segment := range segments {
-			jobs = append(jobs, models.AIJob{
-				JobKey:        frameSamplerJobKey(segment.ID),
-				AlgorithmCode: AlgorithmFrameSampler,
-				InputType:     JobInputSegment,
-				InputRefID:    segment.ID,
-				Status:        JobStatusPending,
-				MaxAttempts:   3,
-				AvailableAt:   now,
-			})
-			lastID = segment.ID
-		}
-		result := database.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&jobs)
-		if result.Error != nil {
-			return fmt.Errorf("补建抽帧任务失败: %w", result.Error)
-		}
-		created += result.RowsAffected
-	}
-	if created > 0 {
-		log.Printf("[analysis] 已为历史录像补建抽帧任务 %d 条", created)
+	if err := database.DB.Where(
+		"algorithm_code = ? AND input_type = ?", AlgorithmFrameSampler, JobInputSegment,
+	).Delete(&models.AIJob{}).Error; err != nil {
+		return fmt.Errorf("清理旧版录像抽帧任务失败: %w", err)
 	}
 	return nil
 }
 
-func frameSamplerJobKey(segmentID uint) string {
-	return fmt.Sprintf("%s:segment:%d", AlgorithmFrameSampler, segmentID)
+type configuredLiveSource struct {
+	ID         uint   `gorm:"column:id"`
+	StreamName string `gorm:"column:stream_name"`
+	ConfigJSON string `gorm:"column:config_json"`
+}
+
+// EnqueueLiveFrameSamplerJobs creates at most one durable task for every due
+// source/time slot. Sources are staggered across the interval to avoid all
+// cameras opening an FFmpeg connection at the same instant.
+func EnqueueLiveFrameSamplerJobs(activeStreams map[string]struct{}, now time.Time) error {
+	if len(activeStreams) == 0 {
+		return nil
+	}
+	var sources []configuredLiveSource
+	if err := database.DB.Table("video_sources").
+		Select("video_sources.id, video_sources.stream_name, video_analysis_rules.config_json").
+		Joins("JOIN video_analysis_rules ON video_analysis_rules.video_source_id = video_sources.id").
+		Where("video_sources.enabled = ? AND video_analysis_rules.algorithm_code = ? AND video_analysis_rules.enabled = ?",
+			true, AlgorithmFrameSampler, true).
+		Find(&sources).Error; err != nil {
+		return fmt.Errorf("查询实时抽帧视频源失败: %w", err)
+	}
+
+	for _, source := range sources {
+		if _, active := activeStreams[source.StreamName]; !active {
+			continue
+		}
+		rate := framesPerMinute(source.ConfigJSON)
+		scheduledAt, due := liveFrameSchedule(source.ID, rate, now)
+		if !due {
+			continue
+		}
+		job := models.AIJob{
+			JobKey:        fmt.Sprintf("%s:live:%d:%d", AlgorithmFrameSampler, source.ID, scheduledAt.UnixNano()),
+			AlgorithmCode: AlgorithmFrameSampler, InputType: JobInputLiveStream,
+			InputRefID: source.ID, Status: JobStatusPending, MaxAttempts: 3,
+			AvailableAt: now,
+		}
+		if err := database.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&job).Error; err != nil {
+			return fmt.Errorf("创建实时抽帧任务失败 source=%d: %w", source.ID, err)
+		}
+	}
+	return nil
+}
+
+// ResetPendingLiveFrameSamplerJobs removes not-yet-started slots after a rule
+// change. The scheduler recreates only slots matching the current selection
+// and frequency; running and completed results are preserved.
+func ResetPendingLiveFrameSamplerJobs() error {
+	return database.DB.Where(
+		"algorithm_code = ? AND input_type = ? AND status = ?",
+		AlgorithmFrameSampler, JobInputLiveStream, JobStatusPending,
+	).Delete(&models.AIJob{}).Error
+}
+
+func framesPerMinute(raw string) int {
+	config := struct {
+		FramesPerMinute int `json:"frames_per_minute"`
+	}{FramesPerMinute: 2}
+	_ = json.Unmarshal([]byte(raw), &config)
+	if config.FramesPerMinute < 1 {
+		return 1
+	}
+	if config.FramesPerMinute > 60 {
+		return 60
+	}
+	return config.FramesPerMinute
+}
+
+func liveFrameSchedule(sourceID uint, rate int, now time.Time) (time.Time, bool) {
+	if rate < 1 {
+		rate = 1
+	}
+	if rate > 60 {
+		rate = 60
+	}
+	interval := time.Minute / time.Duration(rate)
+	intervalNS := interval.Nanoseconds()
+	offsetNS := (int64(sourceID) * int64(7919*time.Millisecond)) % intervalNS
+	slot := (now.UnixNano() - offsetNS) / intervalNS
+	scheduled := time.Unix(0, slot*intervalNS+offsetNS)
+	age := now.Sub(scheduled)
+	return scheduled, age >= 0 && age < 2*time.Second
 }

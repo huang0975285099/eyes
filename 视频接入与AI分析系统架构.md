@@ -30,7 +30,7 @@
       实时观看       MediaService     AIService
                        │                │
                        │                ├─ 共享拉流与解码
-                       │                ├─ 录像抽帧
+                       │                ├─ 实时流抽帧
                        │                ├─ 打架检测
                        │                ├─ 安全帽检测
                        │                ├─ 火灾检测
@@ -79,7 +79,7 @@ MediaService是系统控制中心，负责：
 - 从SRS拉流并按时间分段录制MP4。
 - 管理录像和图片索引、保留天数及过期清理。
 - 保存每个视频源启用哪些AI算法及算法参数。
-- 创建离线AI任务并接收AIService执行结果。
+- 按SRS在线状态和规则创建实时AI任务，并接收AIService执行结果。
 - 保存AI Worker心跳、AI异常事件和人工复核状态。
 - 提供统一HTTP API，由C++ `adminService` 完成集中管理和播放。
 
@@ -96,7 +96,7 @@ AIService是统一的AI分析平台，负责：
 - 从SRS自动拉取需要分析的在线流。
 - 负责断线重连、解码、采样和短期帧缓存。
 - 将解码结果分发给启用的算法模块。
-- 执行录像抽帧、打架、安全帽、火灾等算法。
+- 执行实时流抽帧、打架、安全帽、火灾等算法。
 - 进行连续命中、告警冷却和事件合并。
 - 生成截图、告警前后短视频等证据。
 - 向MediaService上报结构化AI事件。
@@ -114,7 +114,7 @@ AIService不负责：
 
 AdminService是Windows原生C++集中管理和观看客户端，负责：
 
-- 通过MediaService HTTP API查询在线流、录像、抽帧和AI Worker状态。
+- 通过MediaService HTTP API查询在线流和录像。
 - 使用FFmpeg原生解码H.264/H.265，不依赖浏览器或厂商Web插件。
 - 同一时间选择并观看一路实时画面或录像。
 - 开启/关闭MediaService录像，修改录像保留天数。
@@ -168,8 +168,8 @@ PUT /api/recording-settings
 ### 开启录像
 
 ```text
-设备推流 -> SRS -> MediaService录制MP4
-                   └-> 录像片段入库后创建frame_sampler任务
+设备推流 -> SRS ─┬-> MediaService录制MP4
+                  └-> AIService按规则从实时流抽帧
 ```
 
 ### 关闭录像
@@ -178,16 +178,16 @@ PUT /api/recording-settings
 设备继续推流 -> SRS继续接收
                   ├-> 实时观看正常
                   ├-> MediaService停止生成新录像
-                  └-> 实时AI分析仍然可以运行
+                  └-> AIService实时抽帧和其他AI分析继续运行
 ```
 
-当前AIService的第一个模块`frame_sampler`以已完成的录像片段作为输入。因此关闭录像后不会产生新的录像片段，也不会产生新的抽帧任务。
+`frame_sampler`直接读取SRS实时流，不读取已存储MP4。录像存储和实时抽帧是两项独立功能，关闭录像不会停止抽帧。
 
 未来打架、安全帽、火灾等实时算法直接分析SRS实时流，不受录像开关影响。是否保存异常短视频由AI规则单独控制。
 
 ## 6. AI算法配置逻辑
 
-业务人员在C++ `adminService` 选择具体摄像头，然后配置需要启用的算法。配置通过MediaService API保存，AIService只读取和执行。
+业务人员在`AIService:11111` Web后台选择具体摄像头并配置需要启用的算法。规则通过MediaService API保存到共享的`eyes`数据库，AIService读取并执行。
 
 示例：
 
@@ -262,7 +262,7 @@ AIService按照视频流分配任务，而不是按照算法重复拉流。每�
 
 | 算法 | 输入 | 建议频率 | 说明 |
 |---|---|---:|---|
-| 录像抽帧 | 已完成MP4片段 | 每片段2张起 | 用于人工浏览，不是实时检测输入 |
+| 实时流抽帧 | SRS实时流 | 按视频源配置每分钟抽帧数 | 用于人工浏览，与录像开关无关 |
 | 打架检测 | 连续视频序列 | 4～8 FPS | 需要分析连续2～4秒动作 |
 | 安全帽检测 | 单帧或短连续帧 | 1～2 FPS | 需要人员、头部和安全帽关联 |
 | 火灾检测 | 连续图片/视频 | 2～4 FPS | 建议同时识别烟雾和火焰并连续确认 |
@@ -357,14 +357,14 @@ metadata_json
 - 设备推流不受影响。
 - 实时观看不受影响。
 - MediaService录像不受影响。
-- 离线抽帧任务保留在MySQL，AIService恢复后继续处理。
-- 实时AI检测暂停。
+- 已生成的实时抽帧任务保留在MySQL，AIService恢复后继续处理。
+- 新的实时抽帧和实时AI检测暂停。
 
 ### MediaService关闭录像
 
 - 推流和观看继续。
-- 不再生成完整录像和新的录像抽帧任务。
-- 未来实时AI检测继续。
+- 不再生成完整录像。
+- 实时流抽帧和其他实时AI检测继续。
 
 ### 单个AI算法异常
 
@@ -388,7 +388,7 @@ media-service
 ai-service
 ```
 
-AIService和MediaService共享`/var/recordings`存储卷。MediaService使用22222端口，AIService使用11111端口。
+AIService和MediaService共享`/var/recordings`存储卷，并使用同一个MySQL数据库`eyes`。MediaService统一持有数据库连接和数据API，AIService不创建第二套数据库。MediaService使用22222端口，AIService使用11111端口。
 
 当前发布由`mediaService/build.sh`统一构建和部署两个服务，执行时选择目标：
 
@@ -432,7 +432,7 @@ Worker通过心跳报告：
 - 电脑桌面、USB摄像头、网络摄像头和品牌摄像头直推接入基础。
 - MediaService全局录像开关。
 - 独立AIService项目和模块注册机制。
-- AIService提供录像抽帧的`frame_sampler`模块。
+- AIService提供直接拉取SRS视频的实时流`frame_sampler`模块。
 - 持久化AI任务、任务租约、超时恢复、失败重试和结果幂等入库。
 - AI Worker心跳和管理后台状态展示。
 - `fight`、`helmet`、`fire`算法目录及通用规则、事件数据结构。
@@ -440,11 +440,13 @@ Worker通过心跳报告：
 - 电脑桌面使用显示器原始分辨率100%采集，保持H.264编码。
 - RTSP/NVR摄像头的H.264/H.265原码直通转推。
 - SRS升级到6.x，离线部署包使用`ossrs/srs:6`。
-- C++ AdminService支持实时H.264/H.265播放、录像、抽帧和录制设置。
+- C++ AdminService支持实时H.264/H.265播放、录像和录制设置，不再承担AI结果查看。
+- AIService提供Web后台，用于按视频源配置抽帧服务和查看抽帧结果。
+- AIService与MediaService共用现有`eyes`数据库；数据库连接和表结构仍由MediaService统一管理。
 
 尚未完成：
 
-- 按摄像头配置AI算法的管理接口和后台页面。
+- 打架、安全帽、火灾等后续算法的专用配置项和结果页面。
 - AIService实时在线流同步。
 - 每路视频只解码一次的StreamSession和环形缓存。
 - 打架、安全帽和火灾的实际模型及推理代码。

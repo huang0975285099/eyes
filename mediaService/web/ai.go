@@ -35,16 +35,17 @@ type aiJobPayload struct {
 	ID            uint      `json:"id"`
 	AlgorithmCode string    `json:"algorithm_code"`
 	InputType     string    `json:"input_type"`
-	SegmentID     uint      `json:"segment_id"`
+	VideoSourceID uint      `json:"video_source_id"`
 	StreamName    string    `json:"stream_name"`
 	MAC           string    `json:"mac"`
 	SourceType    string    `json:"source_type"`
 	SourceID      string    `json:"source_id"`
-	InputPath     string    `json:"input_path"`
+	InputURL      string    `json:"input_url"`
+	FallbackURL   string    `json:"fallback_url"`
 	StartedAt     time.Time `json:"started_at"`
-	Duration      float64   `json:"duration"`
 	Attempt       int       `json:"attempt"`
 	LeaseUntil    time.Time `json:"lease_until"`
+	Config        any       `json:"config"`
 }
 
 type aiFrameArtifact struct {
@@ -191,26 +192,74 @@ func (s *Server) handleAIJobClaim(w http.ResponseWriter, r *http.Request) {
 
 	payloads := make([]aiJobPayload, 0, len(jobs))
 	for _, job := range jobs {
-		if job.InputType != analysis.JobInputSegment {
+		if job.InputType != analysis.JobInputLiveStream {
+			s.finishClaimedJob(job.ID, analysis.JobStatusFailed, "不支持的抽帧输入类型")
 			continue
 		}
-		var segment models.RecordingSegment
-		if err := database.DB.First(&segment, job.InputRefID).Error; err != nil {
-			database.DB.Model(&models.AIJob{}).Where("id = ?", job.ID).Updates(map[string]any{
-				"status": analysis.JobStatusFailed, "finished_at": time.Now(),
-				"last_error": "输入录像不存在", "lease_until": nil,
-			})
+		var source models.VideoSource
+		if err := database.DB.First(&source, job.InputRefID).Error; err != nil {
+			s.finishClaimedJob(job.ID, analysis.JobStatusFailed, "视频源不存在")
+			continue
+		}
+		var rule models.VideoAnalysisRule
+		if err := database.DB.Where(
+			"video_source_id = ? AND algorithm_code = ? AND enabled = ?",
+			source.ID, analysis.AlgorithmFrameSampler, true,
+		).First(&rule).Error; err != nil {
+			s.finishClaimedJob(job.ID, analysis.JobStatusSucceeded, "抽帧规则已关闭")
 			continue
 		}
 		payloads = append(payloads, aiJobPayload{
 			ID: job.ID, AlgorithmCode: job.AlgorithmCode, InputType: job.InputType,
-			SegmentID: segment.ID, StreamName: segment.StreamName, MAC: segment.MAC,
-			SourceType: segment.SourceType, SourceID: segment.SourceID,
-			InputPath: segment.FilePath, StartedAt: segment.StartedAt, Duration: segment.Duration,
-			Attempt: job.Attempts, LeaseUntil: leaseUntil,
+			VideoSourceID: source.ID, StreamName: source.StreamName, MAC: source.MAC,
+			SourceType: source.SourceType, SourceID: source.SourceID,
+			InputURL:    buildInternalRTMPURL(s.InternalRTMPHost, source.StreamName),
+			FallbackURL: buildInternalHLSURL(s.AIStreamBaseURL, source.StreamName),
+			StartedAt:   job.AvailableAt,
+			Attempt:     job.Attempts, LeaseUntil: leaseUntil,
+			Config: decodeAlgorithmConfig(rule.ConfigJSON),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": payloads})
+}
+
+func decodeAlgorithmConfig(raw string) map[string]any {
+	config := map[string]any{}
+	if strings.TrimSpace(raw) == "" {
+		return config
+	}
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		return map[string]any{}
+	}
+	return config
+}
+
+func buildInternalRTMPURL(host, streamName string) string {
+	host = strings.TrimRight(strings.TrimSpace(host), "/")
+	if host == "" {
+		host = "srs:1935"
+	}
+	if !strings.HasPrefix(host, "rtmp://") && !strings.HasPrefix(host, "rtmps://") {
+		host = "rtmp://" + host
+	}
+	return host + "/live/" + streamName
+}
+
+func buildInternalHLSURL(baseURL, streamName string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		baseURL = "http://srs:8080"
+	}
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
+	}
+	return baseURL + "/live/" + streamName + ".m3u8"
+}
+
+func (s *Server) finishClaimedJob(jobID uint, status, message string) {
+	database.DB.Model(&models.AIJob{}).Where("id = ?", jobID).Updates(map[string]any{
+		"status": status, "finished_at": time.Now(), "lease_until": nil, "last_error": message,
+	})
 }
 
 func (s *Server) handleAIJobReport(w http.ResponseWriter, r *http.Request) {
@@ -265,9 +314,9 @@ func (s *Server) handleAIJobReport(w http.ResponseWriter, r *http.Request) {
 			}).Error
 		}
 
-		if job.AlgorithmCode == analysis.AlgorithmFrameSampler {
-			var segment models.RecordingSegment
-			if err := tx.First(&segment, job.InputRefID).Error; err != nil {
+		if job.AlgorithmCode == analysis.AlgorithmFrameSampler && job.InputType == analysis.JobInputLiveStream {
+			var source models.VideoSource
+			if err := tx.First(&source, job.InputRefID).Error; err != nil {
 				return err
 			}
 			for _, artifact := range req.Frames {
@@ -276,10 +325,10 @@ func (s *Server) handleAIJobReport(w http.ResponseWriter, r *http.Request) {
 					return fmt.Errorf("抽帧文件不存在: %w", err)
 				}
 				frame := models.RecordingFrame{}
-				result := tx.Where("segment_id = ? AND frame_index = ?", segment.ID, artifact.FrameIndex).
+				result := tx.Where("file_path = ?", artifact.FilePath).
 					Assign(models.RecordingFrame{
-						StreamName: segment.StreamName, MAC: segment.MAC, SourceType: segment.SourceType,
-						SourceID: segment.SourceID, SegmentID: segment.ID, FilePath: artifact.FilePath,
+						StreamName: source.StreamName, MAC: source.MAC, SourceType: source.SourceType,
+						SourceID: source.SourceID, SegmentID: 0, FilePath: artifact.FilePath,
 						FileSize: fi.Size(), CapturedAt: artifact.CapturedAt, FrameIndex: artifact.FrameIndex,
 					}).FirstOrCreate(&frame)
 				if result.Error != nil {

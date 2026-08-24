@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>千里眼 AI分析平台</title>
+        <link rel="stylesheet" href="/app.css" />
+    </head>
+    <body>
+        <main class="shell">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">ALL-SEEING EYES · AI SERVICE</p>
+                    <h1>AI分析平台</h1>
+                    <p class="subtitle">为指定视频源配置分析服务，并集中查看算法结果。</p>
+                </div>
+                <div id="workerBadge" class="worker-badge pending">
+                    <span class="status-dot"></span>
+                    <span>正在连接AI Worker</span>
+                </div>
+            </header>
+
+            <section class="metrics" aria-label="运行概览">
+                <article>
+                    <span>已启用视频源</span>
+                    <strong id="enabledMetric">-</strong>
+                </article>
+                <article>
+                    <span>累计抽帧结果</span>
+                    <strong id="frameMetric">-</strong>
+                </article>
+                <article>
+                    <span>执行中任务</span>
+                    <strong id="runningMetric">-</strong>
+                </article>
+                <article>
+                    <span>失败任务</span>
+                    <strong id="failedMetric">-</strong>
+                </article>
+            </section>
+
+            <nav class="tabs" aria-label="AI平台页面">
+                <button class="tab active" data-page="configuration">服务配置</button>
+                <button class="tab" data-page="results">分析结果</button>
+            </nav>
+
+            <section id="configurationPage" class="page active">
+                <div class="section-heading">
+                    <div>
+                        <p class="section-kicker">FRAME SAMPLER</p>
+                        <h2>实时流抽帧服务</h2>
+                        <p>直接从SRS在线流按固定频率抽取JPEG图片，不读取录像文件。</p>
+                        <p class="timing-note">录像存储和实时抽帧相互独立；即使关闭录像，已启用视频源仍会继续抽帧。</p>
+                    </div>
+                    <div class="frequency-box">
+                        <label for="framesPerMinute">每分钟抽帧数</label>
+                        <div>
+                            <input id="framesPerMinute" type="number" min="1" max="60" value="2" />
+                            <span>帧 / 分钟</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="source-toolbar">
+                    <div>
+                        <strong>选择需要启用的摄像头或视频源</strong>
+                        <small>保存后按频率为在线的视频源创建任务；离线期间不创建空任务。</small>
+                    </div>
+                    <div class="toolbar-actions">
+                        <button id="selectOnlineButton" class="ghost">选择在线源</button>
+                        <button id="saveRulesButton" class="primary">保存并应用</button>
+                    </div>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="check-column"><input id="selectAll" type="checkbox" aria-label="选择全部视频源" /></th>
+                                <th>视频源</th>
+                                <th>类型</th>
+                                <th>推流状态</th>
+                                <th>已有结果</th>
+                                <th>最后结果</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sourceRows">
+                            <tr><td colspan="6" class="empty">正在读取视频源…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p id="saveMessage" class="message" role="status"></p>
+            </section>
+
+            <section id="resultsPage" class="page">
+                <div class="section-heading results-heading">
+                    <div>
+                        <p class="section-kicker">ANALYSIS RESULTS</p>
+                        <h2>抽帧结果</h2>
+                        <p>按视频源和日期筛选，查看AIService实际生成的图片。</p>
+                    </div>
+                    <div class="filters">
+                        <label>
+                            视频源
+                            <select id="resultSource"><option value="">全部视频源</option></select>
+                        </label>
+                        <label>
+                            日期
+                            <input id="resultDate" type="date" />
+                        </label>
+                        <button id="refreshResultsButton" class="primary">查询结果</button>
+                    </div>
+                </div>
+                <div id="resultGrid" class="result-grid">
+                    <p class="empty">正在读取抽帧结果…</p>
+                </div>
+            </section>
+        </main>
+
+        <div id="toast" class="toast" role="status"></div>
+        <script src="/app.js" defer></script>
+    </body>
+</html>

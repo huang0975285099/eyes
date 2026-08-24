@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
-	"media-service/analysis"
 	"media-service/database"
 	"media-service/models"
 	"media-service/streamsource"
@@ -444,9 +443,6 @@ func (m *RecorderManager) indexDayDir(streamName, mac, sourceType, sourceID, day
 			log.Printf("[recording] 写入索引失败 %s: %v", filePath, err)
 		} else {
 			log.Printf("[recording] 索引新片段 %s (%.0fs)", filePath, actualDuration)
-			if err := analysis.EnqueueFrameSampler(seg); err != nil {
-				log.Printf("[analysis] 创建录像抽帧任务失败 segment=%d: %v", seg.ID, err)
-			}
 		}
 	}
 }
@@ -490,13 +486,12 @@ func (m *RecorderManager) cleanupExpired() {
 		log.Printf("[recording] 清理过期帧 %d 条", len(expiredFrames))
 	}
 
-	segmentIDs := make([]uint, 0, len(localSegments))
-	for _, segment := range localSegments {
-		segmentIDs = append(segmentIDs, segment.ID)
-	}
-	if len(segmentIDs) > 0 {
-		database.DB.Where("input_type = ? AND input_ref_id IN ?", analysis.JobInputSegment, segmentIDs).
-			Delete(&models.AIJob{})
+	// 实时抽帧任务只用于可靠调度，图片结果有独立索引；保留7天任务状态即可。
+	jobCutoff := time.Now().AddDate(0, 0, -7)
+	jobResult := database.DB.Where("input_type = ? AND created_at < ?", "live_stream", jobCutoff).
+		Delete(&models.AIJob{})
+	if jobResult.RowsAffected > 0 {
+		log.Printf("[analysis] 清理历史实时抽帧任务 %d 条", jobResult.RowsAffected)
 	}
 
 	result := database.DB.Unscoped().Where(segWhere, segArgs...).Delete(&models.RecordingSegment{})

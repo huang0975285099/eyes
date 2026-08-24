@@ -63,7 +63,6 @@ struct ApiResult {
     std::wstring error;
     Json primary;
     Json secondary;
-    Json tertiary;
     std::wstring message;
 };
 
@@ -217,18 +216,15 @@ void refresh_async() {
         try {
             const wchar_t* path = requestedTab == 0 ? L"/api/streams"
                                   : requestedTab == 1 ? L"/api/segments"
-                                  : requestedTab == 2 ? L"/api/frames"
                                                       : L"/api/stats";
             HttpResponse response = WinHttpClient::request(L"GET", base + path);
             if (response.status < 200 || response.status >= 300) {
                 throw std::runtime_error("MediaService returned HTTP " + std::to_string(response.status));
             }
             result->primary = Json::parse(response.body);
-            if (requestedTab == 3) {
+            if (requestedTab == 2) {
                 auto settings = WinHttpClient::request(L"GET", base + L"/api/recording-settings");
-                auto ai = WinHttpClient::request(L"GET", base + L"/api/ai/jobs/stats");
                 if (settings.status >= 200 && settings.status < 300) result->secondary = Json::parse(settings.body);
-                if (ai.status >= 200 && ai.status < 300) result->tertiary = Json::parse(ai.body);
             }
             result->ok = true;
         } catch (const std::exception& error) {
@@ -268,27 +264,16 @@ void display_result(const ApiResult& result) {
                             base + L"/segments/" + std::to_wstring(id) + L"/video"});
         }
         show_rows({{L"开始时间", 170}, {L"时长", 80}, {L"大小", 90}, {L"视频源", 140}, {L"流名称", 240}}, std::move(rows));
-    } else if (g_tab == 2) {
-        const std::wstring base = trim_url(window_text(g_server));
-        for (const Json& item : result.primary.array()) {
-            const auto id = item["id"].integer();
-            rows.push_back({{utf8_to_wide(item["captured_at"].string()), utf8_to_wide(item["display_name"].string()),
-                             utf8_to_wide(item["stream_name"].string()), format_size(item["file_size"].integer())},
-                            base + L"/frames/" + std::to_wstring(id) + L"/image"});
-        }
-        show_rows({{L"抽帧时间", 180}, {L"视频源", 140}, {L"流名称", 250}, {L"大小", 90}}, std::move(rows));
     } else {
         const Json& stats = result.primary;
         const Json& settings = result.secondary;
         SendMessageW(g_recordEnabled, BM_SETCHECK, settings["record_enabled"].boolean() ? BST_CHECKED : BST_UNCHECKED, 0);
         SetWindowTextW(g_retainDays, std::to_wstring(settings["retain_days"].integer(2)).c_str());
-        const std::size_t workers = result.tertiary["workers"].array().size();
         std::wostringstream text;
         text << L"在线流：" << stats["online_streams"].integer() << L"\r\n"
              << L"录像片段：" << stats["seg_count"].integer() << L"\r\n"
              << L"录像占用：" << format_size(stats["total_size"].integer()) << L"\r\n"
-             << L"磁盘使用率：" << std::fixed << std::setprecision(1) << stats["disk_percent"].number() << L"%\r\n"
-             << L"AI Worker：" << workers;
+             << L"磁盘使用率：" << std::fixed << std::setprecision(1) << stats["disk_percent"].number() << L"%";
         SetWindowTextW(g_stats, text.str().c_str());
     }
     set_status(L"已连接MediaService");
@@ -297,7 +282,7 @@ void display_result(const ApiResult& result) {
 void play_selected() {
     const int selected = ListView_GetNextItem(g_list, -1, LVNI_SELECTED);
     if (selected < 0 || static_cast<std::size_t>(selected) >= g_rows.size()) {
-        set_status(L"请先选择一个视频源、录像或抽帧");
+        set_status(L"请先选择一个视频源或录像");
         return;
     }
     const std::wstring& url = g_rows[selected].playbackUrl;
@@ -326,7 +311,7 @@ void save_settings_async() {
     set_status(L"正在保存录制设置…");
     std::thread([base, body] {
         auto result = std::make_unique<ApiResult>();
-        result->tab = 3;
+        result->tab = 2;
         try {
             auto response = WinHttpClient::request(L"PUT", base + L"/api/recording-settings", body);
             if (response.status < 200 || response.status >= 300) throw std::runtime_error("save failed");
@@ -353,7 +338,7 @@ void create_direct_source_async() {
     set_status(L"正在生成摄像头RTMP推流地址…");
     std::thread([base, body] {
         auto result = std::make_unique<ApiResult>();
-        result->tab = 3;
+        result->tab = 2;
         try {
             auto response = WinHttpClient::request(L"POST", base + L"/api/video-sources", body);
             if (response.status < 200 || response.status >= 300) {
@@ -386,7 +371,7 @@ void copy_text(const std::wstring& text) {
 
 void show_tab(int tab) {
     g_tab = tab;
-    const bool management = tab == 3;
+    const bool management = tab == 2;
     ShowWindow(g_list, management ? SW_HIDE : SW_SHOW);
     ShowWindow(g_video, management ? SW_HIDE : SW_SHOW);
     ShowWindow(g_play, management ? SW_HIDE : SW_SHOW);
@@ -405,9 +390,11 @@ void show_tab(int tab) {
 
 LRESULT CALLBACK video_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == eyes::WM_EYES_FRAME) {
+        g_player.acknowledge_frame();
         InvalidateRect(window, nullptr, FALSE);
         return 0;
     }
+    if (message == WM_ERASEBKGND) return 1;
     if (message == WM_PAINT) {
         PAINTSTRUCT paint{};
         HDC dc = BeginPaint(window, &paint);
@@ -461,8 +448,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
                                reinterpret_cast<HMENU>(ID_STOP), nullptr, nullptr);
         g_tabs = CreateWindowW(WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window,
                                reinterpret_cast<HMENU>(ID_TABS), nullptr, nullptr);
-        const wchar_t* tabs[] = {L"实时监控", L"录像列表", L"抽帧", L"录制管理"};
-        for (int i = 0; i < 4; ++i) {
+        const wchar_t* tabs[] = {L"实时监控", L"录像列表", L"录制管理"};
+        for (int i = 0; i < 3; ++i) {
             TCITEMW item{};
             item.mask = TCIF_TEXT;
             item.pszText = const_cast<wchar_t*>(tabs[i]);
@@ -517,7 +504,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         switch (LOWORD(wParam)) {
         case ID_REFRESH: refresh_async(); return 0;
         case ID_PLAY: play_selected(); return 0;
-        case ID_STOP: g_player.stop(); InvalidateRect(g_video, nullptr, TRUE); set_status(L"已停止播放"); return 0;
+        case ID_STOP: g_player.stop(); InvalidateRect(g_video, nullptr, FALSE); set_status(L"已停止播放"); return 0;
         case ID_SAVE_SETTINGS: save_settings_async(); return 0;
         case ID_CREATE_SOURCE: create_direct_source_async(); return 0;
         }
@@ -572,7 +559,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     videoClass.lpfnWndProc = video_proc;
     videoClass.lpszClassName = kVideoClass;
     videoClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    videoClass.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    // 视频窗口由双缓冲播放器完整绘制，禁用系统背景刷以避免WM_PAINT前闪黑。
+    videoClass.hbrBackground = nullptr;
     RegisterClassW(&videoClass);
 
     WNDCLASSW mainClass{};

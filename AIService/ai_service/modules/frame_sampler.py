@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .base import AnalysisError, AnalysisResult, Analyzer
 
@@ -15,109 +15,84 @@ logger = logging.getLogger(__name__)
 
 
 class FrameSamplerAnalyzer(Analyzer):
+    """Capture one current frame directly from an SRS live stream."""
+
     code = "frame_sampler"
 
     def __init__(
         self,
-        recording_root: Path,
+        evidence_root: Path,
         ffmpeg_path: str,
-        ffprobe_path: str,
         command_timeout_seconds: int,
     ) -> None:
-        self._recording_root = recording_root.resolve()
+        # Images share the durable evidence volume, but no MP4 recording is read.
+        self._evidence_root = (evidence_root / "_frames").resolve()
         self._ffmpeg_path = ffmpeg_path
-        self._ffprobe_path = ffprobe_path
         self._timeout = command_timeout_seconds
 
     def analyze(self, job: dict[str, Any]) -> AnalysisResult:
-        input_path = self._validated_input_path(str(job.get("input_path", "")))
+        if str(job.get("input_type", "")) != "live_stream":
+            raise AnalysisError(
+                "frame_sampler only accepts live_stream jobs", retryable=False
+            )
         stream_name = _safe_component(str(job.get("stream_name", "")))
         if not stream_name:
             raise AnalysisError("job stream_name is empty", retryable=False)
+        input_url = _validated_stream_url(str(job.get("input_url", "")))
+        fallback_value = str(job.get("fallback_url", "")).strip()
+        fallback_url = (
+            _validated_stream_url(fallback_value) if fallback_value else ""
+        )
+        job_id = int(job.get("id", 0) or 0)
+        if job_id <= 0:
+            raise AnalysisError("job id is invalid", retryable=False)
 
-        started_at = _parse_datetime(str(job.get("started_at", "")))
-        fallback_duration = float(job.get("duration", 0) or 0)
-        duration = self._probe_duration(input_path, fallback_duration)
-        offsets = plan_frame_offsets(duration)
-        if not offsets:
-            logger.info(
-                "segment %s is shorter than 30 seconds; no frames required",
-                job.get("segment_id"),
-            )
-            return AnalysisResult()
-
-        frames_dir = (self._recording_root / "_frames" / stream_name).resolve()
-        _require_within(self._recording_root / "_frames", frames_dir)
+        frames_dir = (
+            self._evidence_root
+            / stream_name
+            / f"{job_id // 10000:08d}"
+        ).resolve()
+        _require_within(self._evidence_root, frames_dir)
         frames_dir.mkdir(parents=True, exist_ok=True)
-
-        artifacts: list[dict[str, Any]] = []
-        for frame_index, offset in enumerate(offsets, start=1):
-            output_path = frames_dir / f"{input_path.stem}_f{frame_index}.jpg"
-            if not output_path.exists() or output_path.stat().st_size == 0:
-                self._extract(input_path, output_path, offset)
-            artifacts.append(
+        output_path = frames_dir / f"job_{job_id}.jpg"
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            errors: list[str] = []
+            for stream_url in dict.fromkeys([input_url, fallback_url]):
+                if not stream_url:
+                    continue
+                try:
+                    self._capture(stream_url, output_path)
+                    break
+                except AnalysisError as exc:
+                    errors.append(str(exc))
+            else:
+                raise AnalysisError("; ".join(errors) or "no live stream URL available")
+        captured_at = datetime.fromtimestamp(output_path.stat().st_mtime, timezone.utc)
+        return AnalysisResult(
+            frames=[
                 {
-                    "frame_index": frame_index,
+                    "frame_index": 1,
                     "file_path": str(output_path),
-                    "captured_at": (started_at + timedelta(seconds=offset)).isoformat(),
+                    "captured_at": captured_at.isoformat(),
                 }
-            )
-        return AnalysisResult(frames=artifacts)
+            ]
+        )
 
-    def _validated_input_path(self, value: str) -> Path:
-        if not value:
-            raise AnalysisError("job input_path is empty", retryable=False)
-        path = Path(value).resolve()
-        _require_within(self._recording_root, path)
-        if not path.is_file():
-            raise AnalysisError(f"recording segment does not exist: {path}")
-        return path
-
-    def _probe_duration(self, path: Path, fallback: float) -> float:
-        command = [
-            self._ffprobe_path,
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "json",
-            str(path),
-        ]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=True,
-            )
-            payload = json.loads(completed.stdout)
-            value = float(payload["format"]["duration"])
-            if value > 0:
-                return value
-        except (
-            subprocess.CalledProcessError,
-            subprocess.TimeoutExpired,
-            FileNotFoundError,
-            KeyError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            if fallback <= 0:
-                raise AnalysisError(f"ffprobe failed for {path}: {exc}") from exc
-            logger.warning("ffprobe failed for %s; using %.2fs: %s", path, fallback, exc)
-        return fallback
-
-    def _extract(self, input_path: Path, output_path: Path, offset: int) -> None:
+    def _capture(self, input_url: str, output_path: Path) -> None:
         temporary_path = output_path.with_name(output_path.stem + ".part.jpg")
         command = [
             self._ffmpeg_path,
             "-nostdin",
-            "-ss",
-            str(offset),
+            "-fflags",
+            "nobuffer",
+            "-analyzeduration",
+            "1000000",
+            "-probesize",
+            "1000000",
             "-i",
-            str(input_path),
+            input_url,
+            "-map",
+            "0:v:0",
             "-frames:v",
             "1",
             "-q:v",
@@ -136,9 +111,7 @@ class FrameSamplerAnalyzer(Analyzer):
             )
         except subprocess.TimeoutExpired as exc:
             temporary_path.unlink(missing_ok=True)
-            raise AnalysisError(
-                f"ffmpeg timed out at offset {offset}s for {input_path}"
-            ) from exc
+            raise AnalysisError(f"ffmpeg timed out reading {input_url}") from exc
         except FileNotFoundError as exc:
             raise AnalysisError(
                 f"ffmpeg executable was not found: {self._ffmpeg_path}",
@@ -149,36 +122,21 @@ class FrameSamplerAnalyzer(Analyzer):
             temporary_path.unlink(missing_ok=True)
             detail = completed.stderr[-1000:].strip()
             raise AnalysisError(
-                f"ffmpeg failed at offset {offset}s for {input_path}: {detail}"
+                f"ffmpeg failed to capture live stream {input_url}: {detail}"
             )
         if not temporary_path.exists() or temporary_path.stat().st_size == 0:
             temporary_path.unlink(missing_ok=True)
             raise AnalysisError(
-                f"ffmpeg produced an empty frame at offset {offset}s for {input_path}"
+                f"ffmpeg produced an empty frame for {input_url}"
             )
         os.replace(temporary_path, output_path)
 
 
-def plan_frame_offsets(duration: float) -> list[int]:
-    effective_duration = int(duration)
-    if effective_duration < 30:
-        return []
-    frame_count = 2
-    if effective_duration >= 600:
-        frame_count = effective_duration // 300
-    interval = effective_duration // frame_count
-    return [interval * index + interval // 2 for index in range(frame_count)]
-
-
-def _parse_datetime(value: str) -> datetime:
-    if not value:
-        raise AnalysisError("job started_at is empty", retryable=False)
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise AnalysisError(
-            f"job started_at is invalid: {value}", retryable=False
-        ) from exc
+def _validated_stream_url(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    if parsed.scheme not in {"rtmp", "rtmps", "http", "https"} or not parsed.netloc:
+        raise AnalysisError("job input_url is invalid", retryable=False)
+    return value.strip()
 
 
 def _safe_component(value: str) -> str:
@@ -193,5 +151,5 @@ def _require_within(root: Path, target: Path) -> None:
         target.resolve().relative_to(root.resolve())
     except ValueError as exc:
         raise AnalysisError(
-            f"path is outside the recording root: {target}", retryable=False
+            f"path is outside the evidence root: {target}", retryable=False
         ) from exc

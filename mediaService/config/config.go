@@ -32,6 +32,7 @@ type RecordingConfig struct {
 	WebPort         int    // 内网管理后台 Web 页面端口，0=不启动
 	SRSHttpHost     string // SRS HTTP-FLV/HLS 对外访问地址
 	PublicRTMPHost  string // 客户端推流使用的公网 RTMP 地址
+	AIStreamBaseURL string // AIService实时流兼容回退地址（通常为Docker内SRS HLS）
 }
 
 func Load() *Config {
@@ -56,6 +57,7 @@ func Load() *Config {
 			WebPort:         atoi("MEDIA_WEB_PORT", "22222"),
 			SRSHttpHost:     getEnv("MEDIA_SRS_HTTP_HOST", ""),
 			PublicRTMPHost:  getEnv("PUBLIC_RTMP_HOST", "112.18.238.6:1935"),
+			AIStreamBaseURL: getEnv("AI_SRS_HTTP_BASE", "http://localhost:8080"),
 		},
 	}
 }

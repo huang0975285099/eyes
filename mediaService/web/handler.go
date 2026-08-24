@@ -26,10 +26,12 @@ type Server struct {
 	UpdateRetainDays    func(int)  // 热更新 RecorderManager 的回调
 	UpdateRecordEnabled func(bool) // 热更新全局录制开关
 	PublicRTMPHost      string     // 下发给客户端的 RTMP 公网地址
+	InternalRTMPHost    string     // MediaService/AIService容器访问SRS的地址
+	AIStreamBaseURL     string     // AIService兼容拉流地址
 	RecordingOutputDir  string     // 录像和AI证据共享目录
 }
 
-func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, recordingOutputDir string, retainDays int, recordEnabled bool, updateRetainDays func(int), updateRecordEnabled func(bool)) *Server {
+func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, internalRTMPHost, aiStreamBaseURL, recordingOutputDir string, retainDays int, recordEnabled bool, updateRetainDays func(int), updateRecordEnabled func(bool)) *Server {
 	return &Server{
 		SRSApiBase:          srsApiBase,
 		SRSHttpHost:         srsHttpHost,
@@ -39,11 +41,14 @@ func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, recordingOutputDir strin
 		UpdateRetainDays:    updateRetainDays,
 		UpdateRecordEnabled: updateRecordEnabled,
 		PublicRTMPHost:      publicRTMPHost,
+		InternalRTMPHost:    internalRTMPHost,
+		AIStreamBaseURL:     aiStreamBaseURL,
 		RecordingOutputDir:  recordingOutputDir,
 	}
 }
 
 func (s *Server) Start(port int) {
+	go s.runLiveFrameScheduler()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/segments", s.handleSegments)
 	mux.HandleFunc("/api/frames", s.handleFrames)
@@ -58,6 +63,7 @@ func (s *Server) Start(port int) {
 	mux.Handle("/client-updates/", http.StripPrefix("/client-updates/", http.FileServer(http.Dir(updateDir()))))
 	mux.HandleFunc("/api/streams/publish-config", s.handlePublishConfig)
 	mux.HandleFunc("/api/ai/algorithms", s.handleAIAlgorithms)
+	mux.HandleFunc("/api/ai/rules", s.handleAIAnalysisRules)
 	mux.HandleFunc("/api/ai/jobs/stats", s.handleAIJobStats)
 	mux.HandleFunc("/api/internal/ai/jobs/claim", s.handleAIJobClaim)
 	mux.HandleFunc("/api/internal/ai/jobs/report", s.handleAIJobReport)
@@ -393,7 +399,7 @@ func (s *Server) handleFrames(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	query := database.DB.Model(&models.RecordingFrame{})
+	query := database.DB.Model(&models.RecordingFrame{}).Where("segment_id = 0")
 	if dateStr := r.URL.Query().Get("date"); dateStr != "" {
 		if t, err := time.ParseInLocation("2006-01-02", dateStr, time.Local); err == nil {
 			query = query.Where("captured_at >= ? AND captured_at < ?", t, t.AddDate(0, 0, 1))
@@ -404,6 +410,12 @@ func (s *Server) handleFrames(w http.ResponseWriter, r *http.Request) {
 	}
 	if sourceType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source_type"))); sourceType != "" {
 		query = query.Where("source_type = ?", sourceType)
+	}
+	if sourceID := strings.TrimSpace(r.URL.Query().Get("source_id")); sourceID != "" {
+		query = query.Where("source_id = ?", sourceID)
+	}
+	if streamName := strings.TrimSpace(r.URL.Query().Get("stream_name")); streamName != "" {
+		query = query.Where("stream_name = ?", streamName)
 	}
 	var frames []models.RecordingFrame
 	query.Order("captured_at DESC").Limit(500).Find(&frames)
