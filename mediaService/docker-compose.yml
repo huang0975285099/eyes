@@ -85,7 +85,8 @@ services:
 
   ai-service:
     build:
-      context: ../AIService
+      context: ..
+      dockerfile: AIService/Dockerfile
     image: "${AI_IMAGE:-eyes-ai-service:latest}"
     restart: always
     environment:

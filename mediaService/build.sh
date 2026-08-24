@@ -192,7 +192,7 @@ fi
 
 ${BUILD_CMD}
 
-AI_BUILD_CMD="docker build -t ${AI_FULL_IMAGE_NAME} ../AIService"
+AI_BUILD_CMD="docker build -f ../AIService/Dockerfile -t ${AI_FULL_IMAGE_NAME} .."
 if [ "${BUILD_NO_CACHE}" = true ]; then
     AI_BUILD_CMD="${AI_BUILD_CMD} --no-cache"
 fi

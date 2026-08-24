@@ -26,6 +26,9 @@ type portalSourceRow struct {
 	SourceType          string     `json:"source_type"`
 	SourceID            string     `json:"source_id"`
 	MAC                 string     `json:"mac"`
+	Brand               string     `json:"brand"`
+	PublishMode         string     `json:"publish_mode"`
+	Enabled             bool       `json:"enabled"`
 	Active              bool       `json:"active"`
 	Codec               string     `json:"codec"`
 	Width               int        `json:"width"`
@@ -148,7 +151,8 @@ func (s *Server) listPortalSources(w http.ResponseWriter, p principal) {
 		rows = append(rows, portalSourceRow{
 			VideoSourceID: source.ID, CustomerID: source.CustomerID, CustomerName: customerNames[source.CustomerID],
 			StreamName: source.StreamName, DisplayName: source.DisplayName, SourceType: source.SourceType,
-			SourceID: source.SourceID, MAC: source.MAC, Active: isActive,
+			SourceID: source.SourceID, MAC: source.MAC, Brand: source.Brand,
+			PublishMode: source.PublishMode, Enabled: source.Enabled, Active: isActive,
 			Codec: stream.Video.Codec, Width: stream.Video.Width, Height: stream.Video.Height,
 			RecordingEnabled: recordingRule.Enabled, RecordingRetainDays: retainDays,
 			SamplingEnabled: analysisRule.Enabled, FramesPerMinute: framesPerMinute,
@@ -272,9 +276,65 @@ func (s *Server) handlePortalCustomers(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"customers": rows})
 	case http.MethodPost:
 		s.createPortalCustomer(w, r)
+	case http.MethodPut:
+		s.updatePortalCustomer(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) updatePortalCustomer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CustomerID  uint   `json:"customer_id"`
+		Enabled     *bool  `json:"enabled"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil || req.CustomerID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "客户账号参数无效"})
+		return
+	}
+	if req.Enabled == nil && strings.TrimSpace(req.NewPassword) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "没有需要修改的内容"})
+		return
+	}
+	var user models.User
+	if err := database.DB.Where("customer_id = ? AND role = ?", req.CustomerID, roleCustomerAdmin).Order("id").First(&user).Error; err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "客户账号不存在"})
+		return
+	}
+	passwordHash := ""
+	if strings.TrimSpace(req.NewPassword) != "" {
+		var err error
+		_, passwordHash, err = validatedCredentials(user.Username, req.NewPassword)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if req.Enabled != nil {
+			if err := tx.Model(&models.Customer{}).Where("id = ?", req.CustomerID).Update("enabled", *req.Enabled).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&models.User{}).Where("customer_id = ?", req.CustomerID).Update("enabled", *req.Enabled).Error; err != nil {
+				return err
+			}
+		}
+		if passwordHash != "" {
+			if err := tx.Model(&models.User{}).Where("id = ?", user.ID).Update("password_hash", passwordHash).Error; err != nil {
+				return err
+			}
+		}
+		if passwordHash != "" || (req.Enabled != nil && !*req.Enabled) {
+			return tx.Where("user_id IN (?)", tx.Model(&models.User{}).Select("id").Where("customer_id = ?", req.CustomerID)).Delete(&models.UserSession{}).Error
+		}
+		return nil
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新客户账号失败"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) createPortalCustomer(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+import urllib.error
 import urllib.request
 
 from ai_service.health import start_health_server
@@ -13,13 +14,15 @@ class FakeMediaClient:
         self.saved: dict[str, object] | None = None
         self.authorization = ""
         self.sources: list[dict[str, object]] = []
+        self.logout_count = 0
 
     def get_json(self, path: str, headers: dict[str, str] | None = None) -> dict[str, object] | list[object]:
         self.authorization = (headers or {}).get("Authorization", "")
         if path == "/api/portal/auth/status":
             return {"setup_required": False}
         if path == "/api/portal/auth/me":
-            return {"user": {"username": "admin", "role": "platform_admin"}}
+            customer = self.authorization == "Bearer customer-session"
+            return {"user": {"username": "customer" if customer else "admin", "role": "customer_admin" if customer else "platform_admin"}}
         if path == "/api/portal/sources":
             return {"sources": self.sources}
         if path.startswith("/api/portal/frames"):
@@ -33,8 +36,12 @@ class FakeMediaClient:
     def post_json(self, path: str, payload: dict[str, object], headers: dict[str, str] | None = None) -> dict[str, object]:
         self.authorization = (headers or {}).get("Authorization", "")
         if path == "/api/portal/auth/login":
-            return {"session_token": "session-123", "user": {"username": "admin", "role": "platform_admin"}}
+            username = str(payload.get("username", ""))
+            role = "customer_admin" if username == "customer" else "platform_admin"
+            token = "customer-session" if role == "customer_admin" else "session-123"
+            return {"session_token": token, "user": {"username": username, "role": role}}
         if path == "/api/portal/auth/logout":
+            self.logout_count += 1
             return {"ok": True}
         self.saved = payload
         return {"ok": True}
@@ -82,7 +89,7 @@ class DashboardServerTests(unittest.TestCase):
     def test_serves_dashboard_and_auth_status(self) -> None:
         status, content_type, body = self.get("/")
         self.assertEqual((status, content_type), (200, "text/html"))
-        self.assertIn("视频与AI服务平台".encode(), body)
+        self.assertIn("超级管理平台".encode(), body)
         _, _, body = self.get("/api/dashboard/auth/status")
         self.assertFalse(json.loads(body)["setup_required"])
 
@@ -130,6 +137,55 @@ class DashboardServerTests(unittest.TestCase):
             "http://srs-public.example:8080/live/customer-camera-1.flv",
         )
         self.assertEqual(self.client.authorization, "Bearer session-123")
+
+    def test_customer_native_login_returns_bearer_and_forwards_it(self) -> None:
+        request = urllib.request.Request(
+            self.base + "/api/customer/auth/login",
+            data=json.dumps({"username": "customer", "password": "password123"}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", "X-Eyes-Native-App": "1"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            result = json.loads(response.read())
+        self.assertEqual(result["session_token"], "customer-session")
+        self.assertEqual(result["user"]["role"], "customer_admin")
+
+        request = urllib.request.Request(
+            self.base + "/api/customer/sources",
+            headers={"Authorization": "Bearer customer-session", "Origin": "capacitor://localhost"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(response.headers["Access-Control-Allow-Origin"], "capacitor://localhost")
+            self.assertEqual(json.loads(response.read()), {"sources": []})
+        self.assertEqual(self.client.authorization, "Bearer customer-session")
+
+    def test_customer_cannot_enter_platform_dashboard(self) -> None:
+        request = urllib.request.Request(
+            self.base + "/api/dashboard/auth/login",
+            data=json.dumps({"username": "customer", "password": "password123"}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            urllib.request.urlopen(request, timeout=3)
+        self.assertEqual(context.exception.code, 403)
+        context.exception.close()
+        self.assertEqual(self.client.logout_count, 1)
+
+    def test_platform_token_cannot_call_customer_data_api(self) -> None:
+        request = urllib.request.Request(
+            self.base + "/api/customer/sources",
+            headers={"Authorization": "Bearer session-123", "Origin": "tauri://localhost"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            urllib.request.urlopen(request, timeout=3)
+        self.assertEqual(context.exception.code, 403)
+        context.exception.close()
+
+    def test_customer_portal_assets_are_served(self) -> None:
+        status, content_type, body = self.get("/customer/")
+        self.assertEqual((status, content_type), (200, "text/html"))
+        self.assertIn(b"/customer/assets/", body)
 
 
 if __name__ == "__main__":

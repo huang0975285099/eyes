@@ -3,15 +3,15 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>千里眼客户服务平台</title>
+        <title>千里眼超级管理平台</title>
         <link rel="stylesheet" href="/app.css" />
     </head>
     <body>
         <section id="authGate" class="auth-gate">
             <form id="authForm" class="auth-card">
                 <p class="eyebrow">ALL-SEEING EYES</p>
-                <h1 id="authTitle">客户登录</h1>
-                <p id="authDescription" class="subtitle">登录后管理自己的摄像头、电脑和视频服务。</p>
+                <h1 id="authTitle">超级管理员登录</h1>
+                <p id="authDescription" class="subtitle">仅供平台管理员管理客户账号、设备归属和系统服务。</p>
                 <label>登录账号<input id="authUsername" autocomplete="username" required /></label>
                 <label>登录密码<input id="authPassword" type="password" autocomplete="current-password" minlength="8" maxlength="72" required /></label>
                 <button id="authSubmit" class="primary" type="submit">登录</button>
@@ -22,8 +22,8 @@
         <main id="portalShell" class="shell hidden">
             <header class="topbar">
                 <div>
-                    <p class="eyebrow">ALL-SEEING EYES · CUSTOMER PORTAL</p>
-                    <h1>视频与AI服务平台</h1>
+                    <p class="eyebrow">ALL-SEEING EYES · PLATFORM CONSOLE</p>
+                    <h1>超级管理平台</h1>
                     <p class="subtitle">按视频源独立配置录像存储、保留时间和实时抽帧。</p>
                 </div>
                 <div class="account-panel">
@@ -104,7 +104,7 @@
 
             <section id="customersPage" class="page">
                 <div class="section-heading">
-                    <div><p class="section-kicker">TENANT MANAGEMENT</p><h2>客户账号管理</h2><p>创建客户账号后，在服务配置页把摄像头或电脑分配给客户。</p></div>
+                    <div><p class="section-kicker">TENANT MANAGEMENT</p><h2>客户账号管理</h2><p>创建、启停或重置客户账号，并在服务配置页分配摄像头或电脑。</p></div>
                 </div>
                 <form id="customerForm" class="customer-form">
                     <label>客户名称<input id="customerName" maxlength="100" required /></label>

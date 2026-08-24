@@ -1,0 +1,33 @@
+{
+  "name": "eyes-customer-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "quasar dev",
+    "build": "quasar build",
+    "build:native": "node scripts/build-native.mjs",
+    "build:embed": "quasar build",
+    "build:android": "quasar build -m capacitor -T android",
+    "dev:android": "quasar dev -m capacitor -T android",
+    "tauri": "tauri",
+    "dev:tauri": "tauri dev",
+    "build:tauri": "tauri build --no-bundle"
+  },
+  "dependencies": {
+    "@quasar/extras": "^1.17.0",
+    "mpegts.js": "^1.8.2",
+    "quasar": "^2.26.0",
+    "vue": "^3.5.41",
+    "vue-router": "^5.0.0"
+  },
+  "devDependencies": {
+    "@quasar/app-vite": "^3.8.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  }
+}

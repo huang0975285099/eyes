@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "千里眼客户平台",
+  "version": "1.0.0",
+  "identifier": "cn.allseeingeyes.customer",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build:native",
+    "devUrl": "http://localhost:9000/customer/",
+    "frontendDist": "../dist/spa"
+  },
+  "app": {
+    "windows": [{ "title": "千里眼客户平台", "width": 430, "height": 860, "minWidth": 360, "minHeight": 640, "resizable": true }],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": false }
+}

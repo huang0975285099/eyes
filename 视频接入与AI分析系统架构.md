@@ -10,6 +10,7 @@
 - MediaService负责视频源、录像和AI配置管理。
 - AIService负责实际的视频分析，不负责设备品牌适配和录像控制。
 - 平台管理员创建客户并分配视频源，客户登录后只能管理和查看自己的数据。
+- 超级管理后台、客户移动平台和Windows观看端是主要职责定位，底层能力可以复用；客户之间的数据隔离必须强制执行。
 - 录像、抽帧及后续AI服务都按视频源独立配置，不使用全局录像开关。
 - 同一路视频在一个AI节点只拉取、解码一次，再交给多个算法模块使用。
 - 打架、安全帽、火灾以及后续算法使用统一的配置、任务、事件和证据模型。
@@ -94,8 +95,9 @@ MediaService不负责执行深度学习模型。录像完整性检查仍可使�
 
 AIService是统一的AI分析平台，负责：
 
-- 提供客户登录后台，并通过MediaService鉴权接口读取当前客户的数据。
-- 让客户对自己名下的视频源分别配置录像、抽帧和后续AI算法。
+- 根页面提供超级管理员后台，用于全局查看、客户账号和设备归属管理。
+- `/customer/`提供Quasar客户移动平台，并通过MediaService鉴权接口读取当前客户的数据。
+- 让客户对自己名下的视频源分别配置录像、抽帧和后续AI算法；客户API强制校验客户管理员角色。
 - 向MediaService报告Worker心跳和可用算法能力。
 - 从MediaService获取需要执行的任务和视频源AI配置。
 - 从SRS自动拉取需要分析的在线流。
@@ -122,7 +124,9 @@ AdminService是Windows原生C++集中管理和观看客户端，负责：
 - 通过MediaService HTTP API查询在线流和录像。
 - 使用FFmpeg原生解码H.264/H.265，不依赖浏览器或厂商Web插件。
 - 同一时间选择并观看一路实时画面或录像。
-- 为品牌摄像头生成固定RTMP推流地址。
+
+AdminService以播放和回放为主要定位，不放置逐路录像、抽帧、客户账号或设备归属配置。
+这些配置集中在AIService超级管理后台和客户移动平台。
 
 MediaService不再嵌入浏览器管理页，`mediaService/web` Go包仅保留HTTP API实现。
 
@@ -162,8 +166,9 @@ RTMP入口不使用token、API Key、数据库登记或回调校验。电脑APP�
 
 ## 5. 多客户与逐路录像控制
 
-系统不再使用统一录像开关。平台管理员首次进入`AIService:11111`时创建平台账号，之后
-创建客户账号并把摄像头或电脑视频源分配给客户。客户登录后只能看到自己名下的视频源、
+系统不再使用统一录像开关。平台管理员首次进入`AIService:11111/`时创建平台账号，之后
+创建客户账号并把摄像头或电脑视频源分配给客户。客户从`AIService:11111/customer/`
+登录后只能看到自己名下的视频源、
 实时画面和抽帧结果，并可逐路设置：
 
 - 是否保存完整录像。
@@ -203,7 +208,7 @@ RTMP入口不使用token、API Key、数据库登记或回调校验。电脑APP�
 
 ## 6. AI算法配置逻辑
 
-客户管理员在`AIService:11111` Web后台从自己名下的视频源中选择具体摄像头并配置需要启用的算法。平台管理员可以管理全部客户和视频源。规则通过MediaService API保存到共享的`eyes`数据库，AIService读取并执行。
+客户管理员在`AIService:11111/customer/`移动平台从自己名下的视频源中选择具体摄像头并配置需要启用的算法。平台管理员在根页面管理全部客户和视频源。规则通过MediaService API保存到共享的`eyes`数据库，AIService读取并执行。
 
 示例：
 
@@ -350,9 +355,9 @@ metadata_json
 | 接口 | 用途 |
 |---|---|
 | `GET /api/streams` | 查询当前在线流 |
-| `/api/portal/auth/*` | 平台初始化、登录、当前账号和退出 |
+| `/api/portal/auth/*` | 平台初始化、登录、当前账号、修改密码和退出 |
 | `GET/PUT /api/portal/sources` | 按客户查询并配置逐路录像和抽帧 |
-| `GET/POST /api/portal/customers` | 平台管理员查询或创建客户 |
+| `GET/POST/PUT /api/portal/customers` | 平台管理员查询、创建、启停或重置客户账号 |
 | `PUT /api/portal/source-owner` | 平台管理员分配视频源 |
 | `GET /api/portal/frames` | 按客户查询实时抽帧结果 |
 | `GET /api/ai/algorithms` | 查询AI算法目录 |
@@ -467,7 +472,9 @@ Worker通过心跳报告：
 - RTSP/NVR摄像头的H.264/H.265原码直通转推。
 - SRS升级到6.x，离线部署包使用`ossrs/srs:6`。
 - C++ AdminService支持实时H.264/H.265播放和录像回放，不再承担服务配置和AI结果查看。
-- AIService提供客户Web后台，用于逐路配置录像和抽帧、实时查看及查询抽帧结果。
+- Quasar客户移动平台提供实时画面上下切换、设备管理、逐路录像/抽帧配置和个人中心。
+- 客户平台可作为浏览器页面运行，并已建立Capacitor Android和Tauri 2 Windows打包工程。
+- AIService根页面定位为超级管理后台，支持客户账号创建、启停、密码重置和点位分配。
 - AIService与MediaService共用现有`eyes`数据库；数据库连接和表结构仍由MediaService统一管理。
 
 尚未完成：

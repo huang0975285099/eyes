@@ -1,0 +1,8 @@
+node_modules/
+.quasar/
+dist/
+src-capacitor/www/
+src-capacitor/android/
+src-capacitor/ios/
+src-tauri/target/
+*.log

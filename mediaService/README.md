@@ -103,9 +103,9 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 - `GET /api/video-sources`：查看已登记的视频源、在线状态及品牌摄像头直推地址。
 - `POST /api/video-sources`：登记一个独立品牌摄像头并生成永久 RTMP 地址，请求字段为 `source_id`、`display_name` 和可选的 `brand`。
 - `GET /api/segments`、`GET /segments/{id}/video`：供可信内网AdminService查询和播放全部录像。
-- `/api/portal/auth/*`：平台初始化、登录、当前账号和退出登录。
+- `/api/portal/auth/*`：平台初始化、登录、当前账号、修改密码和退出登录。
 - `GET/PUT /api/portal/sources`：按登录客户返回视频源，并保存每路录像、保留天数、实时抽帧和抽帧频率。
-- `GET/POST /api/portal/customers`、`PUT /api/portal/source-owner`：仅平台管理员创建客户和分配视频源。
+- `GET/POST/PUT /api/portal/customers`、`PUT /api/portal/source-owner`：仅平台管理员创建、启停、重置客户账号和分配视频源。
 - `GET /api/portal/frames`、`GET /api/portal/frames/{id}/image`：按客户隔离的抽帧结果。
 - `GET /api/ai/algorithms`：AI能力目录；当前抽帧已启用，打架、安全帽和火灾为后续模块。
 - `GET /api/ai/jobs/stats`：AI任务状态和Worker心跳概览。
@@ -113,7 +113,10 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 - `GET /api/client-updates/latest`：客户端检查更新。
 - `POST /api/client-updates/upload`：上传更新 ZIP，必须提供 `X-Update-Key: <UPDATE_ADMIN_KEY>`。
 
-集中管理和H.264/H.265观看使用`adminService/Viewer.exe`，MediaService不再提供浏览器管理页。`22222`仅提供HTTP API。更新ZIP必须包含`latest.yml`、对应的`*-setup.exe`，并且版本、路径和SHA-512匹配。
+集中观看和H.264/H.265录像回放使用`adminService/Viewer.exe`；客户逐路服务配置使用
+`http://<AIService>:11111/customer/`，超级管理员使用AIService根页面。MediaService不再
+提供浏览器管理页，`22222`仅提供HTTP API。更新ZIP必须包含`latest.yml`、对应的
+`*-setup.exe`，并且版本、路径和SHA-512匹配。
 
 RTMP 发布不使用 token、API Key、数据库登记或回调校验。任何能够访问1935端口的设备都可以向 `live` 应用推流；品牌摄像头后台可填写形如 `rtmp://<服务器>:1935/live/<自定义流名>` 的地址。不同设备必须使用不同流名，避免互相覆盖。生产环境应限制1935端口来源IP，管理端口22222也应仅允许可信内网访问。
 

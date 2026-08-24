@@ -141,6 +141,44 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	p, ok := requirePrincipal(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "密码参数无效"})
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(p.User.PasswordHash), []byte(req.CurrentPassword)) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "当前密码错误"})
+		return
+	}
+	_, passwordHash, err := validatedCredentials(p.User.Username, req.NewPassword)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.User{}).Where("id = ?", p.User.ID).Update("password_hash", passwordHash).Error; err != nil {
+			return err
+		}
+		return tx.Where("user_id = ?", p.User.ID).Delete(&models.UserSession{}).Error
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "修改密码失败"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true, "login_required": true})
+}
+
 func (s *Server) issueSession(w http.ResponseWriter, user models.User) {
 	// Expired rows are no longer useful and can otherwise grow forever on a
 	// frequently used customer portal.

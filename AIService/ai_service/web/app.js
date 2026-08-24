@@ -57,10 +57,10 @@ function showAuth(setupRequired = false, message = '') {
     state.setupRequired = setupRequired
     $('#portalShell').classList.add('hidden')
     $('#authGate').classList.remove('hidden')
-    $('#authTitle').textContent = setupRequired ? '初始化平台管理员' : '客户登录'
+    $('#authTitle').textContent = setupRequired ? '初始化超级管理员' : '超级管理员登录'
     $('#authDescription').textContent = setupRequired
         ? '系统尚无账号，请先创建唯一的平台管理员。'
-        : '登录后只能看到并管理分配给当前客户的视频源。'
+        : '此入口仅供超级管理员管理客户账号、设备归属和平台服务。'
     $('#authSubmit').textContent = setupRequired ? '创建管理员并进入平台' : '登录'
     $('#authPassword').autocomplete = setupRequired ? 'new-password' : 'current-password'
     $('#authMessage').textContent = message
@@ -131,8 +131,39 @@ function renderCustomers() {
         return
     }
     list.innerHTML = state.customers.map((customer) => `
-        <article class="customer-item"><strong>${escapeHTML(customer.name)}</strong><span>登录账号 ${escapeHTML(customer.username || '-')} · 客户编号 ${Number(customer.id)} · ${customer.enabled ? '正常' : '已停用'}</span></article>`
+        <article class="customer-item">
+            <div><strong>${escapeHTML(customer.name)}</strong><span>登录账号 ${escapeHTML(customer.username || '-')} · 客户编号 ${Number(customer.id)} · ${customer.enabled ? '正常' : '已停用'}</span></div>
+            <div class="customer-actions">
+                <button class="secondary customer-reset" data-id="${Number(customer.id)}" type="button">重置密码</button>
+                <button class="secondary customer-toggle" data-id="${Number(customer.id)}" data-enabled="${customer.enabled ? '1' : '0'}" type="button">${customer.enabled ? '停用' : '启用'}</button>
+            </div>
+        </article>`
     ).join('')
+    $$('.customer-toggle').forEach((button) => button.addEventListener('click', toggleCustomer))
+    $$('.customer-reset').forEach((button) => button.addEventListener('click', resetCustomerPassword))
+}
+
+async function toggleCustomer(event) {
+    const button = event.currentTarget
+    const enabled = button.dataset.enabled !== '1'
+    button.disabled = true
+    try {
+        await request('/api/dashboard/customers', { method: 'PUT', body: JSON.stringify({ customer_id: Number(button.dataset.id), enabled }) })
+        toast(enabled ? '客户账号已启用' : '客户账号已停用，已有会话已退出')
+        await loadCustomers()
+    } catch (error) { toast(error.message, true); button.disabled = false }
+}
+
+async function resetCustomerPassword(event) {
+    const button = event.currentTarget
+    const password = window.prompt('请输入新的客户密码（8～72位）')
+    if (password === null) return
+    if (password.length < 8 || password.length > 72) return toast('密码长度必须为8～72位', true)
+    button.disabled = true
+    try {
+        await request('/api/dashboard/customers', { method: 'PUT', body: JSON.stringify({ customer_id: Number(button.dataset.id), new_password: password }) })
+        toast('客户密码已重置，已有会话已退出')
+    } catch (error) { toast(error.message, true) } finally { button.disabled = false }
 }
 
 function selectedLiveStream() {
@@ -365,6 +396,12 @@ async function createCustomer(event) {
 }
 
 async function enterPortal() {
+    if (state.me?.user?.role !== 'platform_admin') {
+        try { await request('/api/dashboard/auth/logout', { method: 'POST', body: '{}' }) } catch (_) { /* ignore */ }
+        state.me = null
+        showAuth(false, '此入口仅供超级管理员使用，请从客户移动平台登录。')
+        return
+    }
     showPortal()
     await loadCustomers()
     await loadSources()

@@ -23,8 +23,8 @@ MediaService内部API访问，不建立第二套数据库连接。JPEG写共享�
 ## 多客户控制面
 
 ```text
-平台管理员 -> 创建客户账号 -> 分配VideoSource
-客户账号 -> AIService HttpOnly会话 -> MediaService租户鉴权
+平台管理员 -> AIService根页面 -> 创建/启停客户账号 -> 分配VideoSource
+客户账号 -> /customer/或Capacitor/Tauri -> AIService客户角色校验 -> MediaService租户鉴权
                                       |-> 逐路录像规则
                                       |-> 逐路抽帧规则
                                       |-> 当前客户实时流和分析结果

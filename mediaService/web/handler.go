@@ -55,6 +55,7 @@ func (s *Server) Start(port int) {
 	mux.HandleFunc("/api/portal/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("/api/portal/auth/me", s.handleAuthMe)
 	mux.HandleFunc("/api/portal/auth/logout", s.handleAuthLogout)
+	mux.HandleFunc("/api/portal/auth/password", s.handleAuthPassword)
 	mux.HandleFunc("/api/portal/sources", s.handlePortalSources)
 	mux.HandleFunc("/api/portal/source-owner", s.handlePortalSourceOwner)
 	mux.HandleFunc("/api/portal/customers", s.handlePortalCustomers)

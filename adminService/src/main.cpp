@@ -42,11 +42,6 @@ enum ControlId {
     ID_STOP,
     ID_TABS,
     ID_LIST,
-    ID_STATS,
-    ID_SOURCE_ID,
-    ID_SOURCE_NAME,
-    ID_SOURCE_BRAND,
-    ID_CREATE_SOURCE,
 };
 
 struct Row {
@@ -59,7 +54,6 @@ struct ApiResult {
     bool ok = false;
     std::wstring error;
     Json primary;
-    std::wstring message;
 };
 
 HWND g_main = nullptr;
@@ -71,11 +65,6 @@ HWND g_tabs = nullptr;
 HWND g_list = nullptr;
 HWND g_video = nullptr;
 HWND g_status = nullptr;
-HWND g_stats = nullptr;
-HWND g_sourceId = nullptr;
-HWND g_sourceName = nullptr;
-HWND g_sourceBrand = nullptr;
-HWND g_createSource = nullptr;
 HFONT g_font = nullptr;
 int g_tab = 0;
 std::vector<Row> g_rows;
@@ -86,33 +75,6 @@ std::wstring utf8_to_wide(const std::string& value) {
     const int length = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
     std::wstring result(length, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), length);
-    return result;
-}
-
-std::string wide_to_utf8(const std::wstring& value) {
-    if (value.empty()) return {};
-    const int length = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0,
-                                           nullptr, nullptr);
-    std::string result(length, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), length,
-                        nullptr, nullptr);
-    return result;
-}
-
-std::string json_escape(const std::wstring& value) {
-    std::string utf8 = wide_to_utf8(value);
-    std::string result;
-    result.reserve(utf8.size() + 8);
-    for (char ch : utf8) {
-        switch (ch) {
-        case '"': result += "\\\""; break;
-        case '\\': result += "\\\\"; break;
-        case '\n': result += "\\n"; break;
-        case '\r': result += "\\r"; break;
-        case '\t': result += "\\t"; break;
-        default: result.push_back(ch); break;
-        }
-    }
     return result;
 }
 
@@ -206,9 +168,7 @@ void refresh_async() {
         auto result = std::make_unique<ApiResult>();
         result->tab = requestedTab;
         try {
-            const wchar_t* path = requestedTab == 0 ? L"/api/streams"
-                                  : requestedTab == 1 ? L"/api/segments"
-                                                      : L"/api/stats";
+            const wchar_t* path = requestedTab == 0 ? L"/api/streams" : L"/api/segments";
             HttpResponse response = WinHttpClient::request(L"GET", base + path);
             if (response.status < 200 || response.status >= 300) {
                 throw std::runtime_error("MediaService returned HTTP " + std::to_string(response.status));
@@ -252,14 +212,6 @@ void display_result(const ApiResult& result) {
                             base + L"/segments/" + std::to_wstring(id) + L"/video"});
         }
         show_rows({{L"开始时间", 170}, {L"时长", 80}, {L"大小", 90}, {L"视频源", 140}, {L"流名称", 240}}, std::move(rows));
-    } else {
-        const Json& stats = result.primary;
-        std::wostringstream text;
-        text << L"在线流：" << stats["online_streams"].integer() << L"\r\n"
-             << L"录像片段：" << stats["seg_count"].integer() << L"\r\n"
-             << L"录像占用：" << format_size(stats["total_size"].integer()) << L"\r\n"
-             << L"磁盘使用率：" << std::fixed << std::setprecision(1) << stats["disk_percent"].number() << L"%";
-        SetWindowTextW(g_stats, text.str().c_str());
     }
     set_status(L"已连接MediaService");
 }
@@ -283,64 +235,8 @@ void play_selected() {
     else set_status(L"无法启动原生视频解码器");
 }
 
-void create_direct_source_async() {
-    const std::wstring sourceId = window_text(g_sourceId);
-    const std::wstring displayName = window_text(g_sourceName);
-    const std::wstring brand = window_text(g_sourceBrand);
-    if (sourceId.empty() || displayName.empty()) {
-        set_status(L"请填写摄像头编号和显示名称");
-        return;
-    }
-    const std::wstring base = trim_url(window_text(g_server));
-    const std::string body = "{\"source_id\":\"" + json_escape(sourceId) +
-                             "\",\"display_name\":\"" + json_escape(displayName) +
-                             "\",\"brand\":\"" + json_escape(brand) + "\"}";
-    set_status(L"正在生成摄像头RTMP推流地址…");
-    std::thread([base, body] {
-        auto result = std::make_unique<ApiResult>();
-        result->tab = 2;
-        try {
-            auto response = WinHttpClient::request(L"POST", base + L"/api/video-sources", body);
-            if (response.status < 200 || response.status >= 300) {
-                throw std::runtime_error("create source failed, HTTP " + std::to_string(response.status));
-            }
-            Json data = Json::parse(response.body);
-            result->message = utf8_to_wide(data["rtmp_url"].string());
-            result->ok = !result->message.empty();
-            if (!result->ok) result->error = L"MediaService未返回RTMP地址";
-        } catch (const std::exception& error) {
-            result->error = utf8_to_wide(error.what());
-        }
-        PostMessageW(g_main, WM_API_RESULT, 2, reinterpret_cast<LPARAM>(result.release()));
-    }).detach();
-}
-
-void copy_text(const std::wstring& text) {
-    if (!OpenClipboard(g_main)) return;
-    EmptyClipboard();
-    const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (memory) {
-        void* target = GlobalLock(memory);
-        memcpy(target, text.c_str(), bytes);
-        GlobalUnlock(memory);
-        SetClipboardData(CF_UNICODETEXT, memory);
-    }
-    CloseClipboard();
-}
-
 void show_tab(int tab) {
     g_tab = tab;
-    const bool management = tab == 2;
-    ShowWindow(g_list, management ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_video, management ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_play, management ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_stop, management ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_stats, management ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_sourceId, management ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_sourceName, management ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_sourceBrand, management ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_createSource, management ? SW_SHOW : SW_HIDE);
     refresh_async();
 }
 
@@ -377,11 +273,6 @@ void layout(HWND window) {
     MoveWindow(g_list, 12, 86, listWidth, height - 122, TRUE);
     MoveWindow(g_video, listWidth + 22, 86, width - listWidth - 34, height - 122, TRUE);
     MoveWindow(g_status, 12, height - 28, width - 24, 20, TRUE);
-    MoveWindow(g_stats, 300, 110, width - 340, height - 170, TRUE);
-    MoveWindow(g_sourceId, 32, 110, 210, 27, TRUE);
-    MoveWindow(g_sourceName, 32, 147, 210, 27, TRUE);
-    MoveWindow(g_sourceBrand, 32, 184, 210, 27, TRUE);
-    MoveWindow(g_createSource, 32, 225, 180, 30, TRUE);
 }
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -401,8 +292,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
                                reinterpret_cast<HMENU>(ID_STOP), nullptr, nullptr);
         g_tabs = CreateWindowW(WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window,
                                reinterpret_cast<HMENU>(ID_TABS), nullptr, nullptr);
-        const wchar_t* tabs[] = {L"实时监控", L"录像列表", L"系统管理"};
-        for (int i = 0; i < 3; ++i) {
+        const wchar_t* tabs[] = {L"实时监控", L"录像回放"};
+        for (int i = 0; i < 2; ++i) {
             TCITEMW item{};
             item.mask = TCIF_TEXT;
             item.pszText = const_cast<wchar_t*>(tabs[i]);
@@ -416,22 +307,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
                                   0, 0, 0, 0, window, nullptr, nullptr, nullptr);
         g_status = CreateWindowW(L"STATIC", L"尚未连接", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window,
                                  nullptr, nullptr, nullptr);
-        g_stats = CreateWindowW(L"STATIC", L"", WS_CHILD | SS_LEFT, 0, 0, 0, 0, window,
-                                reinterpret_cast<HMENU>(ID_STATS), nullptr, nullptr);
-        g_sourceId = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
-                                     0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_SOURCE_ID), nullptr, nullptr);
-        g_sourceName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
-                                       0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_SOURCE_NAME), nullptr, nullptr);
-        g_sourceBrand = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
-                                        0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_SOURCE_BRAND), nullptr, nullptr);
-        SendMessageW(g_sourceId, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"摄像头编号，例如north-gate"));
-        SendMessageW(g_sourceName, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"显示名称，例如北门摄像头"));
-        SendMessageW(g_sourceBrand, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"品牌（可选）"));
-        g_createSource = CreateWindowW(L"BUTTON", L"生成并复制RTMP地址", WS_CHILD,
-                                       0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_CREATE_SOURCE), nullptr, nullptr);
-        for (HWND child : {g_server, g_refresh, g_play, g_stop, g_tabs, g_list, g_video, g_status,
-                           g_stats,
-                           g_sourceId, g_sourceName, g_sourceBrand, g_createSource}) {
+        for (HWND child : {g_server, g_refresh, g_play, g_stop, g_tabs, g_list, g_video, g_status}) {
             SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
         }
         wchar_t configured[1024]{};
@@ -450,7 +326,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         case ID_REFRESH: refresh_async(); return 0;
         case ID_PLAY: play_selected(); return 0;
         case ID_STOP: g_player.stop(); InvalidateRect(g_video, nullptr, FALSE); set_status(L"已停止播放"); return 0;
-        case ID_CREATE_SOURCE: create_direct_source_async(); return 0;
         }
         break;
     case WM_NOTIFY: {
@@ -467,14 +342,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
     }
     case WM_API_RESULT: {
         std::unique_ptr<ApiResult> result(reinterpret_cast<ApiResult*>(lParam));
-        if (wParam == 2) {
-            if (result->ok) {
-                copy_text(result->message);
-                set_status(L"RTMP地址已复制：" + result->message);
-            } else {
-                set_status(L"生成推流地址失败：" + result->error);
-            }
-        } else display_result(*result);
+        display_result(*result);
         return 0;
     }
     case WM_DESTROY:

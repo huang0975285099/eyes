@@ -1,0 +1,12 @@
+*
+!AIService/
+!AIService/ai_service/
+!AIService/ai_service/**
+!h5/
+!h5/package.json
+!h5/package-lock.json
+!h5/index.html
+!h5/quasar.config.js
+!h5/tsconfig.json
+!h5/src/
+!h5/src/**

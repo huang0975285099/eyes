@@ -1,0 +1,88 @@
+export interface AccountUser {
+  id: number
+  username: string
+  role: string
+  customer_id: number
+  customer_name: string
+}
+
+export interface VideoSource {
+  video_source_id: number
+  customer_id: number
+  stream_name: string
+  display_name: string
+  source_type: string
+  source_id: string
+  mac: string
+  brand: string
+  publish_mode: string
+  enabled: boolean
+  active: boolean
+  codec: string
+  width: number
+  height: number
+  playback_url?: string
+  recording_enabled: boolean
+  recording_retain_days: number
+  sampling_enabled: boolean
+  frames_per_minute: number
+  frame_count: number
+  last_captured_at?: string
+}
+
+const SERVER_KEY = 'eyes_customer_server'
+const TOKEN_KEY = 'eyes_customer_session'
+
+function normalizedServer(value: string): string {
+  return value.trim().replace(/\/+$/, '')
+}
+
+export function defaultServer(): string {
+  const stored = localStorage.getItem(SERVER_KEY)
+  if (stored) return stored
+  if (location.pathname.startsWith('/customer')) return location.origin
+  return 'http://10.0.20.219:11111'
+}
+
+export function saveServer(value: string): void {
+  localStorage.setItem(SERVER_KEY, normalizedServer(value))
+}
+
+export function clearSession(): void { localStorage.removeItem(TOKEN_KEY) }
+
+function isCrossOrigin(server: string): boolean {
+  try { return new URL(server).origin !== location.origin } catch { return true }
+}
+
+export async function api<T>(server: string, path: string, options: RequestInit = {}): Promise<T> {
+  const base = normalizedServer(server)
+  const token = localStorage.getItem(TOKEN_KEY) || ''
+  const crossOrigin = isCrossOrigin(base)
+  const response = await fetch(`${base}/api/customer${path}`, {
+    ...options,
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(crossOrigin ? { 'X-Eyes-Native-App': '1' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers || {}),
+    },
+  })
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>
+  if (!response.ok) {
+    const raw = String(payload.error || `请求失败 HTTP ${response.status}`)
+    const nested = raw.indexOf('{')
+    let message = raw
+    if (nested >= 0) {
+      try { message = String((JSON.parse(raw.slice(nested)) as { error?: string }).error || raw) } catch { /* keep raw */ }
+    }
+    const error = new Error(message) as Error & { status?: number }
+    error.status = response.status
+    throw error
+  }
+  if (typeof payload.session_token === 'string' && payload.session_token) {
+    localStorage.setItem(TOKEN_KEY, payload.session_token)
+    delete payload.session_token
+  }
+  return payload as T
+}
