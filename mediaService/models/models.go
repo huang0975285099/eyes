@@ -6,13 +6,30 @@ import (
 	"gorm.io/gorm"
 )
 
-// RecordingSetting 存储可在后台修改的全局录制参数。
-type RecordingSetting struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	RetainDays    int       `gorm:"not null;default:7" json:"retain_days"`
-	RecordEnabled bool      `gorm:"not null;default:true" json:"record_enabled"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+type Customer struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"size:100;not null;uniqueIndex" json:"name"`
+	Enabled   bool      `gorm:"not null;default:true;index" json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type User struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	CustomerID   uint      `gorm:"not null;default:0;index" json:"customer_id"`
+	Username     string    `gorm:"size:64;not null;uniqueIndex" json:"username"`
+	PasswordHash string    `gorm:"size:100;not null" json:"-"`
+	Role         string    `gorm:"size:30;not null;index" json:"role"`
+	Enabled      bool      `gorm:"not null;default:true;index" json:"enabled"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type UserSession struct {
+	TokenHash string    `gorm:"size:64;primaryKey" json:"-"`
+	UserID    uint      `gorm:"not null;index" json:"user_id"`
+	ExpiresAt time.Time `gorm:"not null;index" json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // VideoSource describes a logical video source belonging to a computer. It is
@@ -20,6 +37,7 @@ type RecordingSetting struct {
 // client and never enter MediaService.
 type VideoSource struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
+	CustomerID  uint      `gorm:"not null;default:0;index" json:"customer_id"`
 	MAC         string    `gorm:"size:50;not null;uniqueIndex:idx_video_source_identity" json:"mac"`
 	SourceType  string    `gorm:"size:30;not null;uniqueIndex:idx_video_source_identity" json:"source_type"`
 	SourceID    string    `gorm:"size:100;not null;uniqueIndex:idx_video_source_identity" json:"source_id"`
@@ -32,8 +50,20 @@ type VideoSource struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// VideoRecordingRule replaces the former global recording switch. Every
+// source can independently enable MP4 storage and choose its retention days.
+type VideoRecordingRule struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	VideoSourceID uint      `gorm:"not null;uniqueIndex" json:"video_source_id"`
+	Enabled       bool      `gorm:"not null;default:false;index" json:"enabled"`
+	RetainDays    int       `gorm:"not null;default:7" json:"retain_days"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 type RecordingSegment struct {
 	ID         uint   `gorm:"primaryKey" json:"id"`
+	CustomerID uint   `gorm:"not null;default:0;index" json:"customer_id"`
 	StreamName string `gorm:"size:64;not null;index" json:"stream_name"`
 	MAC        string `gorm:"size:64;index" json:"mac"`
 	SourceType string `gorm:"size:30;not null;default:screen;index" json:"source_type"`
@@ -55,6 +85,7 @@ type RecordingSegment struct {
 
 type RecordingFrame struct {
 	ID         uint           `gorm:"primaryKey" json:"id"`
+	CustomerID uint           `gorm:"not null;default:0;index" json:"customer_id"`
 	StreamName string         `gorm:"size:64;not null;index" json:"stream_name"`
 	MAC        string         `gorm:"size:64;index" json:"mac"`
 	SourceType string         `gorm:"size:30;not null;default:screen;index" json:"source_type"`
@@ -136,6 +167,7 @@ type AIWorker struct {
 // detectors. The frame_sampler module creates RecordingFrame rows instead.
 type AIEvent struct {
 	ID            uint       `gorm:"primaryKey" json:"id"`
+	CustomerID    uint       `gorm:"not null;default:0;index" json:"customer_id"`
 	EventID       string     `gorm:"size:64;not null;uniqueIndex" json:"event_id"`
 	VideoSourceID uint       `gorm:"index" json:"video_source_id"`
 	StreamName    string     `gorm:"size:64;not null;index" json:"stream_name"`

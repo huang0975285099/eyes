@@ -7,7 +7,9 @@ from typing import Any
 
 
 class MediaAPIError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int = 502) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class MediaAPIClient:
@@ -97,28 +99,46 @@ class MediaAPIClient:
             raise MediaAPIError("MediaService returned a non-object JSON value")
         return value
 
-    def get_json(self, path: str) -> dict[str, Any] | list[Any]:
-        return self.request_json("GET", path)
+    def get_json(
+        self, path: str, headers: dict[str, str] | None = None
+    ) -> dict[str, Any] | list[Any]:
+        return self.request_json("GET", path, headers=headers)
 
-    def put_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        value = self.request_json("PUT", path, payload)
+    def put_json(
+        self, path: str, payload: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        value = self.request_json("PUT", path, payload, headers)
         if not isinstance(value, dict):
             raise MediaAPIError("MediaService returned a non-object JSON value")
         return value
 
-    def get_bytes(self, path: str) -> tuple[bytes, str]:
-        raw, content_type = self._request("GET", path, None)
+    def post_json(
+        self, path: str, payload: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        value = self.request_json("POST", path, payload, headers)
+        if not isinstance(value, dict):
+            raise MediaAPIError("MediaService returned a non-object JSON value")
+        return value
+
+    def get_bytes(
+        self, path: str, headers: dict[str, str] | None = None
+    ) -> tuple[bytes, str]:
+        raw, content_type = self._request("GET", path, None, headers)
         return raw, content_type
 
     def request_json(
-        self, method: str, path: str, payload: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any] | list[Any]:
         body = (
             json.dumps(payload, ensure_ascii=False).encode("utf-8")
             if payload is not None
             else None
         )
-        raw, _ = self._request(method, path, body)
+        raw, _ = self._request(method, path, body, headers)
         if not raw:
             return {}
         try:
@@ -130,13 +150,19 @@ class MediaAPIClient:
         return value
 
     def _request(
-        self, method: str, path: str, body: bytes | None
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        extra_headers: dict[str, str] | None = None,
     ) -> tuple[bytes, str]:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        headers.update(extra_headers or {})
         request = urllib.request.Request(
             self._base_url + path,
             data=body,
             method=method,
-            headers={"Content-Type": "application/json; charset=utf-8"},
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
@@ -145,7 +171,7 @@ class MediaAPIClient:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise MediaAPIError(
-                f"MediaService returned HTTP {exc.code}: {detail}"
+                f"MediaService returned HTTP {exc.code}: {detail}", exc.code
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise MediaAPIError(f"MediaService request failed: {exc}") from exc

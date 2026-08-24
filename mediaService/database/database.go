@@ -70,8 +70,11 @@ func Init(cfg *config.Config) error {
 	sqlDB.SetConnMaxIdleTime(10 * time.Minute)
 
 	if err := db.AutoMigrate(
+		&models.Customer{},
+		&models.User{},
+		&models.UserSession{},
 		&models.VideoSource{},
-		&models.RecordingSetting{},
+		&models.VideoRecordingRule{},
 		&models.RecordingSegment{},
 		&models.RecordingFrame{},
 		&models.AIAlgorithm{},
@@ -82,6 +85,15 @@ func Init(cfg *config.Config) error {
 	); err != nil {
 		_ = sqlDB.Close()
 		return fmt.Errorf("迁移 eyes 数据库表结构失败: %w", err)
+	}
+	// The product no longer has a global recording switch. This is a clean
+	// replacement rather than a compatibility layer, so remove its obsolete
+	// table after the per-source rule table has been created successfully.
+	if db.Migrator().HasTable("recording_settings") {
+		if err := db.Migrator().DropTable("recording_settings"); err != nil {
+			_ = sqlDB.Close()
+			return fmt.Errorf("删除旧全局录像配置表失败: %w", err)
+		}
 	}
 
 	DB = db

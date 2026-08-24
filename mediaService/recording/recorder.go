@@ -43,7 +43,6 @@ type Config struct {
 	// artifacts. Frame extraction itself does not run in MediaService.
 	FrameRetainDays int
 	FFmpegPath      string
-	RecordEnabled   bool
 }
 
 type srsStream struct {
@@ -70,6 +69,7 @@ type Recorder struct {
 
 type RecorderManager struct {
 	mu             sync.Mutex
+	syncMu         sync.Mutex // prevent an older poll from overriding a freshly saved rule
 	wg             sync.WaitGroup
 	active         map[string]*Recorder
 	cfg            Config
@@ -137,48 +137,38 @@ func (m *RecorderManager) Wait() {
 	m.wg.Wait()
 }
 
-// UpdateRetainDays 热更新录像保留天数，立即生效无需重启。
-func (m *RecorderManager) UpdateRetainDays(days int) {
-	if days <= 0 {
-		return
-	}
-	m.mu.Lock()
-	m.cfg.RetainDays = days
-	m.mu.Unlock()
-	log.Printf("[recording] 录像保留天数已更新为 %d 天", days)
-}
-
-// UpdateRecordEnabled 热更新全局录制开关。
-func (m *RecorderManager) UpdateRecordEnabled(enabled bool) {
-	m.mu.Lock()
-	m.cfg.RecordEnabled = enabled
-	if !enabled {
-		for name, rec := range m.active {
-			m.stopRecording(name, rec)
-		}
-	}
-	m.mu.Unlock()
-	if enabled {
-		log.Println("[recording] 全局录制已开启")
-		go m.syncRecordings()
-	} else {
-		log.Println("[recording] 全局录制已关闭")
-	}
-}
+// RefreshRules immediately applies per-source recording changes made in the
+// customer portal instead of waiting for the regular SRS polling interval.
+func (m *RecorderManager) RefreshRules() { go m.syncRecordings() }
 
 func (m *RecorderManager) syncRecordings() {
-	streams := m.fetchActiveStreams()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.cfg.RecordEnabled {
-		for name, rec := range m.active {
-			m.stopRecording(name, rec)
-		}
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
+	streams, ok := m.fetchActiveStreams()
+	if !ok {
 		return
 	}
+	var enabledNames []string
+	if err := database.DB.Table("video_sources").
+		Select("video_sources.stream_name").
+		Joins("JOIN video_recording_rules ON video_recording_rules.video_source_id = video_sources.id").
+		Where("video_sources.enabled = ? AND video_recording_rules.enabled = ?", true, true).
+		Pluck("video_sources.stream_name", &enabledNames).Error; err != nil {
+		log.Printf("[recording] 查询按视频源录像规则失败: %v", err)
+		return
+	}
+	enabledSet := make(map[string]struct{}, len(enabledNames))
+	for _, name := range enabledNames {
+		enabledSet[name] = struct{}{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	activeSet := make(map[string]struct{}, len(streams))
 	for _, s := range streams {
+		if _, enabled := enabledSet[s.Name]; !enabled {
+			continue
+		}
 		activeSet[s.Name] = struct{}{}
 		if _, ok := m.active[s.Name]; !ok {
 			m.startRecording(s.Name)
@@ -192,23 +182,27 @@ func (m *RecorderManager) syncRecordings() {
 	}
 }
 
-func (m *RecorderManager) fetchActiveStreams() []srsStream {
+func (m *RecorderManager) fetchActiveStreams() ([]srsStream, bool) {
 	url := strings.TrimRight(m.cfg.SRSApiBase, "/") + "/api/v1/streams/?count=" + strconv.Itoa(srsStreamsQueryCount)
 	resp, err := m.client.Get(url)
 	if err != nil {
 		log.Printf("[recording] 查询 SRS 流列表失败: %v", err)
-		return nil
+		return nil, false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[recording] SRS 流列表返回 HTTP %d", resp.StatusCode)
+		return nil, false
+	}
 
 	var body srsStreamsResp
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		log.Printf("[recording] 解析 SRS 流列表失败: %v", err)
-		return nil
+		return nil, false
 	}
 	if body.Code != 0 {
 		log.Printf("[recording] SRS 返回非零 code: %d", body.Code)
-		return nil
+		return nil, false
 	}
 
 	seen := make(map[string]struct{}, len(body.Streams))
@@ -224,7 +218,7 @@ func (m *RecorderManager) fetchActiveStreams() []srsStream {
 		seen[s.Name] = struct{}{}
 		result = append(result, s)
 	}
-	return result
+	return result, true
 }
 
 // buildRTMPURL 根据 RTMPHost 配置构建 RTMP URL。
@@ -339,7 +333,7 @@ func (m *RecorderManager) indexExistingFiles() {
 			continue
 		}
 		streamDir := filepath.Join(root, streamName)
-		mac, sourceType, sourceID := lookupVideoSource(streamName)
+		customerID, mac, sourceType, sourceID := lookupVideoSource(streamName)
 
 		dayEntries, err := os.ReadDir(streamDir)
 		if err != nil {
@@ -351,12 +345,12 @@ func (m *RecorderManager) indexExistingFiles() {
 				continue
 			}
 			dayDir := filepath.Join(streamDir, dayEntry.Name())
-			m.indexDayDir(streamName, mac, sourceType, sourceID, dayDir, dayEntry.Name())
+			m.indexDayDir(customerID, streamName, mac, sourceType, sourceID, dayDir, dayEntry.Name())
 		}
 	}
 }
 
-func (m *RecorderManager) indexDayDir(streamName, mac, sourceType, sourceID, dayDir, dayStr string) {
+func (m *RecorderManager) indexDayDir(customerID uint, streamName, mac, sourceType, sourceID, dayDir, dayStr string) {
 	entries, err := os.ReadDir(dayDir)
 	if err != nil {
 		return
@@ -428,6 +422,7 @@ func (m *RecorderManager) indexDayDir(streamName, mac, sourceType, sourceID, day
 		endedAt := startedAt.Add(time.Duration(actualDuration * float64(time.Second)))
 
 		seg := models.RecordingSegment{
+			CustomerID: customerID,
 			StreamName: streamName,
 			MAC:        mac,
 			SourceType: sourceType,
@@ -448,14 +443,38 @@ func (m *RecorderManager) indexDayDir(streamName, mac, sourceType, sourceID, day
 }
 
 func (m *RecorderManager) cleanupExpired() {
-	m.mu.Lock()
-	retainDays := m.cfg.RetainDays
-	m.mu.Unlock()
-	mainCutoff := time.Now().AddDate(0, 0, -retainDays)
-	segWhere := "storage = ? AND started_at < ?"
-	segArgs := []interface{}{"local", mainCutoff}
+	now := time.Now()
+	type retainRule struct {
+		StreamName string `gorm:"column:stream_name"`
+		RetainDays int    `gorm:"column:retain_days"`
+	}
+	var rules []retainRule
+	database.DB.Table("video_sources").
+		Select("video_sources.stream_name, video_recording_rules.retain_days").
+		Joins("JOIN video_recording_rules ON video_recording_rules.video_source_id = video_sources.id").
+		Find(&rules)
+	retention := make(map[string]int, len(rules))
+	for _, rule := range rules {
+		if rule.RetainDays <= 0 {
+			rule.RetainDays = m.cfg.RetainDays
+		}
+		retention[rule.StreamName] = rule.RetainDays
+	}
+
+	// Every source has an independent retention period. Query candidates older
+	// than one day, then apply the source-specific cutoff in memory.
+	var candidates []models.RecordingSegment
+	database.DB.Unscoped().Where("storage = ? AND started_at < ?", "local", now.AddDate(0, 0, -1)).Find(&candidates)
 	var localSegments []models.RecordingSegment
-	database.DB.Unscoped().Where(segWhere, segArgs...).Find(&localSegments)
+	for _, segment := range candidates {
+		days := retention[segment.StreamName]
+		if days <= 0 {
+			days = m.cfg.RetainDays
+		}
+		if segment.StartedAt.Before(now.AddDate(0, 0, -days)) {
+			localSegments = append(localSegments, segment)
+		}
+	}
 	for _, seg := range localSegments {
 		if seg.FilePath != "" {
 			if err := os.Remove(seg.FilePath); err != nil && !os.IsNotExist(err) {
@@ -465,7 +484,7 @@ func (m *RecorderManager) cleanupExpired() {
 	}
 
 	// 清理过期的损坏文件：损坏文件不入库，上面基于 DB 的清理覆盖不到，会永久占盘
-	m.cleanupCorruptedFiles(mainCutoff)
+	m.cleanupCorruptedFiles(now.AddDate(0, 0, -m.cfg.RetainDays))
 
 	// MediaService owns metadata and storage lifecycle for analysis
 	// artifacts even though AIService owns the extraction process.
@@ -494,9 +513,15 @@ func (m *RecorderManager) cleanupExpired() {
 		log.Printf("[analysis] 清理历史实时抽帧任务 %d 条", jobResult.RowsAffected)
 	}
 
-	result := database.DB.Unscoped().Where(segWhere, segArgs...).Delete(&models.RecordingSegment{})
-	if result.RowsAffected > 0 {
-		log.Printf("[recording] 清理过期片段 %d 条", result.RowsAffected)
+	segmentIDs := make([]uint, 0, len(localSegments))
+	for _, segment := range localSegments {
+		segmentIDs = append(segmentIDs, segment.ID)
+	}
+	if len(segmentIDs) > 0 {
+		result := database.DB.Unscoped().Where("id IN ?", segmentIDs).Delete(&models.RecordingSegment{})
+		if result.RowsAffected > 0 {
+			log.Printf("[recording] 清理过期片段 %d 条", result.RowsAffected)
+		}
 	}
 
 	m.cleanupEmptyDirs()
@@ -625,19 +650,19 @@ func (m *RecorderManager) cleanupEmptyDirs() {
 	}
 }
 
-func lookupVideoSource(streamName string) (mac, sourceType, sourceID string) {
+func lookupVideoSource(streamName string) (customerID uint, mac, sourceType, sourceID string) {
 	var source models.VideoSource
 	if err := database.DB.Where("stream_name = ?", streamName).First(&source).Error; err == nil {
-		return source.MAC, source.SourceType, source.SourceID
+		return source.CustomerID, source.MAC, source.SourceType, source.SourceID
 	}
 	mac, sourceType, ok := streamsource.Parse(streamName)
 	if !ok {
-		return streamName, "unknown", ""
+		return 0, streamName, "unknown", ""
 	}
 	if sourceType == streamsource.TypeScreen {
 		sourceID = "desktop"
 	}
-	return mac, sourceType, sourceID
+	return 0, mac, sourceType, sourceID
 }
 
 func parseSegmentTimes(filename, dayStr string, segDuration int) (startedAt, endedAt time.Time, duration float64) {

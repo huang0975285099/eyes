@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -12,6 +13,7 @@ from .state import ServiceState
 
 _WEB_ROOT = Path(__file__).with_name("web")
 _FRAME_IMAGE = re.compile(r"^/api/dashboard/frames/(\d+)/image$")
+_SESSION_COOKIE = "eyes_session"
 _MPEGTS_CDN = "https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"
 
 
@@ -22,17 +24,6 @@ def start_health_server(
     srs_public_base: str = "",
 ) -> ThreadingHTTPServer:
     configured_srs_base = srs_public_base.strip().rstrip("/")
-    if configured_srs_base:
-        parsed_srs_base = urlsplit(configured_srs_base)
-        if (
-            parsed_srs_base.scheme not in {"http", "https"}
-            or not parsed_srs_base.netloc
-            or parsed_srs_base.username
-            or parsed_srs_base.password
-            or parsed_srs_base.query
-            or parsed_srs_base.fragment
-        ):
-            raise ValueError("AI_SRS_PUBLIC_BASE must be a public HTTP(S) base URL")
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -42,23 +33,20 @@ def start_health_server(
                 self._json(200 if payload["ok"] else 503, payload)
                 return
             if parsed.path == "/api/modules":
-                self._json(
-                    200,
-                    {
-                        "worker_id": state.worker_id,
-                        "capabilities": state.capabilities,
-                    },
-                )
+                self._json(200, {"worker_id": state.worker_id, "capabilities": state.capabilities})
                 return
-            if parsed.path == "/api/dashboard/rules":
-                self._proxy_json("/api/ai/rules")
-                return
-            if parsed.path == "/api/dashboard/frames":
+            get_routes = {
+                "/api/dashboard/auth/status": ("/api/portal/auth/status", False),
+                "/api/dashboard/auth/me": ("/api/portal/auth/me", True),
+                "/api/dashboard/sources": ("/api/portal/sources", True),
+                "/api/dashboard/customers": ("/api/portal/customers", True),
+                "/api/dashboard/jobs": ("/api/portal/jobs", True),
+                "/api/dashboard/frames": ("/api/portal/frames", True),
+            }
+            if parsed.path in get_routes:
+                target, authenticated = get_routes[parsed.path]
                 suffix = f"?{parsed.query}" if parsed.query else ""
-                self._proxy_json("/api/frames" + suffix)
-                return
-            if parsed.path == "/api/dashboard/jobs":
-                self._proxy_json("/api/ai/jobs/stats")
+                self._proxy_json("GET", target + suffix, authenticated=authenticated)
                 return
             if parsed.path == "/api/dashboard/streams":
                 self._streams()
@@ -81,39 +69,76 @@ def start_health_server(
                 return
             self._json(404, {"error": "not found"})
 
-        def do_PUT(self) -> None:  # noqa: N802
-            if urlsplit(self.path).path != "/api/dashboard/rules":
+        def do_POST(self) -> None:  # noqa: N802
+            path = urlsplit(self.path).path
+            routes = {
+                "/api/dashboard/auth/setup": ("/api/portal/auth/setup", False),
+                "/api/dashboard/auth/login": ("/api/portal/auth/login", False),
+                "/api/dashboard/auth/logout": ("/api/portal/auth/logout", True),
+                "/api/dashboard/customers": ("/api/portal/customers", True),
+            }
+            if path not in routes:
                 self._json(404, {"error": "not found"})
                 return
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if length <= 0 or length > 256 * 1024:
-                    raise ValueError("请求内容大小无效")
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
-                if not isinstance(payload, dict):
-                    raise ValueError("请求必须是JSON对象")
-                result = client.put_json("/api/ai/rules", payload)
-            except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                self._json(400, {"error": str(exc)})
+            target, authenticated = routes[path]
+            payload = self._read_json()
+            if payload is None:
                 return
+            try:
+                result = client.post_json(
+                    target, payload, self._auth_headers() if authenticated else None
+                )
             except MediaAPIError as exc:
-                self._json(502, {"error": str(exc)})
+                self._media_error(exc)
+                return
+            if path in {"/api/dashboard/auth/setup", "/api/dashboard/auth/login"}:
+                token = str(result.pop("session_token", ""))
+                if not token:
+                    self._json(502, {"error": "登录服务未返回会话"})
+                    return
+                self._session_cookie(token)
+            elif path == "/api/dashboard/auth/logout":
+                self._session_cookie("", clear=True)
+            self._json(200, result)
+
+        def do_PUT(self) -> None:  # noqa: N802
+            path = urlsplit(self.path).path
+            routes = {
+                "/api/dashboard/sources": "/api/portal/sources",
+                "/api/dashboard/source-owner": "/api/portal/source-owner",
+            }
+            if path not in routes:
+                self._json(404, {"error": "not found"})
+                return
+            payload = self._read_json()
+            if payload is None:
+                return
+            try:
+                result = client.put_json(routes[path], payload, self._auth_headers())
+            except MediaAPIError as exc:
+                self._media_error(exc)
                 return
             self._json(200, result)
 
-        def _proxy_json(self, path: str) -> None:
+        def _proxy_json(self, method: str, path: str, authenticated: bool) -> None:
             try:
-                value = client.get_json(path)
+                headers = self._auth_headers() if authenticated else None
+                if method == "GET":
+                    value = client.get_json(path, headers)
+                else:
+                    raise ValueError("unsupported proxy method")
             except MediaAPIError as exc:
-                self._json(502, {"error": str(exc)})
+                self._media_error(exc)
                 return
             self._json(200, value)
 
         def _proxy_frame(self, frame_id: str) -> None:
             try:
-                body, content_type = client.get_bytes(f"/frames/{frame_id}/image")
+                body, content_type = client.get_bytes(
+                    f"/api/portal/frames/{frame_id}/image", self._auth_headers()
+                )
             except MediaAPIError as exc:
-                self._json(502, {"error": str(exc)})
+                self._media_error(exc)
                 return
             self.send_response(200)
             self.send_header("Content-Type", content_type or "image/jpeg")
@@ -125,18 +150,18 @@ def start_health_server(
 
         def _streams(self) -> None:
             try:
-                value = client.get_json("/api/streams")
+                value = client.get_json("/api/portal/sources", self._auth_headers())
             except MediaAPIError as exc:
-                self._json(502, {"error": str(exc)})
+                self._media_error(exc)
                 return
-            if not isinstance(value, list):
-                self._json(502, {"error": "MediaService返回的在线流数据无效"})
+            rows = value.get("sources", []) if isinstance(value, dict) else []
+            if not isinstance(rows, list):
+                self._json(502, {"error": "MediaService返回的视频源数据无效"})
                 return
-
             playback_base = self._srs_base()
             streams: list[dict[str, object]] = []
-            for item in value:
-                if not isinstance(item, dict):
+            for item in rows:
+                if not isinstance(item, dict) or not item.get("active"):
                     continue
                 stream_name = str(item.get("stream_name", "")).strip()
                 if not stream_name:
@@ -165,6 +190,36 @@ def start_health_server(
                 scheme = "http"
             return f"{scheme}://{public_host}:8080"
 
+        def _auth_headers(self) -> dict[str, str]:
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            morsel = cookie.get(_SESSION_COOKIE)
+            token = morsel.value if morsel is not None else ""
+            return {"Authorization": f"Bearer {token}"}
+
+        def _read_json(self) -> dict[str, object] | None:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 256 * 1024:
+                    raise ValueError("请求内容大小无效")
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("请求必须是JSON对象")
+                return payload
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self._json(400, {"error": str(exc)})
+                return None
+
+        def _session_cookie(self, token: str, clear: bool = False) -> None:
+            max_age = 0 if clear else 7 * 24 * 60 * 60
+            value = "" if clear else token
+            self._pending_cookie = (
+                f"{_SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
+            )
+
+        def _media_error(self, exc: MediaAPIError) -> None:
+            status = exc.status_code if 400 <= exc.status_code < 500 else 502
+            self._json(status, {"error": str(exc)})
+
         def _static(self, name: str, content_type: str) -> None:
             try:
                 body = (_WEB_ROOT / name).read_bytes()
@@ -179,8 +234,7 @@ def start_health_server(
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; img-src 'self' data:; "
-                "style-src 'self'; "
-                "script-src 'self' https://cdn.jsdelivr.net; "
+                "style-src 'self'; script-src 'self' https://cdn.jsdelivr.net; "
                 f"connect-src 'self' {self._srs_origin()}",
             )
             self.end_headers()
@@ -190,7 +244,6 @@ def start_health_server(
             if (_WEB_ROOT / "mpegts.min.js").is_file():
                 self._static("mpegts.min.js", "application/javascript; charset=utf-8")
                 return
-            # 正式Docker镜像会在构建时保存固定版本。源码直接运行时回退到同一固定版本CDN。
             self.send_response(302)
             self.send_header("Location", _MPEGTS_CDN)
             self.send_header("Cache-Control", "no-store")
@@ -213,6 +266,10 @@ def start_health_server(
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            pending_cookie = getattr(self, "_pending_cookie", "")
+            if pending_cookie:
+                self.send_header("Set-Cookie", pending_cookie)
+                self._pending_cookie = ""
             self.end_headers()
             self.wfile.write(body)
 

@@ -42,9 +42,6 @@ enum ControlId {
     ID_STOP,
     ID_TABS,
     ID_LIST,
-    ID_RECORD_ENABLED,
-    ID_RETAIN_DAYS,
-    ID_SAVE_SETTINGS,
     ID_STATS,
     ID_SOURCE_ID,
     ID_SOURCE_NAME,
@@ -62,7 +59,6 @@ struct ApiResult {
     bool ok = false;
     std::wstring error;
     Json primary;
-    Json secondary;
     std::wstring message;
 };
 
@@ -75,10 +71,6 @@ HWND g_tabs = nullptr;
 HWND g_list = nullptr;
 HWND g_video = nullptr;
 HWND g_status = nullptr;
-HWND g_recordEnabled = nullptr;
-HWND g_retainLabel = nullptr;
-HWND g_retainDays = nullptr;
-HWND g_saveSettings = nullptr;
 HWND g_stats = nullptr;
 HWND g_sourceId = nullptr;
 HWND g_sourceName = nullptr;
@@ -222,10 +214,6 @@ void refresh_async() {
                 throw std::runtime_error("MediaService returned HTTP " + std::to_string(response.status));
             }
             result->primary = Json::parse(response.body);
-            if (requestedTab == 2) {
-                auto settings = WinHttpClient::request(L"GET", base + L"/api/recording-settings");
-                if (settings.status >= 200 && settings.status < 300) result->secondary = Json::parse(settings.body);
-            }
             result->ok = true;
         } catch (const std::exception& error) {
             result->error = utf8_to_wide(error.what());
@@ -266,9 +254,6 @@ void display_result(const ApiResult& result) {
         show_rows({{L"开始时间", 170}, {L"时长", 80}, {L"大小", 90}, {L"视频源", 140}, {L"流名称", 240}}, std::move(rows));
     } else {
         const Json& stats = result.primary;
-        const Json& settings = result.secondary;
-        SendMessageW(g_recordEnabled, BM_SETCHECK, settings["record_enabled"].boolean() ? BST_CHECKED : BST_UNCHECKED, 0);
-        SetWindowTextW(g_retainDays, std::to_wstring(settings["retain_days"].integer(2)).c_str());
         std::wostringstream text;
         text << L"在线流：" << stats["online_streams"].integer() << L"\r\n"
              << L"录像片段：" << stats["seg_count"].integer() << L"\r\n"
@@ -296,31 +281,6 @@ void play_selected() {
     }
     if (g_player.start(g_video, ffmpeg_path(), url)) set_status(L"正在连接：" + url);
     else set_status(L"无法启动原生视频解码器");
-}
-
-void save_settings_async() {
-    const bool enabled = SendMessageW(g_recordEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const int days = _wtoi(window_text(g_retainDays).c_str());
-    if (days <= 0) {
-        set_status(L"录像保留天数必须大于0");
-        return;
-    }
-    const std::wstring base = trim_url(window_text(g_server));
-    const std::string body = std::string("{\"record_enabled\":") + (enabled ? "true" : "false") +
-                             ",\"retain_days\":" + std::to_string(days) + "}";
-    set_status(L"正在保存录制设置…");
-    std::thread([base, body] {
-        auto result = std::make_unique<ApiResult>();
-        result->tab = 2;
-        try {
-            auto response = WinHttpClient::request(L"PUT", base + L"/api/recording-settings", body);
-            if (response.status < 200 || response.status >= 300) throw std::runtime_error("save failed");
-            result->ok = true;
-        } catch (const std::exception& error) {
-            result->error = utf8_to_wide(error.what());
-        }
-        PostMessageW(g_main, WM_API_RESULT, 1, reinterpret_cast<LPARAM>(result.release()));
-    }).detach();
 }
 
 void create_direct_source_async() {
@@ -376,10 +336,6 @@ void show_tab(int tab) {
     ShowWindow(g_video, management ? SW_HIDE : SW_SHOW);
     ShowWindow(g_play, management ? SW_HIDE : SW_SHOW);
     ShowWindow(g_stop, management ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_recordEnabled, management ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_retainLabel, management ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_retainDays, management ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_saveSettings, management ? SW_SHOW : SW_HIDE);
     ShowWindow(g_stats, management ? SW_SHOW : SW_HIDE);
     ShowWindow(g_sourceId, management ? SW_SHOW : SW_HIDE);
     ShowWindow(g_sourceName, management ? SW_SHOW : SW_HIDE);
@@ -421,14 +377,11 @@ void layout(HWND window) {
     MoveWindow(g_list, 12, 86, listWidth, height - 122, TRUE);
     MoveWindow(g_video, listWidth + 22, 86, width - listWidth - 34, height - 122, TRUE);
     MoveWindow(g_status, 12, height - 28, width - 24, 20, TRUE);
-    MoveWindow(g_recordEnabled, 32, 110, 180, 28, TRUE);
-    MoveWindow(g_retainDays, 160, 155, 90, 26, TRUE);
-    MoveWindow(g_saveSettings, 32, 200, 120, 30, TRUE);
     MoveWindow(g_stats, 300, 110, width - 340, height - 170, TRUE);
-    MoveWindow(g_sourceId, 32, 270, 210, 27, TRUE);
-    MoveWindow(g_sourceName, 32, 307, 210, 27, TRUE);
-    MoveWindow(g_sourceBrand, 32, 344, 210, 27, TRUE);
-    MoveWindow(g_createSource, 32, 385, 180, 30, TRUE);
+    MoveWindow(g_sourceId, 32, 110, 210, 27, TRUE);
+    MoveWindow(g_sourceName, 32, 147, 210, 27, TRUE);
+    MoveWindow(g_sourceBrand, 32, 184, 210, 27, TRUE);
+    MoveWindow(g_createSource, 32, 225, 180, 30, TRUE);
 }
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -448,7 +401,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
                                reinterpret_cast<HMENU>(ID_STOP), nullptr, nullptr);
         g_tabs = CreateWindowW(WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window,
                                reinterpret_cast<HMENU>(ID_TABS), nullptr, nullptr);
-        const wchar_t* tabs[] = {L"实时监控", L"录像列表", L"录制管理"};
+        const wchar_t* tabs[] = {L"实时监控", L"录像列表", L"系统管理"};
         for (int i = 0; i < 3; ++i) {
             TCITEMW item{};
             item.mask = TCIF_TEXT;
@@ -463,14 +416,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
                                   0, 0, 0, 0, window, nullptr, nullptr, nullptr);
         g_status = CreateWindowW(L"STATIC", L"尚未连接", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window,
                                  nullptr, nullptr, nullptr);
-        g_recordEnabled = CreateWindowW(L"BUTTON", L"开启服务器录像", WS_CHILD | BS_AUTOCHECKBOX,
-                                        0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_RECORD_ENABLED), nullptr, nullptr);
-        g_retainLabel = CreateWindowW(L"STATIC", L"录像保留天数：", WS_CHILD, 32, 158, 125, 24,
-                                      window, nullptr, nullptr, nullptr);
-        g_retainDays = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"2", WS_CHILD | ES_NUMBER,
-                                       0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_RETAIN_DAYS), nullptr, nullptr);
-        g_saveSettings = CreateWindowW(L"BUTTON", L"保存设置", WS_CHILD, 0, 0, 0, 0, window,
-                                       reinterpret_cast<HMENU>(ID_SAVE_SETTINGS), nullptr, nullptr);
         g_stats = CreateWindowW(L"STATIC", L"", WS_CHILD | SS_LEFT, 0, 0, 0, 0, window,
                                 reinterpret_cast<HMENU>(ID_STATS), nullptr, nullptr);
         g_sourceId = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
@@ -485,7 +430,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         g_createSource = CreateWindowW(L"BUTTON", L"生成并复制RTMP地址", WS_CHILD,
                                        0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_CREATE_SOURCE), nullptr, nullptr);
         for (HWND child : {g_server, g_refresh, g_play, g_stop, g_tabs, g_list, g_video, g_status,
-                           g_recordEnabled, g_retainLabel, g_retainDays, g_saveSettings, g_stats,
+                           g_stats,
                            g_sourceId, g_sourceName, g_sourceBrand, g_createSource}) {
             SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
         }
@@ -505,7 +450,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         case ID_REFRESH: refresh_async(); return 0;
         case ID_PLAY: play_selected(); return 0;
         case ID_STOP: g_player.stop(); InvalidateRect(g_video, nullptr, FALSE); set_status(L"已停止播放"); return 0;
-        case ID_SAVE_SETTINGS: save_settings_async(); return 0;
         case ID_CREATE_SOURCE: create_direct_source_async(); return 0;
         }
         break;
@@ -523,18 +467,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
     }
     case WM_API_RESULT: {
         std::unique_ptr<ApiResult> result(reinterpret_cast<ApiResult*>(lParam));
-        if (wParam == 1 && result->ok) {
-            set_status(L"录制设置已保存并立即生效");
-            refresh_async();
-        } else if (wParam == 2) {
+        if (wParam == 2) {
             if (result->ok) {
                 copy_text(result->message);
                 set_status(L"RTMP地址已复制：" + result->message);
             } else {
                 set_status(L"生成推流地址失败：" + result->error);
             }
-        } else if (wParam == 1) {
-            set_status(L"保存录制设置失败：" + result->error);
         } else display_result(*result);
         return 0;
     }

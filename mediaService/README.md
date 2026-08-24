@@ -26,7 +26,8 @@ cp .env.example .env
 客户端不进行设备登记，也不上传主机名、IP、CPU、内存、磁盘序列号或当前用户。品牌摄像头无需登记，可直接配置 RTMP 地址。请通过防火墙限制 `22222` 管理端口和
 `1935` 推流端口的访问范围。
 
-录像默认分段 600 秒；Compose 当前默认录像保留 2 天、截图保留 30 天。管理页保存的录制开关和录像保留天数会写入数据库，并覆盖环境变量、立即生效。每台电脑可以登记多个独立视频源，当前内置来源类型为 `screen`、`usb_camera` 和 `ip_camera`；符合小写字母、数字和下划线命名规则的新适配器类型也可直接登记，无需再次修改服务端流名协议。
+录像默认分段600秒。录像不再使用全局开关：客户在AIService后台对自己名下的每个视频源分别设置是否录像及保留1～3650天，规则写入`video_recording_rules`并立即生效。`RECORDING_RETAIN_DAYS`只作为尚未保存规则时的默认天数；截图保留时间仍由服务端环境变量控制。每台电脑可以包含多个独立视频源，当前内置来源类型为`screen`、`usb_camera`和`ip_camera`。
+服务启动迁移会删除已废弃的`recording_settings`旧表，不读取或继承旧的全局录像配置。
 
 ## Docker 部署
 
@@ -85,7 +86,7 @@ INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
 SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `22222`、`11111`、`8080` 的来源，并通过 HTTPS 反向代理保护管理接口。
 
 MediaService按规则和SRS在线状态创建持久化实时抽帧任务；AIService领取任务后直接
-拉取SRS实时流、执行FFmpeg并回报图片。这个过程不读取录像片段，也不检查全局录像开关。
+拉取SRS实时流、执行FFmpeg并回报图片。这个过程不读取录像片段，也不依赖该视频源的录像开关。
 两个容器只为持久化AI图片而共享`recordings`卷。
 
 两台目标服务器没有GPU不影响当前`frame_sampler`：抽帧由CPU上的FFmpeg完成。
@@ -101,10 +102,12 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 - `GET /api/streams`、`GET /api/stats`：实时流和系统统计。
 - `GET /api/video-sources`：查看已登记的视频源、在线状态及品牌摄像头直推地址。
 - `POST /api/video-sources`：登记一个独立品牌摄像头并生成永久 RTMP 地址，请求字段为 `source_id`、`display_name` 和可选的 `brand`。
-- `GET /api/segments`、`GET /api/frames`：录像片段和截图列表，支持 `mac`、`source_type` 过滤；媒体分别通过 `/segments/{id}/video`、`/frames/{id}/image` 获取。
-- `GET/PUT /api/recording-settings`：查看或修改录制开关、录像保留天数。
+- `GET /api/segments`、`GET /segments/{id}/video`：供可信内网AdminService查询和播放全部录像。
+- `/api/portal/auth/*`：平台初始化、登录、当前账号和退出登录。
+- `GET/PUT /api/portal/sources`：按登录客户返回视频源，并保存每路录像、保留天数、实时抽帧和抽帧频率。
+- `GET/POST /api/portal/customers`、`PUT /api/portal/source-owner`：仅平台管理员创建客户和分配视频源。
+- `GET /api/portal/frames`、`GET /api/portal/frames/{id}/image`：按客户隔离的抽帧结果。
 - `GET /api/ai/algorithms`：AI能力目录；当前抽帧已启用，打架、安全帽和火灾为后续模块。
-- `GET/PUT /api/ai/rules`：读取和保存按视频源启用的AI规则及抽帧频率。
 - `GET /api/ai/jobs/stats`：AI任务状态和Worker心跳概览。
 - `/api/internal/ai/*`：AIService任务领取、结果上报和心跳接口，仅供Docker内部网络或可信局域网调用。
 - `GET /api/client-updates/latest`：客户端检查更新。
@@ -135,7 +138,8 @@ docker compose exec -T mysql mysql -uroot -pall_seeing_eyes \
   eyes < eyes-backup.sql
 ```
 
-数据库表由服务启动时自动创建或更新，包括视频源、录像、抽帧以及
-`ai_algorithms`、`video_analysis_rules`、`ai_jobs`、`ai_workers`、`ai_events` 等AI平台表。
+数据库表由服务启动时自动创建或更新，包括`customers`、`users`、`user_sessions`、
+`video_sources`、`video_recording_rules`、录像、抽帧以及`ai_algorithms`、
+`video_analysis_rules`、`ai_jobs`、`ai_workers`、`ai_events`等平台表。
 备份时还应保留宿主机 `RECORDING_DIR` 中的录像和AI证据文件；数据库记录和文件需要
 同时恢复才能正常播放。

@@ -6,7 +6,6 @@ import (
 	"media-service/analysis"
 	"media-service/config"
 	"media-service/database"
-	"media-service/models"
 	"media-service/recording"
 	"media-service/web"
 	"os"
@@ -35,17 +34,6 @@ func main() {
 		log.Fatalf("[main] 初始化AI分析任务失败: %v", err)
 	}
 
-	// 启动后尝试从 DB 加载保留天数，覆盖环境变量
-	var recordingSetting models.RecordingSetting
-	recordEnabled := true
-	if err := database.DB.First(&recordingSetting).Error; err == nil {
-		cfg.Recording.RetainDays = recordingSetting.RetainDays
-		recordEnabled = recordingSetting.RecordEnabled
-		log.Printf("[main] 从 DB 加载保留天数: %d 天（覆盖环境变量）", recordingSetting.RetainDays)
-	} else {
-		log.Printf("[main] DB 中无本节点保留天数配置，使用环境变量: %d 天", cfg.Recording.RetainDays)
-	}
-
 	mgr := recording.NewRecorderManager(recording.Config{
 		SRSApiBase:      cfg.Recording.SRSApiBase,
 		RTMPHost:        cfg.Recording.RTMPHost,
@@ -55,7 +43,6 @@ func main() {
 		RetainDays:      cfg.Recording.RetainDays,
 		FrameRetainDays: cfg.Recording.FrameRetainDays,
 		FFmpegPath:      cfg.Recording.FFmpegPath,
-		RecordEnabled:   recordEnabled,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -72,9 +59,7 @@ func main() {
 			cfg.Recording.AIStreamBaseURL,
 			cfg.Recording.OutputDir,
 			cfg.Recording.RetainDays,
-			recordEnabled,
-			mgr.UpdateRetainDays, // 热更新回调
-			mgr.UpdateRecordEnabled,
+			mgr.RefreshRules,
 		).Start(cfg.Recording.WebPort)
 	}
 

@@ -3,91 +3,65 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>千里眼 AI分析平台</title>
+        <title>千里眼客户服务平台</title>
         <link rel="stylesheet" href="/app.css" />
     </head>
     <body>
-        <main class="shell">
+        <section id="authGate" class="auth-gate">
+            <form id="authForm" class="auth-card">
+                <p class="eyebrow">ALL-SEEING EYES</p>
+                <h1 id="authTitle">客户登录</h1>
+                <p id="authDescription" class="subtitle">登录后管理自己的摄像头、电脑和视频服务。</p>
+                <label>登录账号<input id="authUsername" autocomplete="username" required /></label>
+                <label>登录密码<input id="authPassword" type="password" autocomplete="current-password" minlength="8" maxlength="72" required /></label>
+                <button id="authSubmit" class="primary" type="submit">登录</button>
+                <p id="authMessage" class="message" role="alert"></p>
+            </form>
+        </section>
+
+        <main id="portalShell" class="shell hidden">
             <header class="topbar">
                 <div>
-                    <p class="eyebrow">ALL-SEEING EYES · AI SERVICE</p>
-                    <h1>AI分析平台</h1>
-                    <p class="subtitle">为指定视频源配置分析服务，并集中查看算法结果。</p>
+                    <p class="eyebrow">ALL-SEEING EYES · CUSTOMER PORTAL</p>
+                    <h1>视频与AI服务平台</h1>
+                    <p class="subtitle">按视频源独立配置录像存储、保留时间和实时抽帧。</p>
                 </div>
-                <div id="workerBadge" class="worker-badge pending">
-                    <span class="status-dot"></span>
-                    <span>正在连接AI Worker</span>
+                <div class="account-panel">
+                    <div><strong id="accountName">-</strong><span id="accountRole">-</span></div>
+                    <button id="logoutButton" class="ghost">退出登录</button>
                 </div>
             </header>
 
             <section class="metrics" aria-label="运行概览">
-                <article>
-                    <span>已启用视频源</span>
-                    <strong id="enabledMetric">-</strong>
-                </article>
-                <article>
-                    <span>累计抽帧结果</span>
-                    <strong id="frameMetric">-</strong>
-                </article>
-                <article>
-                    <span>执行中任务</span>
-                    <strong id="runningMetric">-</strong>
-                </article>
-                <article>
-                    <span>失败任务</span>
-                    <strong id="failedMetric">-</strong>
-                </article>
+                <article><span>在线视频源</span><strong id="onlineMetric">-</strong></article>
+                <article><span>开启录像</span><strong id="recordingMetric">-</strong></article>
+                <article><span>开启实时抽帧</span><strong id="samplingMetric">-</strong></article>
+                <article><span>累计抽帧结果</span><strong id="frameMetric">-</strong></article>
             </section>
 
-            <nav class="tabs" aria-label="AI平台页面">
+            <nav class="tabs" aria-label="平台页面">
                 <button class="tab active" data-page="configuration">服务配置</button>
                 <button class="tab" data-page="live">实时监控</button>
-                <button class="tab" data-page="results">分析结果</button>
+                <button class="tab" data-page="results">抽帧结果</button>
+                <button id="customersTab" class="tab hidden" data-page="customers">客户管理</button>
             </nav>
 
             <section id="configurationPage" class="page active">
                 <div class="section-heading">
                     <div>
-                        <p class="section-kicker">FRAME SAMPLER</p>
-                        <h2>实时流抽帧服务</h2>
-                        <p>直接从SRS在线流按固定频率抽取JPEG图片，不读取录像文件。</p>
-                        <p class="timing-note">录像存储和实时抽帧相互独立；即使关闭录像，已启用视频源仍会继续抽帧。</p>
+                        <p class="section-kicker">PER-SOURCE SERVICES</p>
+                        <h2>视频源服务配置</h2>
+                        <p>每台摄像头或电脑分别决定是否录像、保留多少天以及是否实时抽帧。</p>
                     </div>
-                    <div class="frequency-box">
-                        <label for="framesPerMinute">每分钟抽帧数</label>
-                        <div>
-                            <input id="framesPerMinute" type="number" min="1" max="60" value="2" />
-                            <span>帧 / 分钟</span>
-                        </div>
-                    </div>
+                    <button id="saveConfigsButton" class="primary">保存全部修改</button>
                 </div>
-
-                <div class="source-toolbar">
-                    <div>
-                        <strong>选择需要启用的摄像头或视频源</strong>
-                        <small>保存后按频率为在线的视频源创建任务；离线期间不创建空任务。</small>
-                    </div>
-                    <div class="toolbar-actions">
-                        <button id="selectOnlineButton" class="ghost">选择在线源</button>
-                        <button id="saveRulesButton" class="primary">保存并应用</button>
-                    </div>
-                </div>
-
-                <div class="table-wrap">
+                <div class="table-wrap service-table-wrap">
                     <table>
-                        <thead>
-                            <tr>
-                                <th class="check-column"><input id="selectAll" type="checkbox" aria-label="选择全部视频源" /></th>
-                                <th>视频源</th>
-                                <th>类型</th>
-                                <th>推流状态</th>
-                                <th>已有结果</th>
-                                <th>最后结果</th>
-                            </tr>
-                        </thead>
-                        <tbody id="sourceRows">
-                            <tr><td colspan="6" class="empty">正在读取视频源…</td></tr>
-                        </tbody>
+                        <thead><tr>
+                            <th>视频源</th><th id="customerHeader" class="admin-only hidden">所属客户</th><th>状态</th>
+                            <th>录像存储</th><th>录像保留</th><th>实时抽帧</th><th>抽帧频率</th><th>结果</th>
+                        </tr></thead>
+                        <tbody id="sourceRows"><tr><td colspan="8" class="empty">正在读取视频源…</td></tr></tbody>
                     </table>
                 </div>
                 <p id="saveMessage" class="message" role="status"></p>
@@ -98,65 +72,52 @@
                     <div>
                         <p class="section-kicker">LIVE MONITOR</p>
                         <h2>实时视频</h2>
-                        <p>通过SRS HTTP-FLV低延迟播放H.264/H.265在线流。</p>
+                        <p>只显示当前客户名下、正在推流的视频源。</p>
                     </div>
                     <div class="live-toolbar">
                         <label for="liveSource">在线视频源</label>
-                        <select id="liveSource" aria-label="选择在线视频源">
-                            <option value="">正在读取在线流…</option>
-                        </select>
+                        <select id="liveSource" aria-label="选择在线视频源"><option value="">正在读取在线流…</option></select>
                         <button id="refreshStreamsButton" class="ghost">刷新</button>
                     </div>
                 </div>
-
                 <div class="live-stage">
                     <video id="liveVideo" controls muted playsinline preload="none"></video>
-                    <div id="livePlaceholder" class="live-placeholder">
-                        <strong>选择在线视频源开始播放</strong>
-                        <span>H.265需要Chrome和显卡支持HEVC硬件解码</span>
-                    </div>
+                    <div id="livePlaceholder" class="live-placeholder"><strong>选择在线视频源开始播放</strong><span>H.265需要浏览器和显卡支持HEVC硬件解码</span></div>
                 </div>
                 <div class="live-footer">
-                    <div>
-                        <span id="liveCodec" class="stream-chip">编码 -</span>
-                        <span id="liveResolution" class="stream-chip">分辨率 -</span>
-                    </div>
+                    <div><span id="liveCodec" class="stream-chip">编码 -</span><span id="liveResolution" class="stream-chip">分辨率 -</span></div>
                     <p id="liveStatus" class="message" role="status">等待选择视频源</p>
                 </div>
             </section>
 
             <section id="resultsPage" class="page">
                 <div class="section-heading results-heading">
-                    <div>
-                        <p class="section-kicker">ANALYSIS RESULTS</p>
-                        <h2>抽帧结果</h2>
-                        <p>按视频源和日期筛选，查看AIService实际生成的图片。</p>
-                    </div>
+                    <div><p class="section-kicker">LIVE FRAME RESULTS</p><h2>实时抽帧结果</h2><p>这里只显示当前账号所属视频源的结果。</p></div>
                     <div class="filters">
-                        <label>
-                            视频源
-                            <select id="resultSource"><option value="">全部视频源</option></select>
-                        </label>
-                        <label>
-                            日期
-                            <input id="resultDate" type="date" />
-                        </label>
+                        <label>视频源<select id="resultSource"><option value="">全部视频源</option></select></label>
+                        <label>日期<input id="resultDate" type="date" /></label>
                         <button id="refreshResultsButton" class="primary">查询结果</button>
                     </div>
                 </div>
-                <div id="resultGrid" class="result-grid">
-                    <p class="empty">正在读取抽帧结果…</p>
+                <div id="resultGrid" class="result-grid"><p class="empty">请选择查询条件。</p></div>
+            </section>
+
+            <section id="customersPage" class="page">
+                <div class="section-heading">
+                    <div><p class="section-kicker">TENANT MANAGEMENT</p><h2>客户账号管理</h2><p>创建客户账号后，在服务配置页把摄像头或电脑分配给客户。</p></div>
                 </div>
+                <form id="customerForm" class="customer-form">
+                    <label>客户名称<input id="customerName" maxlength="100" required /></label>
+                    <label>登录账号<input id="customerUsername" minlength="3" maxlength="64" required /></label>
+                    <label>初始密码<input id="customerPassword" type="password" minlength="8" maxlength="72" required /></label>
+                    <button class="primary" type="submit">创建客户</button>
+                </form>
+                <div id="customerList" class="customer-list"></div>
             </section>
         </main>
 
         <div id="toast" class="toast" role="status"></div>
-        <script
-            src="/mpegts.min.js"
-            integrity="sha384-lUyV7hLicoTyv6bvfYqrGlhj26lFlaig1x0rD5/ntvHk+jiOX2oUTbNjrVE4cUXQ"
-            crossorigin="anonymous"
-            defer
-        ></script>
+        <script src="/mpegts.min.js" integrity="sha384-lUyV7hLicoTyv6bvfYqrGlhj26lFlaig1x0rD5/ntvHk+jiOX2oUTbNjrVE4cUXQ" crossorigin="anonymous" defer></script>
         <script src="/app.js" defer></script>
     </body>
 </html>

@@ -327,7 +327,7 @@ func (s *Server) handleAIJobReport(w http.ResponseWriter, r *http.Request) {
 				frame := models.RecordingFrame{}
 				result := tx.Where("file_path = ?", artifact.FilePath).
 					Assign(models.RecordingFrame{
-						StreamName: source.StreamName, MAC: source.MAC, SourceType: source.SourceType,
+						CustomerID: source.CustomerID, StreamName: source.StreamName, MAC: source.MAC, SourceType: source.SourceType,
 						SourceID: source.SourceID, SegmentID: 0, FilePath: artifact.FilePath,
 						FileSize: fi.Size(), CapturedAt: artifact.CapturedAt, FrameIndex: artifact.FrameIndex,
 					}).FirstOrCreate(&frame)

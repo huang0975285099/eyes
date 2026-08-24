@@ -9,6 +9,8 @@
 - 所有设备的视频先统一进入SRS流媒体服务。
 - MediaService负责视频源、录像和AI配置管理。
 - AIService负责实际的视频分析，不负责设备品牌适配和录像控制。
+- 平台管理员创建客户并分配视频源，客户登录后只能管理和查看自己的数据。
+- 录像、抽帧及后续AI服务都按视频源独立配置，不使用全局录像开关。
 - 同一路视频在一个AI节点只拉取、解码一次，再交给多个算法模块使用。
 - 打架、安全帽、火灾以及后续算法使用统一的配置、任务、事件和证据模型。
 
@@ -75,7 +77,8 @@ MediaService是系统控制中心，负责：
 - 为视频源生成唯一、稳定的`stream_name`。
 - 提供品牌摄像头RTMP推流地址。
 - 查询SRS中的在线流。
-- 控制全局录像开启或关闭。
+- 保存客户、登录账号、视频源归属和会话信息。
+- 按视频源控制录像开关和保留天数。
 - 从SRS拉流并按时间分段录制MP4。
 - 管理录像和图片索引、保留天数及过期清理。
 - 保存每个视频源启用哪些AI算法及算法参数。
@@ -91,6 +94,8 @@ MediaService不负责执行深度学习模型。录像完整性检查仍可使�
 
 AIService是统一的AI分析平台，负责：
 
+- 提供客户登录后台，并通过MediaService鉴权接口读取当前客户的数据。
+- 让客户对自己名下的视频源分别配置录像、抽帧和后续AI算法。
 - 向MediaService报告Worker心跳和可用算法能力。
 - 从MediaService获取需要执行的任务和视频源AI配置。
 - 从SRS自动拉取需要分析的在线流。
@@ -105,7 +110,7 @@ AIService不负责：
 
 - 为摄像头生成推流地址。
 - 保存设备品牌账号或摄像头后台配置。
-- 控制MediaService是否录制完整录像。
+- 直接执行完整录像；录像仍由MediaService执行，AIService只提供配置界面。
 - 直接修改MediaService的MySQL数据。
 
 ### 3.4 AdminService
@@ -117,7 +122,6 @@ AdminService是Windows原生C++集中管理和观看客户端，负责：
 - 通过MediaService HTTP API查询在线流和录像。
 - 使用FFmpeg原生解码H.264/H.265，不依赖浏览器或厂商Web插件。
 - 同一时间选择并观看一路实时画面或录像。
-- 开启/关闭MediaService录像，修改录像保留天数。
 - 为品牌摄像头生成固定RTMP推流地址。
 
 MediaService不再嵌入浏览器管理页，`mediaService/web` Go包仅保留HTTP API实现。
@@ -156,38 +160,50 @@ RTMP入口不使用token、API Key、数据库登记或回调校验。电脑APP�
 
 不建议让每一种AI算法直接连接不同品牌摄像头，否则账号、协议、重连和品牌兼容问题会进入所有AI模块。
 
-## 5. 录像控制逻辑
+## 5. 多客户与逐路录像控制
 
-录像开关仍然由MediaService控制：
+系统不再使用统一录像开关。平台管理员首次进入`AIService:11111`时创建平台账号，之后
+创建客户账号并把摄像头或电脑视频源分配给客户。客户登录后只能看到自己名下的视频源、
+实时画面和抽帧结果，并可逐路设置：
 
-```http
-GET /api/recording-settings
-PUT /api/recording-settings
+- 是否保存完整录像。
+- 录像保留天数。
+- 是否启用实时抽帧。
+- 每分钟抽帧数量。
+- 后续每一种AI算法及其参数。
+
+```text
+平台管理员 -> 创建客户 -> 分配VideoSource
+客户登录 -> 只读取customer_id匹配的视频源 -> 保存逐路服务规则
 ```
 
-### 开启录像
+录像配置保存在`video_recording_rules`。MediaService仍是实际录像执行者，AIService只是
+安全的客户配置入口。视频源归属变化时，系统自动关闭该视频源原有录像和AI规则，由新
+客户重新确认，避免继承上一个客户的服务设置。
+
+### 某一路开启录像
 
 ```text
 设备推流 -> SRS ─┬-> MediaService录制MP4
                   └-> AIService按规则从实时流抽帧
 ```
 
-### 关闭录像
+### 某一路关闭录像
 
 ```text
 设备继续推流 -> SRS继续接收
                   ├-> 实时观看正常
-                  ├-> MediaService停止生成新录像
+                  ├-> MediaService只停止该路的新录像
                   └-> AIService实时抽帧和其他AI分析继续运行
 ```
 
-`frame_sampler`直接读取SRS实时流，不读取已存储MP4。录像存储和实时抽帧是两项独立功能，关闭录像不会停止抽帧。
+`frame_sampler`直接读取SRS实时流，不读取已存储MP4。录像存储和实时抽帧是两项独立功能，关闭某一路录像不会停止该路抽帧，也不会影响其他视频源。
 
 未来打架、安全帽、火灾等实时算法直接分析SRS实时流，不受录像开关影响。是否保存异常短视频由AI规则单独控制。
 
 ## 6. AI算法配置逻辑
 
-业务人员在`AIService:11111` Web后台选择具体摄像头并配置需要启用的算法。规则通过MediaService API保存到共享的`eyes`数据库，AIService读取并执行。
+客户管理员在`AIService:11111` Web后台从自己名下的视频源中选择具体摄像头并配置需要启用的算法。平台管理员可以管理全部客户和视频源。规则通过MediaService API保存到共享的`eyes`数据库，AIService读取并执行。
 
 示例：
 
@@ -313,7 +329,10 @@ metadata_json
 当前系统已经建立以下通用模型：
 
 - `video_sources`：所有视频来源的统一登记信息。
-- `recording_settings`：全局录像开关和录像保留时间。
+- `customers`：客户租户。
+- `users`：平台管理员和客户管理员账号，密码只保存bcrypt哈希。
+- `user_sessions`：后台登录会话，只保存令牌摘要和过期时间。
+- `video_recording_rules`：每个视频源的录像开关和保留时间。
 - `recording_segments`：录像片段索引。
 - `recording_frames`：人工查看图片索引。
 - `ai_algorithms`：AI算法能力目录。
@@ -331,7 +350,11 @@ metadata_json
 | 接口 | 用途 |
 |---|---|
 | `GET /api/streams` | 查询当前在线流 |
-| `GET/PUT /api/recording-settings` | 查询或控制录像 |
+| `/api/portal/auth/*` | 平台初始化、登录、当前账号和退出 |
+| `GET/PUT /api/portal/sources` | 按客户查询并配置逐路录像和抽帧 |
+| `GET/POST /api/portal/customers` | 平台管理员查询或创建客户 |
+| `PUT /api/portal/source-owner` | 平台管理员分配视频源 |
+| `GET /api/portal/frames` | 按客户查询实时抽帧结果 |
 | `GET /api/ai/algorithms` | 查询AI算法目录 |
 | `GET /api/ai/jobs/stats` | 查询AI任务和Worker状态 |
 | `POST /api/internal/ai/jobs/claim` | AIService领取离线任务 |
@@ -342,13 +365,14 @@ metadata_json
 
 | 接口 | 用途 |
 |---|---|
-| `GET/PUT /api/video-sources/{id}/ai-rules` | 管理某个视频源的AI规则 |
 | `GET /api/internal/ai/realtime-config` | AIService同步在线流和实时算法配置 |
 | `POST /api/internal/ai/events` | AIService上报实时异常事件 |
 | `GET /api/ai/events` | 后台查询异常事件 |
 | `PUT /api/ai/events/{id}` | 人工确认或标记误报 |
 
-内部AI写接口不使用Token时，必须通过Docker内部网络、防火墙、反向代理访问规则或可信局域网限制访问，不能直接向公网开放。
+客户后台使用账号、密码和7天会话进行鉴权。RTMP推流入口按既定要求不使用Token/API Key；
+内部AI写接口也依赖Docker内部网络。生产环境必须通过防火墙、VPN或反向代理限制
+1935、22222和11111端口，不能把内部接口直接暴露给不可信网络。
 
 ## 12. 故障隔离
 
@@ -360,10 +384,10 @@ metadata_json
 - 已生成的实时抽帧任务保留在MySQL，AIService恢复后继续处理。
 - 新的实时抽帧和实时AI检测暂停。
 
-### MediaService关闭录像
+### 客户关闭某一路录像
 
 - 推流和观看继续。
-- 不再生成完整录像。
+- 该路不再生成完整录像，其他开启录像的视频源不受影响。
 - 实时流抽帧和其他实时AI检测继续。
 
 ### 单个AI算法异常
@@ -430,7 +454,9 @@ Worker通过心跳报告：
 
 - 多种视频来源的统一登记和稳定`stream_name`。
 - 电脑桌面、USB摄像头、网络摄像头和品牌摄像头直推接入基础。
-- MediaService全局录像开关。
+- 客户、平台管理员、密码登录和客户数据隔离。
+- 平台管理员创建客户并分配视频源。
+- 每个视频源独立录像开关和录像保留天数。
 - 独立AIService项目和模块注册机制。
 - AIService提供直接拉取SRS视频的实时流`frame_sampler`模块。
 - 持久化AI任务、任务租约、超时恢复、失败重试和结果幂等入库。
@@ -440,14 +466,13 @@ Worker通过心跳报告：
 - 电脑桌面使用显示器原始分辨率100%采集，保持H.264编码。
 - RTSP/NVR摄像头的H.264/H.265原码直通转推。
 - SRS升级到6.x，离线部署包使用`ossrs/srs:6`。
-- C++ AdminService支持实时H.264/H.265播放、录像和录制设置，不再承担AI结果查看。
-- AIService提供Web后台，用于按视频源配置抽帧服务和查看抽帧结果。
+- C++ AdminService支持实时H.264/H.265播放和录像回放，不再承担服务配置和AI结果查看。
+- AIService提供客户Web后台，用于逐路配置录像和抽帧、实时查看及查询抽帧结果。
 - AIService与MediaService共用现有`eyes`数据库；数据库连接和表结构仍由MediaService统一管理。
 
 尚未完成：
 
 - 打架、安全帽、火灾等后续算法的专用配置项和结果页面。
-- AIService实时在线流同步。
 - 每路视频只解码一次的StreamSession和环形缓存。
 - 打架、安全帽和火灾的实际模型及推理代码。
 - 实时事件上报、告警证据和人工确认页面。
@@ -455,7 +480,7 @@ Worker通过心跳报告：
 
 ## 15. 推荐后续实施顺序
 
-1. 实现每个视频源的AI规则管理接口和后台页面。
+1. 实现后续AI算法的逐路专用参数和结果页面。
 2. 实现AIService实时配置同步和StreamSession。
 3. 实现共享解码、图片采样和时序环形缓存。
 4. 先使用模拟算法跑通事件、截图、短视频和人工确认流程。

@@ -13,6 +13,7 @@
 }
 
 * { box-sizing: border-box; }
+.hidden { display: none !important; }
 body {
     margin: 0;
     min-width: 960px;
@@ -24,6 +25,11 @@ body {
 }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
+.auth-gate { min-height: 100vh; display: grid; place-items: center; padding: 30px; }
+.auth-card { width: min(430px, 100%); padding: 34px; border: 1px solid var(--line); border-radius: 18px; background: rgba(13, 26, 36, .96); box-shadow: 0 28px 80px rgba(0,0,0,.35); }
+.auth-card h1 { margin-bottom: 8px; }
+.auth-card label { display: grid; gap: 7px; margin-top: 18px; color: var(--muted); font-size: 12px; }
+.auth-card button { width: 100%; margin-top: 22px; }
 .shell { max-width: 1440px; margin: 0 auto; padding: 38px 42px 56px; }
 .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 32px; }
 .eyebrow, .section-kicker {
@@ -47,6 +53,9 @@ h1 { margin: 7px 0 4px; font-size: 34px; letter-spacing: -.04em; }
 .worker-badge.online .status-dot { background: var(--cyan); box-shadow: 0 0 12px rgba(75, 214, 193, .8); }
 .worker-badge.error { color: #ffadb4; border-color: rgba(255, 123, 134, .35); }
 .worker-badge.error .status-dot { background: var(--danger); }
+.account-panel { display: flex; align-items: center; gap: 16px; padding: 9px 10px 9px 16px; border: 1px solid var(--line); border-radius: 12px; background: rgba(13, 26, 36, .84); }
+.account-panel strong, .account-panel span { display: block; }
+.account-panel span { margin-top: 3px; color: var(--muted); font-size: 11px; }
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 30px 0 22px; }
 .metrics article {
     padding: 18px 20px; border: 1px solid var(--line); border-radius: 13px;
@@ -84,6 +93,8 @@ button.primary:disabled { opacity: .55; cursor: wait; }
 button.ghost { border: 1px solid #315063; color: #b9cad5; background: #0d202b; }
 button.ghost:hover { border-color: #547589; }
 .table-wrap { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; }
+.service-table-wrap { margin-top: 22px; overflow-x: auto; }
+.service-table-wrap table { min-width: 1060px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { padding: 11px 13px; color: #77909f; text-align: left; font-size: 11px; letter-spacing: .04em; background: #091720; }
 td { padding: 13px; border-top: 1px solid #1b303d; color: #c8d7df; }
@@ -91,6 +102,8 @@ tbody tr:hover { background: rgba(34, 67, 82, .18); }
 .check-column { width: 48px; text-align: center; }
 .source-name { display: block; color: #f1f7fb; font-weight: 700; }
 .source-meta { display: block; max-width: 360px; margin-top: 4px; color: #6f8795; font-family: Consolas, monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.compact-input { width: 76px; }
+.customer-select { min-width: 150px; max-width: 210px; }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; font-size: 11px; }
 .pill.online { color: #75e2cf; background: rgba(75, 214, 193, .11); }
 .pill.offline { color: #9badb8; background: rgba(129, 151, 164, .1); }
@@ -128,6 +141,11 @@ tbody tr:hover { background: rgba(34, 67, 82, .18); }
 .result-info strong { display: block; margin-bottom: 5px; font-size: 13px; }
 .result-info span { display: block; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .empty { padding: 36px 16px; color: var(--muted); text-align: center; }
+.customer-form { display: grid; grid-template-columns: 1.2fr 1fr 1fr auto; gap: 12px; align-items: end; margin-top: 24px; }
+.customer-form label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; }
+.customer-list { display: grid; gap: 10px; margin-top: 22px; }
+.customer-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: #091720; }
+.customer-item span { color: var(--muted); font-size: 12px; }
 .toast { position: fixed; right: 24px; bottom: 24px; max-width: 420px; padding: 12px 16px; border-radius: 9px; color: #dff9f3; background: #17453d; box-shadow: 0 16px 40px rgba(0,0,0,.35); opacity: 0; transform: translateY(8px); pointer-events: none; transition: .2s ease; }
 .toast.show { opacity: 1; transform: translateY(0); }
 .toast.error { color: #ffe8ea; background: #5a2830; }
