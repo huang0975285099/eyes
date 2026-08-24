@@ -24,7 +24,7 @@ Function configPageCreate
 
     ${NSD_CreateLabel} 0 10u 100% 12u "MediaService 地址："
     Pop $0
-    ${NSD_CreateText} 0 26u 100% 14u "http://112.18.238.6:22222"
+    ${NSD_CreateText} 0 26u 100% 14u "http://10.0.20.219:22222"
     Pop $MediaInput
 
     ${NSD_CreateLabel} 0 54u 100% 12u "客户端 API Key："

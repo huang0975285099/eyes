@@ -9,7 +9,7 @@ import { setupScreenHelper } from './screen-helper-main'
 import { getPreferredNICAsync } from './network-util'
 
 const DEFAULT_CONFIG = {
-    mediaServiceURL: 'http://112.18.238.6:22222',
+    mediaServiceURL: 'http://10.0.20.219:22222',
     apiKey: 'Yx7pK4vN9mQ2tR8wF6cH3sD5jL1aZ0eB',
     userName: '',
     videoSources: [{ id: 'desktop', type: 'screen', displayName: '电脑桌面', enabled: true }]
@@ -43,6 +43,7 @@ function showMainWindow() {
 function migrateLegacyMediaServiceURL(value) {
     try {
         const url = new URL(String(value || ''))
+        if (url.hostname === '112.18.238.6') url.hostname = '10.0.20.219'
         if (url.port === '52350') url.port = '22222'
         return url.toString().replace(/\/$/, '')
     } catch {
