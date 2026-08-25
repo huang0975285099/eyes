@@ -70,7 +70,8 @@ function playbackURL() {
         const parsed = new URL(rtmpURL)
         const streamName = parsed.pathname.split('/').filter(Boolean).pop()
         if (!streamName) return ''
-        return `http://${parsed.hostname}:8080/live/${streamName}.flv`
+        // SRS listens on 8080 inside Docker; the public playback port is 18889.
+        return `http://${parsed.hostname}:18889/live/${streamName}.flv`
     } catch {
         return ''
     }
