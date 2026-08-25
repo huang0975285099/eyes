@@ -21,6 +21,9 @@ func (s *Server) runLiveFrameScheduler() {
 			for _, stream := range s.fetchSRSStreams() {
 				active[stream.Name] = struct{}{}
 			}
+			if err := analysis.DiscardPendingLiveFrameSamplerJobsForInactiveStreams(active); err != nil {
+				log.Printf("[analysis] 清理离线视频源抽帧任务失败: %v", err)
+			}
 			nextStreamRefresh = now.Add(10 * time.Second)
 		}
 		if err := analysis.EnqueueLiveFrameSamplerJobs(active, now); err != nil {

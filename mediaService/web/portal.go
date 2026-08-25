@@ -269,7 +269,7 @@ func (s *Server) updatePortalSourceConfigs(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存视频源服务配置失败"})
 		return
 	}
-	_ = analysis.ResetPendingLiveFrameSamplerJobs()
+	_ = analysis.ResetPendingLiveFrameSamplerJobs(ids...)
 	if s.RefreshRecordingRules != nil {
 		s.RefreshRecordingRules()
 	}
@@ -468,7 +468,7 @@ func (s *Server) handlePortalSourceOwner(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "分配视频源失败"})
 		return
 	}
-	_ = analysis.ResetPendingLiveFrameSamplerJobs()
+	_ = analysis.ResetPendingLiveFrameSamplerJobs(req.VideoSourceID)
 	if s.RefreshRecordingRules != nil {
 		s.RefreshRecordingRules()
 	}

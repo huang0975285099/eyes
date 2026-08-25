@@ -40,3 +40,17 @@ func TestLiveFrameSchedule(t *testing.T) {
 		t.Fatal("different sources should be staggered")
 	}
 }
+
+func TestLiveFrameJobCutoff(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	want := now.Add(-2 * time.Minute)
+	if got := LiveFrameJobCutoff(now); !got.Equal(want) {
+		t.Fatalf("LiveFrameJobCutoff() = %v, want %v", got, want)
+	}
+}
+
+func TestResetPendingLiveFrameSamplerJobsRequiresSourceScope(t *testing.T) {
+	if err := ResetPendingLiveFrameSamplerJobs(); err != nil {
+		t.Fatalf("empty source scope should be a no-op: %v", err)
+	}
+}

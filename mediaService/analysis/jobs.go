@@ -7,6 +7,7 @@ import (
 	"media-service/models"
 	"time"
 
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -18,6 +19,12 @@ const (
 	JobStatusRunning      = "running"
 	JobStatusSucceeded    = "succeeded"
 	JobStatusFailed       = "failed"
+	JobStatusCancelled    = "cancelled"
+	// LiveFrameJobMaxAge prevents a real-time sampling slot from being
+	// replayed long after it was scheduled. A live job always reads the
+	// current stream, so processing a backlog would only create duplicate or
+	// offline FFmpeg work rather than recover a historical frame.
+	LiveFrameJobMaxAge = 2 * time.Minute
 )
 
 var builtinAlgorithms = []models.AIAlgorithm{
@@ -100,7 +107,22 @@ func EnqueueLiveFrameSamplerJobs(activeStreams map[string]struct{}, now time.Tim
 			InputRefID: source.ID, Status: JobStatusPending, MaxAttempts: 3,
 			AvailableAt: now,
 		}
-		if err := database.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&job).Error; err != nil {
+		if err := database.DB.Transaction(func(tx *gorm.DB) error {
+			result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&job)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				return nil
+			}
+			// A live frame cannot be reconstructed later. Keep only the newest
+			// pending slot for this source instead of building an unbounded
+			// backlog while AIService is unavailable.
+			return tx.Where(
+				"algorithm_code = ? AND input_type = ? AND input_ref_id = ? AND status = ? AND id <> ?",
+				AlgorithmFrameSampler, JobInputLiveStream, source.ID, JobStatusPending, job.ID,
+			).Delete(&models.AIJob{}).Error
+		}); err != nil {
 			return fmt.Errorf("创建实时抽帧任务失败 source=%d: %w", source.ID, err)
 		}
 	}
@@ -110,11 +132,38 @@ func EnqueueLiveFrameSamplerJobs(activeStreams map[string]struct{}, now time.Tim
 // ResetPendingLiveFrameSamplerJobs removes not-yet-started slots after a rule
 // change. The scheduler recreates only slots matching the current selection
 // and frequency; running and completed results are preserved.
-func ResetPendingLiveFrameSamplerJobs() error {
+func ResetPendingLiveFrameSamplerJobs(videoSourceIDs ...uint) error {
+	if len(videoSourceIDs) == 0 {
+		return nil
+	}
 	return database.DB.Where(
+		"algorithm_code = ? AND input_type = ? AND status = ? AND input_ref_id IN ?",
+		AlgorithmFrameSampler, JobInputLiveStream, JobStatusPending, videoSourceIDs,
+	).Delete(&models.AIJob{}).Error
+}
+
+// DiscardPendingLiveFrameSamplerJobsForInactiveStreams removes snapshots that
+// became obsolete after SRS stopped reporting their source as publishing.
+func DiscardPendingLiveFrameSamplerJobsForInactiveStreams(activeStreams map[string]struct{}) error {
+	query := database.DB.Where(
 		"algorithm_code = ? AND input_type = ? AND status = ?",
 		AlgorithmFrameSampler, JobInputLiveStream, JobStatusPending,
-	).Delete(&models.AIJob{}).Error
+	)
+	if len(activeStreams) == 0 {
+		return query.Delete(&models.AIJob{}).Error
+	}
+	names := make([]string, 0, len(activeStreams))
+	for name := range activeStreams {
+		names = append(names, name)
+	}
+	activeSourceIDs := database.DB.Model(&models.VideoSource{}).
+		Select("id").Where("stream_name IN ?", names)
+	return query.Where("input_ref_id NOT IN (?)", activeSourceIDs).
+		Delete(&models.AIJob{}).Error
+}
+
+func LiveFrameJobCutoff(now time.Time) time.Time {
+	return now.Add(-LiveFrameJobMaxAge)
 }
 
 func framesPerMinute(raw string) int {

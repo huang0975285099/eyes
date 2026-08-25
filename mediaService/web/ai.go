@@ -163,6 +163,16 @@ func (s *Server) handleAIJobClaim(w http.ResponseWriter, r *http.Request) {
 			}).Error; err != nil {
 			return err
 		}
+		if err := tx.Model(&models.AIJob{}).
+			Where("algorithm_code = ? AND input_type = ? AND status = ? AND created_at < ?",
+				analysis.AlgorithmFrameSampler, analysis.JobInputLiveStream,
+				analysis.JobStatusPending, analysis.LiveFrameJobCutoff(now)).
+			Updates(map[string]any{
+				"status": analysis.JobStatusCancelled, "worker_id": "", "lease_until": nil,
+				"finished_at": now, "last_error": "实时抽帧任务已过期，已跳过",
+			}).Error; err != nil {
+			return err
+		}
 
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 			Where("algorithm_code IN ? AND status = ? AND available_at <= ? AND attempts < max_attempts",
@@ -190,6 +200,12 @@ func (s *Server) handleAIJobClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	activeStreams := make(map[string]struct{})
+	if len(jobs) > 0 {
+		for _, stream := range s.fetchSRSStreams() {
+			activeStreams[stream.Name] = struct{}{}
+		}
+	}
 	payloads := make([]aiJobPayload, 0, len(jobs))
 	for _, job := range jobs {
 		if job.InputType != analysis.JobInputLiveStream {
@@ -201,12 +217,20 @@ func (s *Server) handleAIJobClaim(w http.ResponseWriter, r *http.Request) {
 			s.finishClaimedJob(job.ID, analysis.JobStatusFailed, "视频源不存在")
 			continue
 		}
+		if !source.Enabled {
+			s.finishClaimedJob(job.ID, analysis.JobStatusCancelled, "视频源已停用，已跳过")
+			continue
+		}
+		if _, active := activeStreams[source.StreamName]; !active {
+			s.finishClaimedJob(job.ID, analysis.JobStatusCancelled, "视频源当前离线，已跳过")
+			continue
+		}
 		var rule models.VideoAnalysisRule
 		if err := database.DB.Where(
 			"video_source_id = ? AND algorithm_code = ? AND enabled = ?",
 			source.ID, analysis.AlgorithmFrameSampler, true,
 		).First(&rule).Error; err != nil {
-			s.finishClaimedJob(job.ID, analysis.JobStatusSucceeded, "抽帧规则已关闭")
+			s.finishClaimedJob(job.ID, analysis.JobStatusCancelled, "抽帧规则已关闭")
 			continue
 		}
 		payloads = append(payloads, aiJobPayload{
