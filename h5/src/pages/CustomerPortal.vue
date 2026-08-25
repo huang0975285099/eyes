@@ -62,8 +62,8 @@
         </div>
       </q-page>
 
-      <q-page v-show="tab === 'services'" class="content-page">
-        <div class="service-hero"><p>AI & STORAGE</p><h2>点位服务配置</h2><span>录像与实时抽帧彼此独立，可按点位分别开启。</span></div>
+      <q-page v-show="tab === 'services'" class="content-page services-page">
+        <div class="service-hero"><p>AI & STORAGE</p><h2>点位服务配置</h2></div>
         <div class="service-list">
           <article v-for="source in sources" :key="source.video_source_id" class="service-card">
             <header class="service-device-header">
