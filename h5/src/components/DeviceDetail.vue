@@ -59,8 +59,8 @@
       <q-tab-panel name="services" class="detail-scroll-panel">
         <div class="detail-section-heading"><div><p>SERVICE STATUS</p><h2>当前服务配置</h2></div></div>
         <section class="detail-service-list">
-          <article><q-icon name="fiber_smart_record" /><div><strong>录像存储</strong><span>{{ source.recording_enabled ? `已开启 · 保留${source.recording_retain_days}天` : '未开启' }}</span></div><q-badge :color="source.recording_enabled ? 'positive' : 'grey-7'">{{ source.recording_enabled ? '运行中' : '关闭' }}</q-badge></article>
-          <article><q-icon name="photo_camera" /><div><strong>实时抽帧</strong><span>{{ source.sampling_enabled ? `已开启 · 每分钟${source.frames_per_minute}帧` : '未开启' }}</span></div><q-badge :color="source.sampling_enabled ? 'positive' : 'grey-7'">{{ source.sampling_enabled ? '运行中' : '关闭' }}</q-badge></article>
+          <article><q-icon name="fiber_smart_record" /><div><strong>录像存储</strong><span>{{ source.recording_enabled ? `已开启 · 保留${source.recording_retain_hours}小时` : '未开启' }}</span></div><q-badge :color="source.recording_enabled ? 'positive' : 'grey-7'">{{ source.recording_enabled ? '运行中' : '关闭' }}</q-badge></article>
+          <article><q-icon name="photo_camera" /><div><strong>实时抽帧</strong><span>{{ source.sampling_enabled ? `已开启 · 每${source.sampling_interval_minutes}分钟${source.sampling_frame_count}帧` : '未开启' }}</span></div><q-badge :color="source.sampling_enabled ? 'positive' : 'grey-7'">{{ source.sampling_enabled ? '运行中' : '关闭' }}</q-badge></article>
         </section>
         <dl class="detail-device-meta">
           <div><dt>点位负责人</dt><dd>{{ source.operator_name || '未设置' }}</dd></div><div><dt>内网 IP</dt><dd>{{ source.local_ip || '-' }}</dd></div>

@@ -26,7 +26,7 @@ type RecordingConfig struct {
 	OutputDir       string
 	SegmentDuration int
 	CheckInterval   int
-	RetainDays      int
+	RetainHours     int
 	FrameRetainDays int
 	FFmpegPath      string
 	WebPort         int    // 内网管理后台 Web 页面端口，0=不启动
@@ -51,7 +51,7 @@ func Load() *Config {
 			OutputDir:       getEnv("RECORDING_OUTPUT_DIR", "/var/recordings"),
 			SegmentDuration: atoi("RECORDING_SEGMENT_DURATION", "600"),
 			CheckInterval:   atoi("RECORDING_CHECK_INTERVAL", "30"),
-			RetainDays:      atoi("RECORDING_RETAIN_DAYS", "7"),
+			RetainHours:     recordingRetainHours(),
 			FrameRetainDays: atoi("RECORDING_FRAME_RETAIN_DAYS", "30"),
 			FFmpegPath:      getEnv("RECORDING_FFMPEG_PATH", "ffmpeg"),
 			WebPort:         atoi("MEDIA_WEB_PORT", "22222"),
@@ -60,6 +60,21 @@ func Load() *Config {
 			AIStreamBaseURL: getEnv("AI_SRS_HTTP_BASE", "http://localhost:8080"),
 		},
 	}
+}
+
+func recordingRetainHours() int {
+	hours := 48
+	if _, ok := os.LookupEnv("RECORDING_RETAIN_HOURS"); ok {
+		hours = atoi("RECORDING_RETAIN_HOURS", "48")
+	} else if _, ok := os.LookupEnv("RECORDING_RETAIN_DAYS"); ok {
+		// Accept the former day-based deployment variable during upgrades.
+		hours = atoi("RECORDING_RETAIN_DAYS", "7") * 24
+	}
+	if hours <= 0 {
+		log.Printf("[config] 录像默认保留小时数必须大于0，使用默认值48")
+		return 48
+	}
+	return hours
 }
 
 func getEnv(key, def string) string {

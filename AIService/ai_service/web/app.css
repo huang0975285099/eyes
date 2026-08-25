@@ -119,6 +119,7 @@ tbody tr:hover { background: rgba(34, 67, 82, .18); }
 .source-name { display: block; color: #f1f7fb; font-weight: 700; }
 .source-meta { display: block; max-width: 360px; margin-top: 4px; color: #6f8795; font-family: Consolas, monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
 .compact-input { width: 76px; }
+.sampling-config { min-width: 260px; white-space: nowrap; }
 .customer-select { min-width: 150px; max-width: 210px; }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; font-size: 11px; }
 .pill.online { color: #75e2cf; background: rgba(75, 214, 193, .11); }

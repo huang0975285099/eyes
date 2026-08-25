@@ -5,37 +5,37 @@ import (
 	"time"
 )
 
-func TestFramesPerMinute(t *testing.T) {
+func TestDecodeLiveFrameConfig(t *testing.T) {
 	for _, test := range []struct {
 		raw  string
-		want int
+		want LiveFrameConfig
 	}{
-		{`{"frames_per_minute":2}`, 2},
-		{`{"frames_per_minute":60}`, 60},
-		{`{"frames_per_minute":0}`, 1},
-		{`{"frames_per_minute":99}`, 60},
-		{"invalid", 2},
+		{`{"interval_minutes":10,"frames_per_interval":1}`, LiveFrameConfig{10, 1}},
+		{`{"interval_minutes":10,"frames_per_interval":3}`, LiveFrameConfig{10, 3}},
+		{`{"frames_per_minute":60}`, LiveFrameConfig{1, 60}},
+		{`{"interval_minutes":1,"frames_per_interval":61}`, LiveFrameConfig{1, 2}},
+		{"invalid", LiveFrameConfig{1, 2}},
 	} {
-		if got := framesPerMinute(test.raw); got != test.want {
-			t.Fatalf("framesPerMinute(%q) = %d, want %d", test.raw, got, test.want)
+		if got := DecodeLiveFrameConfig(test.raw); got != test.want {
+			t.Fatalf("DecodeLiveFrameConfig(%q) = %#v, want %#v", test.raw, got, test.want)
 		}
 	}
 }
 
 func TestLiveFrameSchedule(t *testing.T) {
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	scheduled, _ := liveFrameSchedule(7, 2, now)
-	if interval := now.Sub(scheduled); interval < 0 || interval >= 30*time.Second {
-		t.Fatalf("scheduled time %v is outside the current 30-second slot", scheduled)
+	scheduled, _ := liveFrameSchedule(7, 10, 1, now)
+	if interval := now.Sub(scheduled); interval < 0 || interval >= 10*time.Minute {
+		t.Fatalf("scheduled time %v is outside the current 10-minute slot", scheduled)
 	}
-	if _, due := liveFrameSchedule(7, 2, scheduled.Add(time.Second)); !due {
-		t.Fatal("expected source to be due during the two-second scheduling window")
+	if _, due := liveFrameSchedule(7, 10, 1, scheduled.Add(10*time.Second)); !due {
+		t.Fatal("expected source to be due during the scheduling window")
 	}
-	if _, due := liveFrameSchedule(7, 2, scheduled.Add(3*time.Second)); due {
+	if _, due := liveFrameSchedule(7, 10, 1, scheduled.Add(13*time.Second)); due {
 		t.Fatal("expected source not to be due outside the scheduling window")
 	}
 
-	other, _ := liveFrameSchedule(8, 2, now)
+	other, _ := liveFrameSchedule(8, 10, 1, now)
 	if scheduled.Equal(other) {
 		t.Fatal("different sources should be staggered")
 	}

@@ -1,6 +1,6 @@
 [package]
 name = "eyes-customer"
-version = "1.0.0"
+version = "1.0.1"
 description = "千里眼客户管理平台"
 authors = ["All-Seeing Eyes"]
 edition = "2021"

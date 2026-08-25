@@ -40,7 +40,7 @@ func main() {
 		OutputDir:       cfg.Recording.OutputDir,
 		SegmentDuration: cfg.Recording.SegmentDuration,
 		CheckInterval:   cfg.Recording.CheckInterval,
-		RetainDays:      cfg.Recording.RetainDays,
+		RetainHours:     cfg.Recording.RetainHours,
 		FrameRetainDays: cfg.Recording.FrameRetainDays,
 		FFmpegPath:      cfg.Recording.FFmpegPath,
 	})
@@ -58,7 +58,7 @@ func main() {
 			cfg.Recording.RTMPHost,
 			cfg.Recording.AIStreamBaseURL,
 			cfg.Recording.OutputDir,
-			cfg.Recording.RetainDays,
+			cfg.Recording.RetainHours,
 			mgr.RefreshRules,
 		).Start(cfg.Recording.WebPort)
 	}

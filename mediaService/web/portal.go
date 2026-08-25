@@ -18,38 +18,44 @@ import (
 )
 
 type portalSourceRow struct {
-	VideoSourceID       uint       `json:"video_source_id"`
-	CustomerID          uint       `json:"customer_id"`
-	CustomerName        string     `json:"customer_name,omitempty"`
-	StreamName          string     `json:"stream_name"`
-	DisplayName         string     `json:"display_name"`
-	SourceType          string     `json:"source_type"`
-	SourceID            string     `json:"source_id"`
-	MAC                 string     `json:"mac"`
-	OperatorName        string     `json:"operator_name"`
-	Hostname            string     `json:"hostname"`
-	LocalIP             string     `json:"local_ip"`
-	Brand               string     `json:"brand"`
-	PublishMode         string     `json:"publish_mode"`
-	Enabled             bool       `json:"enabled"`
-	Active              bool       `json:"active"`
-	Codec               string     `json:"codec"`
-	Width               int        `json:"width"`
-	Height              int        `json:"height"`
-	RecordingEnabled    bool       `json:"recording_enabled"`
-	RecordingRetainDays int        `json:"recording_retain_days"`
-	SamplingEnabled     bool       `json:"sampling_enabled"`
-	FramesPerMinute     int        `json:"frames_per_minute"`
-	FrameCount          int64      `json:"frame_count"`
-	LastCapturedAt      *time.Time `json:"last_captured_at,omitempty"`
+	VideoSourceID           uint       `json:"video_source_id"`
+	CustomerID              uint       `json:"customer_id"`
+	CustomerName            string     `json:"customer_name,omitempty"`
+	StreamName              string     `json:"stream_name"`
+	DisplayName             string     `json:"display_name"`
+	SourceType              string     `json:"source_type"`
+	SourceID                string     `json:"source_id"`
+	MAC                     string     `json:"mac"`
+	OperatorName            string     `json:"operator_name"`
+	Hostname                string     `json:"hostname"`
+	LocalIP                 string     `json:"local_ip"`
+	Brand                   string     `json:"brand"`
+	PublishMode             string     `json:"publish_mode"`
+	Enabled                 bool       `json:"enabled"`
+	Active                  bool       `json:"active"`
+	Codec                   string     `json:"codec"`
+	Width                   int        `json:"width"`
+	Height                  int        `json:"height"`
+	RecordingEnabled        bool       `json:"recording_enabled"`
+	RecordingRetainHours    int        `json:"recording_retain_hours"`
+	SamplingEnabled         bool       `json:"sampling_enabled"`
+	SamplingIntervalMinutes int        `json:"sampling_interval_minutes"`
+	SamplingFrameCount      int        `json:"sampling_frame_count"`
+	FrameCount              int64      `json:"frame_count"`
+	LastCapturedAt          *time.Time `json:"last_captured_at,omitempty"`
 }
 
 type portalSourceConfig struct {
-	VideoSourceID       uint `json:"video_source_id"`
-	RecordingEnabled    bool `json:"recording_enabled"`
-	RecordingRetainDays int  `json:"recording_retain_days"`
-	SamplingEnabled     bool `json:"sampling_enabled"`
-	FramesPerMinute     int  `json:"frames_per_minute"`
+	VideoSourceID           uint `json:"video_source_id"`
+	RecordingEnabled        bool `json:"recording_enabled"`
+	RecordingRetainHours    int  `json:"recording_retain_hours"`
+	SamplingEnabled         bool `json:"sampling_enabled"`
+	SamplingIntervalMinutes int  `json:"sampling_interval_minutes"`
+	SamplingFrameCount      int  `json:"sampling_frame_count"`
+	// Deprecated fields are detected so an old client cannot silently replace
+	// a precise hour/interval rule with its former day/per-minute defaults.
+	RecordingRetainDays int `json:"recording_retain_days"`
+	FramesPerMinute     int `json:"frames_per_minute"`
 }
 
 func (s *Server) handlePortalSources(w http.ResponseWriter, r *http.Request) {
@@ -136,20 +142,12 @@ func (s *Server) listPortalSources(w http.ResponseWriter, p principal) {
 	for _, source := range sources {
 		stream, isActive := active[source.StreamName]
 		recordingRule := recordingBySource[source.ID]
-		retainDays := recordingRule.RetainDays
-		if retainDays <= 0 {
-			retainDays = s.DefaultRetainDays
+		retainHours := recordingRule.RetainHours
+		if retainHours <= 0 {
+			retainHours = s.DefaultRetainHours
 		}
 		analysisRule := analysisBySource[source.ID]
-		framesPerMinute := 2
-		if strings.TrimSpace(analysisRule.ConfigJSON) != "" {
-			var config struct {
-				FramesPerMinute int `json:"frames_per_minute"`
-			}
-			if json.Unmarshal([]byte(analysisRule.ConfigJSON), &config) == nil && config.FramesPerMinute > 0 {
-				framesPerMinute = config.FramesPerMinute
-			}
-		}
+		frameConfig := analysis.DecodeLiveFrameConfig(analysisRule.ConfigJSON)
 		aggregate := aggregateByStream[source.StreamName]
 		rows = append(rows, portalSourceRow{
 			VideoSourceID: source.ID, CustomerID: source.CustomerID, CustomerName: customerNames[source.CustomerID],
@@ -158,8 +156,9 @@ func (s *Server) listPortalSources(w http.ResponseWriter, p principal) {
 			Hostname: source.Hostname, LocalIP: source.LocalIP, Brand: source.Brand,
 			PublishMode: source.PublishMode, Enabled: source.Enabled, Active: isActive,
 			Codec: stream.Video.Codec, Width: stream.Video.Width, Height: stream.Video.Height,
-			RecordingEnabled: recordingRule.Enabled, RecordingRetainDays: retainDays,
-			SamplingEnabled: analysisRule.Enabled, FramesPerMinute: framesPerMinute,
+			RecordingEnabled: recordingRule.Enabled, RecordingRetainHours: retainHours,
+			SamplingEnabled:         analysisRule.Enabled,
+			SamplingIntervalMinutes: frameConfig.IntervalMinutes, SamplingFrameCount: frameConfig.FramesPerInterval,
 			FrameCount: aggregate.FrameCount, LastCapturedAt: aggregate.LastCapturedAt,
 		})
 	}
@@ -216,9 +215,14 @@ func (s *Server) updatePortalSourceConfigs(w http.ResponseWriter, r *http.Reques
 	}
 	ids := make([]uint, 0, len(req.Sources))
 	seen := make(map[uint]struct{}, len(req.Sources))
-	for _, config := range req.Sources {
-		if config.VideoSourceID == 0 || config.RecordingRetainDays < 1 || config.RecordingRetainDays > 3650 ||
-			config.FramesPerMinute < 1 || config.FramesPerMinute > 60 {
+	for index := range req.Sources {
+		config := &req.Sources[index]
+		if config.RecordingRetainDays > 0 || config.FramesPerMinute > 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "客户端版本过旧，请刷新页面或升级客户端后再保存"})
+			return
+		}
+		if config.VideoSourceID == 0 || (config.RecordingEnabled && (config.RecordingRetainHours < 1 || config.RecordingRetainHours > 87600)) ||
+			!analysis.ValidLiveFrameConfig(config.SamplingIntervalMinutes, config.SamplingFrameCount) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "视频源配置参数无效"})
 			return
 		}
@@ -243,15 +247,18 @@ func (s *Server) updatePortalSourceConfigs(w http.ResponseWriter, r *http.Reques
 		for _, config := range req.Sources {
 			recordingRule := models.VideoRecordingRule{
 				VideoSourceID: config.VideoSourceID, Enabled: config.RecordingEnabled,
-				RetainDays: config.RecordingRetainDays,
+				RetainHours: config.RecordingRetainHours,
 			}
 			if err := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "video_source_id"}},
-				DoUpdates: clause.AssignmentColumns([]string{"enabled", "retain_days", "updated_at"}),
+				DoUpdates: clause.AssignmentColumns([]string{"enabled", "retain_hours", "updated_at"}),
 			}).Create(&recordingRule).Error; err != nil {
 				return err
 			}
-			configJSON, _ := json.Marshal(map[string]int{"frames_per_minute": config.FramesPerMinute})
+			configJSON, _ := json.Marshal(map[string]int{
+				"interval_minutes":    config.SamplingIntervalMinutes,
+				"frames_per_interval": config.SamplingFrameCount,
+			})
 			analysisRule := models.VideoAnalysisRule{
 				VideoSourceID: config.VideoSourceID, AlgorithmCode: analysis.AlgorithmFrameSampler,
 				Enabled: config.SamplingEnabled, ConfigJSON: string(configJSON),

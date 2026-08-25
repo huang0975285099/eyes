@@ -86,6 +86,19 @@ func Init(cfg *config.Config) error {
 		_ = sqlDB.Close()
 		return fmt.Errorf("迁移 eyes 数据库表结构失败: %w", err)
 	}
+	// Retention used to be stored in whole days. Preserve the configured
+	// duration exactly when moving to hour-based rules, then remove the old
+	// column so subsequent starts cannot overwrite newly saved hour values.
+	if db.Migrator().HasColumn(&models.VideoRecordingRule{}, "retain_days") {
+		if err := db.Exec("UPDATE video_recording_rules SET retain_hours = retain_days * 24").Error; err != nil {
+			_ = sqlDB.Close()
+			return fmt.Errorf("迁移录像保留时间到小时失败: %w", err)
+		}
+		if err := db.Migrator().DropColumn(&models.VideoRecordingRule{}, "retain_days"); err != nil {
+			_ = sqlDB.Close()
+			return fmt.Errorf("删除旧录像保留天数字段失败: %w", err)
+		}
+	}
 	// The product no longer has a global recording switch. This is a clean
 	// replacement rather than a compatibility layer, so remove its obsolete
 	// table after the per-source rule table has been created successfully.

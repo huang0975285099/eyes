@@ -26,9 +26,10 @@ export interface VideoSource {
   height: number
   playback_url?: string
   recording_enabled: boolean
-  recording_retain_days: number
+  recording_retain_hours: number
   sampling_enabled: boolean
-  frames_per_minute: number
+  sampling_interval_minutes: number
+  sampling_frame_count: number
   frame_count: number
   last_captured_at?: string
 }

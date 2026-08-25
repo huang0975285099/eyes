@@ -24,8 +24,9 @@ import (
 const (
 	defaultSegmentDuration = 600
 	defaultCheckInterval   = 30
-	defaultRetainDays      = 7
+	defaultRetainHours     = 48
 	defaultFrameRetainDays = 30
+	cleanupInterval        = 10 * time.Minute
 	// SRS 的 /api/v1/streams 默认只返回前 ~10 条（HTTP API 内置分页上限）。
 	// 不带 count 时会漏掉绝大多数在推的流，导致只录到一小撮设备。
 	// 显式带足够大的 count 取全量；SRS 会返回 min(实际, count)。
@@ -38,7 +39,7 @@ type Config struct {
 	OutputDir       string
 	SegmentDuration int
 	CheckInterval   int
-	RetainDays      int
+	RetainHours     int
 	// FrameRetainDays controls lifecycle cleanup for AIService-produced frame
 	// artifacts. Frame extraction itself does not run in MediaService.
 	FrameRetainDays int
@@ -84,8 +85,8 @@ func NewRecorderManager(cfg Config) *RecorderManager {
 	if cfg.CheckInterval <= 0 {
 		cfg.CheckInterval = defaultCheckInterval
 	}
-	if cfg.RetainDays <= 0 {
-		cfg.RetainDays = defaultRetainDays
+	if cfg.RetainHours <= 0 {
+		cfg.RetainHours = defaultRetainHours
 	}
 	if cfg.FrameRetainDays <= 0 {
 		cfg.FrameRetainDays = defaultFrameRetainDays
@@ -112,11 +113,12 @@ func (m *RecorderManager) Run(ctx context.Context) {
 	m.cleanupZeroByteSegments()
 	m.syncRecordings()
 	m.indexExistingFiles()
+	m.cleanupExpired()
 
 	ticker := time.NewTicker(time.Duration(m.cfg.CheckInterval) * time.Second)
 	defer ticker.Stop()
 
-	cleanupTicker := time.NewTicker(1 * time.Hour)
+	cleanupTicker := time.NewTicker(cleanupInterval)
 	defer cleanupTicker.Stop()
 
 	for {
@@ -445,33 +447,35 @@ func (m *RecorderManager) indexDayDir(customerID uint, streamName, mac, sourceTy
 func (m *RecorderManager) cleanupExpired() {
 	now := time.Now()
 	type retainRule struct {
-		StreamName string `gorm:"column:stream_name"`
-		RetainDays int    `gorm:"column:retain_days"`
+		StreamName  string `gorm:"column:stream_name"`
+		RetainHours int    `gorm:"column:retain_hours"`
 	}
 	var rules []retainRule
 	database.DB.Table("video_sources").
-		Select("video_sources.stream_name, video_recording_rules.retain_days").
+		Select("video_sources.stream_name, video_recording_rules.retain_hours").
 		Joins("JOIN video_recording_rules ON video_recording_rules.video_source_id = video_sources.id").
 		Find(&rules)
 	retention := make(map[string]int, len(rules))
 	for _, rule := range rules {
-		if rule.RetainDays <= 0 {
-			rule.RetainDays = m.cfg.RetainDays
+		if rule.RetainHours <= 0 {
+			rule.RetainHours = m.cfg.RetainHours
 		}
-		retention[rule.StreamName] = rule.RetainDays
+		retention[rule.StreamName] = rule.RetainHours
 	}
 
 	// Every source has an independent retention period. Query candidates older
-	// than one day, then apply the source-specific cutoff in memory.
+	// than one hour, then apply the source-specific cutoff in memory. Retention
+	// starts when a segment ends so every recorded frame receives the full
+	// configured lifetime.
 	var candidates []models.RecordingSegment
-	database.DB.Unscoped().Where("storage = ? AND started_at < ?", "local", now.AddDate(0, 0, -1)).Find(&candidates)
+	database.DB.Unscoped().Where("storage = ? AND ended_at < ?", "local", now.Add(-time.Hour)).Find(&candidates)
 	var localSegments []models.RecordingSegment
 	for _, segment := range candidates {
-		days := retention[segment.StreamName]
-		if days <= 0 {
-			days = m.cfg.RetainDays
+		hours := retention[segment.StreamName]
+		if hours <= 0 {
+			hours = m.cfg.RetainHours
 		}
-		if segment.StartedAt.Before(now.AddDate(0, 0, -days)) {
+		if recordingExpired(segment.EndedAt, now, hours) {
 			localSegments = append(localSegments, segment)
 		}
 	}
@@ -483,12 +487,13 @@ func (m *RecorderManager) cleanupExpired() {
 		}
 	}
 
-	// 清理过期的损坏文件：损坏文件不入库，上面基于 DB 的清理覆盖不到，会永久占盘
-	m.cleanupCorruptedFiles(now.AddDate(0, 0, -m.cfg.RetainDays))
+	// 清理过期的损坏文件：损坏文件不入库，上面基于 DB 的清理覆盖不到，会永久占盘。
+	// 它们仍按所属视频源的小时规则清理。
+	m.cleanupCorruptedFiles(now, retention)
 
 	// MediaService owns metadata and storage lifecycle for analysis
 	// artifacts even though AIService owns the extraction process.
-	frameCutoff := time.Now().AddDate(0, 0, -m.cfg.FrameRetainDays)
+	frameCutoff := now.AddDate(0, 0, -m.cfg.FrameRetainDays)
 	frameWhere := "captured_at < ?"
 	frameArgs := []interface{}{frameCutoff}
 	var expiredFrames []models.RecordingFrame
@@ -527,11 +532,15 @@ func (m *RecorderManager) cleanupExpired() {
 	m.cleanupEmptyDirs()
 }
 
+func recordingExpired(endedAt, now time.Time, retainHours int) bool {
+	return retainHours > 0 && endedAt.Before(now.Add(-time.Duration(retainHours)*time.Hour))
+}
+
 // cleanupCorruptedFiles 删除已确认损坏且超过保留期的孤立文件。
 // 损坏文件不入库，cleanupExpired 基于 DB 的查询覆盖不到它们，否则会永久占盘。
 // 以文件 mtime（≈录制时间）判断是否超期；同时清除已消失文件的内存标记，
 // 使 corruptedPaths 不会无限增长。进程重启后由 indexExistingFiles 重新探测填充。
-func (m *RecorderManager) cleanupCorruptedFiles(cutoff time.Time) {
+func (m *RecorderManager) cleanupCorruptedFiles(now time.Time, retention map[string]int) {
 	var removed int
 	m.corruptedPaths.Range(func(key, _ any) bool {
 		fp, ok := key.(string)
@@ -545,7 +554,8 @@ func (m *RecorderManager) cleanupCorruptedFiles(cutoff time.Time) {
 			}
 			return true
 		}
-		if fi.ModTime().Before(cutoff) {
+		retainHours := retentionHoursForPath(m.cfg.OutputDir, fp, retention, m.cfg.RetainHours)
+		if fi.ModTime().Before(now.Add(-time.Duration(retainHours) * time.Hour)) {
 			if err := os.Remove(fp); err != nil && !os.IsNotExist(err) {
 				log.Printf("[recording] 删除过期损坏文件失败 %s: %v", fp, err)
 				return true
@@ -558,6 +568,22 @@ func (m *RecorderManager) cleanupCorruptedFiles(cutoff time.Time) {
 	if removed > 0 {
 		log.Printf("[recording] 清理过期损坏文件 %d 个", removed)
 	}
+}
+
+func retentionHoursForPath(root, filePath string, retention map[string]int, defaultHours int) int {
+	relative, err := filepath.Rel(root, filePath)
+	if err == nil {
+		parts := strings.Split(filepath.Clean(relative), string(os.PathSeparator))
+		if len(parts) >= 2 && parts[0] != ".." {
+			if hours := retention[parts[0]]; hours > 0 {
+				return hours
+			}
+		}
+	}
+	if defaultHours > 0 {
+		return defaultHours
+	}
+	return defaultRetainHours
 }
 
 func (m *RecorderManager) cleanupZeroByteSegments() {

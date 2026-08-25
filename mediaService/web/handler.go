@@ -20,7 +20,7 @@ import (
 type Server struct {
 	SRSApiBase            string // SRS HTTP API 地址
 	SRSHttpHost           string // SRS HTTP-FLV/HLS 对外地址
-	DefaultRetainDays     int    // 新视频源录像规则的默认保留天数
+	DefaultRetainHours    int    // 新视频源录像规则的默认保留小时数
 	RefreshRecordingRules func() // 立即应用按视频源录像规则
 	PublicRTMPHost        string // 下发给客户端的 RTMP 公网地址
 	InternalRTMPHost      string // MediaService/AIService容器访问SRS的地址
@@ -28,11 +28,11 @@ type Server struct {
 	RecordingOutputDir    string // 录像和AI证据共享目录
 }
 
-func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, internalRTMPHost, aiStreamBaseURL, recordingOutputDir string, defaultRetainDays int, refreshRecordingRules func()) *Server {
+func NewServer(srsApiBase, srsHttpHost, publicRTMPHost, internalRTMPHost, aiStreamBaseURL, recordingOutputDir string, defaultRetainHours int, refreshRecordingRules func()) *Server {
 	return &Server{
 		SRSApiBase:            srsApiBase,
 		SRSHttpHost:           srsHttpHost,
-		DefaultRetainDays:     defaultRetainDays,
+		DefaultRetainHours:    defaultRetainHours,
 		RefreshRecordingRules: refreshRecordingRules,
 		PublicRTMPHost:        publicRTMPHost,
 		InternalRTMPHost:      internalRTMPHost,

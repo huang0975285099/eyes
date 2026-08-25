@@ -54,12 +54,12 @@ type VideoSource struct {
 }
 
 // VideoRecordingRule replaces the former global recording switch. Every
-// source can independently enable MP4 storage and choose its retention days.
+// source can independently enable MP4 storage and choose its retention hours.
 type VideoRecordingRule struct {
 	ID            uint      `gorm:"primaryKey" json:"id"`
 	VideoSourceID uint      `gorm:"not null;uniqueIndex" json:"video_source_id"`
 	Enabled       bool      `gorm:"not null;default:false;index" json:"enabled"`
-	RetainDays    int       `gorm:"not null;default:7" json:"retain_days"`
+	RetainHours   int       `gorm:"not null;default:48" json:"retain_hours"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }

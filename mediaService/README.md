@@ -26,7 +26,7 @@ cp .env.example .env
 客户端不需要人工设备登记。为便于客户和管理员识别点位，客户端推流时会同步点位负责人、主机名、内网 IP 和 MAC；CPU、内存、磁盘序列号不会上传。品牌摄像头无需登记，可直接配置 RTMP 地址。请通过防火墙限制 `22222` 管理端口和
 `1935` 推流端口的访问范围。
 
-录像默认分段600秒。录像不再使用全局开关：客户在AIService后台对自己名下的每个视频源分别设置是否录像及保留1～3650天，规则写入`video_recording_rules`并立即生效。`RECORDING_RETAIN_DAYS`只作为尚未保存规则时的默认天数；截图保留时间仍由服务端环境变量控制。每台电脑可以包含多个独立视频源，当前内置来源类型为`screen`、`usb_camera`和`ip_camera`。
+录像默认分段600秒。录像不再使用全局开关：客户在AIService后台对自己名下的每个视频源分别设置是否录像及保留1～87600小时，规则写入`video_recording_rules`并立即生效。`RECORDING_RETAIN_HOURS`只作为尚未保存规则时的默认小时数；截图保留时间仍由服务端环境变量控制。系统每10分钟检查一次过期录像，保留期从片段结束时间开始计算。每台电脑可以包含多个独立视频源，当前内置来源类型为`screen`、`usb_camera`和`ip_camera`。
 服务启动迁移会删除已废弃的`recording_settings`旧表，不读取或继承旧的全局录像配置。
 
 ## Docker 部署
@@ -104,7 +104,7 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 - `POST /api/video-sources`：登记一个独立品牌摄像头并生成永久 RTMP 地址，请求字段为 `source_id`、`display_name` 和可选的 `brand`。
 - `GET /api/segments`、`GET /segments/{id}/video`：供可信内网AdminService查询和播放全部录像。
 - `/api/portal/auth/*`：平台初始化、登录、当前账号、修改密码和退出登录。
-- `GET/PUT /api/portal/sources`：按登录客户返回视频源，并保存每路录像、保留天数、实时抽帧和抽帧频率。
+- `GET/PUT /api/portal/sources`：按登录客户返回视频源，并保存每路录像、保留小时数以及“每N分钟抽M帧”的实时抽帧规则。
 - `GET/POST/PUT /api/portal/customers`、`PUT /api/portal/source-owner`：仅平台管理员创建、启停、重置客户账号和分配视频源。
 - `GET /api/portal/frames`、`GET /api/portal/frames/{id}/image`：按客户隔离的抽帧结果。
 - `GET /api/ai/algorithms`：AI能力目录；当前抽帧已启用，打架、安全帽和火灾为后续模块。

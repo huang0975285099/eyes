@@ -24,14 +24,17 @@ const (
 	// replayed long after it was scheduled. A live job always reads the
 	// current stream, so processing a backlog would only create duplicate or
 	// offline FFmpeg work rather than recover a historical frame.
-	LiveFrameJobMaxAge = 2 * time.Minute
+	LiveFrameJobMaxAge      = 2 * time.Minute
+	MaxFrameIntervalMinutes = 1440
+	MaxFramesPerMinute      = 60
+	liveFrameScheduleWindow = 12 * time.Second
 )
 
 var builtinAlgorithms = []models.AIAlgorithm{
 	{
 		Code: AlgorithmFrameSampler, Name: "实时流抽帧", InputMode: "live_stream", Enabled: true,
 		Description:       "直接从SRS实时视频流按频率抽取JPEG图片，与录像开关无关。",
-		DefaultConfigJSON: `{"frames_per_minute":2}`,
+		DefaultConfigJSON: `{"interval_minutes":1,"frames_per_interval":2}`,
 	},
 	{
 		Code: "fight", Name: "打架检测", InputMode: "video", Enabled: false,
@@ -96,8 +99,10 @@ func EnqueueLiveFrameSamplerJobs(activeStreams map[string]struct{}, now time.Tim
 		if _, active := activeStreams[source.StreamName]; !active {
 			continue
 		}
-		rate := framesPerMinute(source.ConfigJSON)
-		scheduledAt, due := liveFrameSchedule(source.ID, rate, now)
+		config := DecodeLiveFrameConfig(source.ConfigJSON)
+		scheduledAt, due := liveFrameSchedule(
+			source.ID, config.IntervalMinutes, config.FramesPerInterval, now,
+		)
 		if !due {
 			continue
 		}
@@ -166,32 +171,47 @@ func LiveFrameJobCutoff(now time.Time) time.Time {
 	return now.Add(-LiveFrameJobMaxAge)
 }
 
-func framesPerMinute(raw string) int {
-	config := struct {
-		FramesPerMinute int `json:"frames_per_minute"`
-	}{FramesPerMinute: 2}
-	_ = json.Unmarshal([]byte(raw), &config)
-	if config.FramesPerMinute < 1 {
-		return 1
-	}
-	if config.FramesPerMinute > 60 {
-		return 60
-	}
-	return config.FramesPerMinute
+type LiveFrameConfig struct {
+	IntervalMinutes   int `json:"interval_minutes"`
+	FramesPerInterval int `json:"frames_per_interval"`
 }
 
-func liveFrameSchedule(sourceID uint, rate int, now time.Time) (time.Time, bool) {
-	if rate < 1 {
-		rate = 1
+func ValidLiveFrameConfig(intervalMinutes, framesPerInterval int) bool {
+	return intervalMinutes >= 1 && intervalMinutes <= MaxFrameIntervalMinutes &&
+		framesPerInterval >= 1 && framesPerInterval <= intervalMinutes*MaxFramesPerMinute
+}
+
+func DecodeLiveFrameConfig(raw string) LiveFrameConfig {
+	config := struct {
+		IntervalMinutes   int `json:"interval_minutes"`
+		FramesPerInterval int `json:"frames_per_interval"`
+		FramesPerMinute   int `json:"frames_per_minute"`
+	}{}
+	_ = json.Unmarshal([]byte(raw), &config)
+	if ValidLiveFrameConfig(config.IntervalMinutes, config.FramesPerInterval) {
+		return LiveFrameConfig{
+			IntervalMinutes: config.IntervalMinutes, FramesPerInterval: config.FramesPerInterval,
+		}
 	}
-	if rate > 60 {
-		rate = 60
+	if config.FramesPerMinute > 0 {
+		if config.FramesPerMinute > MaxFramesPerMinute {
+			config.FramesPerMinute = MaxFramesPerMinute
+		}
+		return LiveFrameConfig{IntervalMinutes: 1, FramesPerInterval: config.FramesPerMinute}
 	}
-	interval := time.Minute / time.Duration(rate)
+	return LiveFrameConfig{IntervalMinutes: 1, FramesPerInterval: 2}
+}
+
+func liveFrameSchedule(sourceID uint, intervalMinutes, framesPerInterval int, now time.Time) (time.Time, bool) {
+	if !ValidLiveFrameConfig(intervalMinutes, framesPerInterval) {
+		intervalMinutes = 1
+		framesPerInterval = 2
+	}
+	interval := time.Duration(intervalMinutes) * time.Minute / time.Duration(framesPerInterval)
 	intervalNS := interval.Nanoseconds()
 	offsetNS := (int64(sourceID) * int64(7919*time.Millisecond)) % intervalNS
 	slot := (now.UnixNano() - offsetNS) / intervalNS
 	scheduled := time.Unix(0, slot*intervalNS+offsetNS)
 	age := now.Sub(scheduled)
-	return scheduled, age >= 0 && age < 2*time.Second
+	return scheduled, age >= 0 && age < liveFrameScheduleWindow
 }
