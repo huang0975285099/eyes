@@ -63,7 +63,10 @@
       </q-page>
 
       <q-page v-show="tab === 'services'" class="content-page services-page">
-        <div class="service-hero"><p>AI & STORAGE</p><h2>点位服务配置</h2></div>
+        <div class="service-hero">
+          <div><p>AI & STORAGE</p><h2>点位服务配置</h2></div>
+          <q-btn unelevated color="primary" text-color="dark" class="save-services" icon="check" label="保存全部配置" :loading="busy" @click="saveServices" />
+        </div>
         <div class="service-list">
           <article v-for="source in sources" :key="source.video_source_id" class="service-card">
             <header class="service-device-header">
@@ -91,7 +94,6 @@
             <q-slide-transition><div v-show="source.sampling_enabled" class="option-row sampling-option"><span>抽帧规则</span><div class="sampling-inputs"><q-input v-model.number="source.sampling_interval_minutes" dense outlined dark type="number" min="1" max="1440" prefix="每" suffix="分钟" /><q-input v-model.number="source.sampling_frame_count" dense outlined dark type="number" min="1" suffix="帧" /></div></div></q-slide-transition>
           </article>
         </div>
-        <q-btn unelevated color="primary" text-color="dark" class="save-services" icon="check" label="保存全部配置" :loading="busy" @click="saveServices" />
       </q-page>
 
       <q-page v-show="tab === 'profile'" class="content-page profile-page">
