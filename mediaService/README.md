@@ -19,7 +19,7 @@ cp .env.example .env
 生产环境至少修改以下配置：
 
 - `PUBLIC_RTMP_HOST`：客户端可访问的 RTMP 地址，例如 `example.com:1935`。
-- `MEDIA_SRS_HTTP_HOST`：客户端自预览可访问的SRS HTTP地址，例如`example.com:8080`。
+- `MEDIA_SRS_HTTP_HOST`：客户端自预览可访问的SRS HTTP地址，例如`example.com:18889`（容器内部仍使用8080）。
 - `UPDATE_ADMIN_KEY`：客户端更新 ZIP 上传密钥；为空时禁用上传。
 - `RECORDING_DIR`：宿主机录像目录，默认 `/home/test/recordings`，应改为实际磁盘挂载点。
 
@@ -74,7 +74,7 @@ INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
 `/home/administrator/eyes/`，两者各自保留独立的`.env`。构建脚本只上传`.env.example`，
 不会覆盖生产密钥。内网服务器首次部署前应在该目录
 创建`.env`，并将`PUBLIC_RTMP_HOST`设为`10.0.20.219:1935`、
-`MEDIA_SRS_HTTP_HOST`设为`10.0.20.219:8080`；公网服务器继续使用公网地址。
+`MEDIA_SRS_HTTP_HOST`设为`10.0.20.219:18889`；公网服务器继续使用公网地址。
 
 对外端口：
 
@@ -83,7 +83,7 @@ INTRANET_REMOTE_PORT=2202 ./build.sh --target 2
 - `1935`：SRS RTMP 推流
 - `8080`：SRS HTTP-FLV/HLS，仅保留给电脑推流APP自预览和兼容工具
 
-SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `18888`、`18887`、`8080` 的来源，并通过 HTTPS 反向代理保护管理接口。
+SRS API `1985`、MySQL `3306` 仅在 Docker 内部网络开放。生产环境应限制 `18888`、`18887`、`18889` 的来源，并通过 HTTPS 反向代理保护管理接口。
 
 MediaService按规则和SRS在线状态创建持久化实时抽帧任务；AIService领取任务后直接
 拉取SRS实时流、执行FFmpeg并回报图片。这个过程不读取录像片段，也不依赖该视频源的录像开关。

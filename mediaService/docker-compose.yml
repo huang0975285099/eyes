@@ -28,7 +28,7 @@ services:
     restart: always
     ports:
       - "1935:1935"   # RTMP 推流
-      - "8080:8080"   # HTTP-FLV/HLS 拉流
+      - "18889:8080"  # 公网 HTTP-FLV/HLS；容器内部仍为 8080
     volumes:
       - ./srs.conf:/usr/local/srs/conf/docker.conf:ro
     networks:
@@ -61,7 +61,7 @@ services:
       RECORDING_RETAIN_DAYS: "2"
       RECORDING_FRAME_RETAIN_DAYS: "30"
       MEDIA_WEB_PORT: "22222"
-      MEDIA_SRS_HTTP_HOST: "${MEDIA_SRS_HTTP_HOST:-112.18.238.6:8080}"
+      MEDIA_SRS_HTTP_HOST: "${MEDIA_SRS_HTTP_HOST:-112.18.238.6:18889}"
       UPDATE_ADMIN_KEY: "${UPDATE_ADMIN_KEY:-}"
       CLIENT_UPDATE_DIR: "/var/client-updates"
     ports:
@@ -91,7 +91,7 @@ services:
     restart: always
     environment:
       AI_MEDIA_API: "http://media-service:22222"
-      AI_SRS_PUBLIC_BASE: "http://${MEDIA_SRS_HTTP_HOST:-112.18.238.6:8080}"
+      AI_SRS_PUBLIC_BASE: "http://${MEDIA_SRS_HTTP_HOST:-112.18.238.6:18889}"
       AI_EVIDENCE_ROOT: "/var/recordings"
       AI_WORKER_ID: "${AI_WORKER_ID:-ai-worker-01}"
       AI_CONCURRENCY: "${AI_CONCURRENCY:-4}"
