@@ -92,6 +92,7 @@
             <q-slide-transition><div v-show="source.recording_enabled" class="option-row"><span>录像保留时间</span><q-input v-model.number="source.recording_retain_hours" dense outlined dark type="number" min="1" max="87600" suffix="小时" /></div></q-slide-transition>
             <div class="service-row"><div><q-icon name="photo_camera" /><span><strong>实时抽帧</strong><small>从在线流定时保存图片</small></span></div><q-toggle v-model="source.sampling_enabled" color="primary" /></div>
             <q-slide-transition><div v-show="source.sampling_enabled" class="option-row sampling-option"><span>抽帧规则</span><div class="sampling-inputs"><q-input v-model.number="source.sampling_interval_minutes" dense outlined dark type="number" min="1" max="1440" prefix="每" suffix="分钟" /><q-input v-model.number="source.sampling_frame_count" dense outlined dark type="number" min="1" suffix="帧" /></div></div></q-slide-transition>
+            <q-slide-transition><div v-show="source.sampling_enabled" class="option-row"><span>图片保留时间</span><q-input v-model.number="source.sampling_retain_hours" dense outlined dark type="number" min="1" max="87600" suffix="小时" /></div></q-slide-transition>
           </article>
         </div>
       </q-page>
@@ -199,11 +200,11 @@ async function refreshCurrent() {
 }
 
 async function saveServices() {
-  const invalid = sources.value.some((source) => (source.recording_enabled && (!Number.isInteger(source.recording_retain_hours) || source.recording_retain_hours < 1 || source.recording_retain_hours > 87600)) || !Number.isInteger(source.sampling_interval_minutes) || source.sampling_interval_minutes < 1 || source.sampling_interval_minutes > 1440 || !Number.isInteger(source.sampling_frame_count) || source.sampling_frame_count < 1 || source.sampling_frame_count > source.sampling_interval_minutes * 60)
+  const invalid = sources.value.some((source) => (source.recording_enabled && (!Number.isInteger(source.recording_retain_hours) || source.recording_retain_hours < 1 || source.recording_retain_hours > 87600)) || (source.sampling_enabled && (!Number.isInteger(source.sampling_retain_hours) || source.sampling_retain_hours < 1 || source.sampling_retain_hours > 87600)) || !Number.isInteger(source.sampling_interval_minutes) || source.sampling_interval_minutes < 1 || source.sampling_interval_minutes > 1440 || !Number.isInteger(source.sampling_frame_count) || source.sampling_frame_count < 1 || source.sampling_frame_count > source.sampling_interval_minutes * 60)
   if (invalid) return $q.notify({ type: 'negative', message: '保留时间为1～87600小时；抽帧间隔为1～1440分钟，平均每分钟最多60帧' })
   busy.value = true
   try {
-    await api(server.value, '/sources', { method: 'PUT', body: JSON.stringify({ sources: sources.value.map((source) => ({ video_source_id: source.video_source_id, recording_enabled: source.recording_enabled, recording_retain_hours: source.recording_retain_hours, sampling_enabled: source.sampling_enabled, sampling_interval_minutes: source.sampling_interval_minutes, sampling_frame_count: source.sampling_frame_count })) }) })
+    await api(server.value, '/sources', { method: 'PUT', body: JSON.stringify({ sources: sources.value.map((source) => ({ video_source_id: source.video_source_id, recording_enabled: source.recording_enabled, recording_retain_hours: source.recording_retain_hours, sampling_enabled: source.sampling_enabled, sampling_interval_minutes: source.sampling_interval_minutes, sampling_frame_count: source.sampling_frame_count, sampling_retain_hours: source.sampling_retain_hours })) }) })
     $q.notify({ type: 'positive', message: '所有点位服务配置已生效' })
     await loadSources()
   } catch (error) { $q.notify({ type: 'negative', message: (error as Error).message }) } finally { busy.value = false }

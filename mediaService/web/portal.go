@@ -41,6 +41,7 @@ type portalSourceRow struct {
 	SamplingEnabled         bool       `json:"sampling_enabled"`
 	SamplingIntervalMinutes int        `json:"sampling_interval_minutes"`
 	SamplingFrameCount      int        `json:"sampling_frame_count"`
+	SamplingRetainHours     int        `json:"sampling_retain_hours"`
 	FrameCount              int64      `json:"frame_count"`
 	LastCapturedAt          *time.Time `json:"last_captured_at,omitempty"`
 }
@@ -52,6 +53,7 @@ type portalSourceConfig struct {
 	SamplingEnabled         bool `json:"sampling_enabled"`
 	SamplingIntervalMinutes int  `json:"sampling_interval_minutes"`
 	SamplingFrameCount      int  `json:"sampling_frame_count"`
+	SamplingRetainHours     int  `json:"sampling_retain_hours"`
 	// Deprecated fields are detected so an old client cannot silently replace
 	// a precise hour/interval rule with its former day/per-minute defaults.
 	RecordingRetainDays int `json:"recording_retain_days"`
@@ -159,7 +161,8 @@ func (s *Server) listPortalSources(w http.ResponseWriter, p principal) {
 			RecordingEnabled: recordingRule.Enabled, RecordingRetainHours: retainHours,
 			SamplingEnabled:         analysisRule.Enabled,
 			SamplingIntervalMinutes: frameConfig.IntervalMinutes, SamplingFrameCount: frameConfig.FramesPerInterval,
-			FrameCount: aggregate.FrameCount, LastCapturedAt: aggregate.LastCapturedAt,
+			SamplingRetainHours: frameConfig.RetainHours,
+			FrameCount:          aggregate.FrameCount, LastCapturedAt: aggregate.LastCapturedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sources": rows})
@@ -222,6 +225,7 @@ func (s *Server) updatePortalSourceConfigs(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if config.VideoSourceID == 0 || (config.RecordingEnabled && (config.RecordingRetainHours < 1 || config.RecordingRetainHours > 87600)) ||
+			(config.SamplingEnabled && (config.SamplingRetainHours < 1 || config.SamplingRetainHours > 87600)) ||
 			!analysis.ValidLiveFrameConfig(config.SamplingIntervalMinutes, config.SamplingFrameCount) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "视频源配置参数无效"})
 			return
@@ -258,6 +262,7 @@ func (s *Server) updatePortalSourceConfigs(w http.ResponseWriter, r *http.Reques
 			configJSON, _ := json.Marshal(map[string]int{
 				"interval_minutes":    config.SamplingIntervalMinutes,
 				"frames_per_interval": config.SamplingFrameCount,
+				"retain_hours":        config.SamplingRetainHours,
 			})
 			analysisRule := models.VideoAnalysisRule{
 				VideoSourceID: config.VideoSourceID, AlgorithmCode: analysis.AlgorithmFrameSampler,

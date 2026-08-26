@@ -119,6 +119,7 @@ function renderSources() {
             <td><input class="compact-input retain-hours" type="number" min="1" max="87600" value="${Number(source.recording_retain_hours || 48)}" /> 小时</td>
             <td><input class="sampling-enabled" type="checkbox" ${source.sampling_enabled ? 'checked' : ''} aria-label="开启实时抽帧" /></td>
             <td class="sampling-config">每 <input class="compact-input sample-interval" type="number" min="1" max="1440" value="${Number(source.sampling_interval_minutes || 1)}" /> 分钟 <input class="compact-input sample-count" type="number" min="1" value="${Number(source.sampling_frame_count || 2)}" /> 帧</td>
+            <td><input class="compact-input sample-retain-hours" type="number" min="1" max="87600" value="${Number(source.sampling_retain_hours || 24)}" /> 小时</td>
             <td>${Number(source.frame_count || 0)} 张<br><span class="source-meta">${escapeHTML(localTime(source.last_captured_at))}</span></td>
         </tr>`).join('')
     $$('.source-owner').forEach((select) => select.addEventListener('change', assignOwner))
@@ -340,9 +341,10 @@ async function saveConfigs() {
         sampling_enabled: row.querySelector('.sampling-enabled').checked,
         sampling_interval_minutes: Number.parseInt(row.querySelector('.sample-interval').value, 10),
         sampling_frame_count: Number.parseInt(row.querySelector('.sample-count').value, 10),
+        sampling_retain_hours: Number.parseInt(row.querySelector('.sample-retain-hours').value, 10),
     }))
     if (!sources.length) return toast('当前没有可保存的视频源', true)
-    if (sources.some((item) => (item.recording_enabled && (!Number.isInteger(item.recording_retain_hours) || item.recording_retain_hours < 1 || item.recording_retain_hours > 87600)) || !Number.isInteger(item.sampling_interval_minutes) || item.sampling_interval_minutes < 1 || item.sampling_interval_minutes > 1440 || !Number.isInteger(item.sampling_frame_count) || item.sampling_frame_count < 1 || item.sampling_frame_count > item.sampling_interval_minutes * 60)) {
+    if (sources.some((item) => (item.recording_enabled && (!Number.isInteger(item.recording_retain_hours) || item.recording_retain_hours < 1 || item.recording_retain_hours > 87600)) || (item.sampling_enabled && (!Number.isInteger(item.sampling_retain_hours) || item.sampling_retain_hours < 1 || item.sampling_retain_hours > 87600)) || !Number.isInteger(item.sampling_interval_minutes) || item.sampling_interval_minutes < 1 || item.sampling_interval_minutes > 1440 || !Number.isInteger(item.sampling_frame_count) || item.sampling_frame_count < 1 || item.sampling_frame_count > item.sampling_interval_minutes * 60)) {
         return toast('录像保留应为1～87600小时；抽帧间隔应为1～1440分钟，且平均频率不能超过每分钟60帧', true)
     }
     const button = $('#saveConfigsButton')

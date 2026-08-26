@@ -89,6 +89,7 @@ const $q = useQuasar()
 const tab = ref('live')
 const busy = ref(false)
 const frames = ref<FrameResult[]>([])
+const frameSources = ref<Record<number, string>>({})
 const recordings = ref<RecordingSegment[]>([])
 const playingSegment = ref<RecordingSegment>()
 const previewFrame = ref('')
@@ -98,7 +99,7 @@ const isHEVC = computed(() => /hevc|h265/i.test(props.source.codec || ''))
 function localTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN', { hour12: false }) }
 function fileSize(value: number) { if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
 function duration(value: number) { const seconds = Math.max(0, Math.round(value)); return `${Math.floor(seconds / 60)}分${seconds % 60}秒` }
-function frameURL(id: number) { return customerResourceURL(props.server, `/frames/${id}/image`) }
+function frameURL(id: number) { return frameSources.value[id] || customerResourceURL(props.server, `/frames/${id}/image`) }
 function recordingURL(id: number) { return customerResourceURL(props.server, `/segments/${id}/video`) }
 
 async function loadResults() {
@@ -110,6 +111,16 @@ async function loadResults() {
       api<{ segments: RecordingSegment[] }>(props.server, `/segments${query}`),
     ])
     frames.value = Array.isArray(frameResult) ? frameResult : []
+    Object.values(frameSources.value).forEach((url) => URL.revokeObjectURL(url))
+    frameSources.value = {}
+    const token = localStorage.getItem('eyes_customer_session') || ''
+    await Promise.all(frames.value.map(async (frame) => {
+      try {
+        const response = await fetch(customerResourceURL(props.server, `/frames/${frame.id}/image`), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+        if (!response.ok) return
+        frameSources.value[frame.id] = URL.createObjectURL(await response.blob())
+      } catch { /* image remains unavailable */ }
+    }))
     recordings.value = Array.isArray(segmentResult.segments) ? segmentResult.segments : []
   } catch (error) { $q.notify({ type: 'negative', message: (error as Error).message }) } finally { busy.value = false }
 }

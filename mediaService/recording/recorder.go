@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"media-service/analysis"
 	"media-service/database"
 	"media-service/models"
 	"media-service/streamsource"
@@ -491,13 +492,31 @@ func (m *RecorderManager) cleanupExpired() {
 	// 它们仍按所属视频源的小时规则清理。
 	m.cleanupCorruptedFiles(now, retention)
 
-	// MediaService owns metadata and storage lifecycle for analysis
-	// artifacts even though AIService owns the extraction process.
-	frameCutoff := now.AddDate(0, 0, -m.cfg.FrameRetainDays)
-	frameWhere := "captured_at < ?"
-	frameArgs := []interface{}{frameCutoff}
-	var expiredFrames []models.RecordingFrame
-	database.DB.Unscoped().Where(frameWhere, frameArgs...).Find(&expiredFrames)
+	// Each live frame sampler rule owns its image retention period. Rules
+	// created before this field existed decode to the 24-hour default.
+	type frameRetainRule struct{ StreamName, ConfigJSON string }
+	var frameRules []frameRetainRule
+	database.DB.Table("video_sources").
+		Select("video_sources.stream_name, video_analysis_rules.config_json").
+		Joins("JOIN video_analysis_rules ON video_analysis_rules.video_source_id = video_sources.id").
+		Where("video_analysis_rules.algorithm_code = ?", analysis.AlgorithmFrameSampler).
+		Find(&frameRules)
+	frameRetention := make(map[string]int, len(frameRules))
+	for _, rule := range frameRules {
+		frameRetention[rule.StreamName] = analysis.DecodeLiveFrameConfig(rule.ConfigJSON).RetainHours
+	}
+	var frameCandidates []models.RecordingFrame
+	database.DB.Unscoped().Where("captured_at < ?", now.Add(-time.Hour)).Find(&frameCandidates)
+	expiredFrames := make([]models.RecordingFrame, 0)
+	for _, frame := range frameCandidates {
+		hours := frameRetention[frame.StreamName]
+		if hours <= 0 {
+			hours = 24
+		}
+		if frame.CapturedAt.Before(now.Add(-time.Duration(hours) * time.Hour)) {
+			expiredFrames = append(expiredFrames, frame)
+		}
+	}
 	for _, f := range expiredFrames {
 		if f.FilePath != "" {
 			if err := os.Remove(f.FilePath); err != nil && !os.IsNotExist(err) {
@@ -506,7 +525,11 @@ func (m *RecorderManager) cleanupExpired() {
 		}
 	}
 	if len(expiredFrames) > 0 {
-		database.DB.Unscoped().Where(frameWhere, frameArgs...).Delete(&models.RecordingFrame{})
+		ids := make([]uint, 0, len(expiredFrames))
+		for _, frame := range expiredFrames {
+			ids = append(ids, frame.ID)
+		}
+		database.DB.Unscoped().Where("id IN ?", ids).Delete(&models.RecordingFrame{})
 		log.Printf("[recording] 清理过期帧 %d 条", len(expiredFrames))
 	}
 

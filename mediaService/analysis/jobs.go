@@ -174,6 +174,7 @@ func LiveFrameJobCutoff(now time.Time) time.Time {
 type LiveFrameConfig struct {
 	IntervalMinutes   int `json:"interval_minutes"`
 	FramesPerInterval int `json:"frames_per_interval"`
+	RetainHours       int `json:"retain_hours"`
 }
 
 func ValidLiveFrameConfig(intervalMinutes, framesPerInterval int) bool {
@@ -186,20 +187,26 @@ func DecodeLiveFrameConfig(raw string) LiveFrameConfig {
 		IntervalMinutes   int `json:"interval_minutes"`
 		FramesPerInterval int `json:"frames_per_interval"`
 		FramesPerMinute   int `json:"frames_per_minute"`
+		RetainHours       int `json:"retain_hours"`
 	}{}
 	_ = json.Unmarshal([]byte(raw), &config)
 	if ValidLiveFrameConfig(config.IntervalMinutes, config.FramesPerInterval) {
-		return LiveFrameConfig{
-			IntervalMinutes: config.IntervalMinutes, FramesPerInterval: config.FramesPerInterval,
-		}
+		return LiveFrameConfig{IntervalMinutes: config.IntervalMinutes, FramesPerInterval: config.FramesPerInterval, RetainHours: validFrameRetainHours(config.RetainHours)}
 	}
 	if config.FramesPerMinute > 0 {
 		if config.FramesPerMinute > MaxFramesPerMinute {
 			config.FramesPerMinute = MaxFramesPerMinute
 		}
-		return LiveFrameConfig{IntervalMinutes: 1, FramesPerInterval: config.FramesPerMinute}
+		return LiveFrameConfig{IntervalMinutes: 1, FramesPerInterval: config.FramesPerMinute, RetainHours: validFrameRetainHours(config.RetainHours)}
 	}
-	return LiveFrameConfig{IntervalMinutes: 1, FramesPerInterval: 2}
+	return LiveFrameConfig{IntervalMinutes: 1, FramesPerInterval: 2, RetainHours: 24}
+}
+
+func validFrameRetainHours(hours int) int {
+	if hours < 1 || hours > 87600 {
+		return 24
+	}
+	return hours
 }
 
 func liveFrameSchedule(sourceID uint, intervalMinutes, framesPerInterval int, now time.Time) (time.Time, bool) {

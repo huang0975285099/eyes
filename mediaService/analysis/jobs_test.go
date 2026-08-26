@@ -10,11 +10,11 @@ func TestDecodeLiveFrameConfig(t *testing.T) {
 		raw  string
 		want LiveFrameConfig
 	}{
-		{`{"interval_minutes":10,"frames_per_interval":1}`, LiveFrameConfig{10, 1}},
-		{`{"interval_minutes":10,"frames_per_interval":3}`, LiveFrameConfig{10, 3}},
-		{`{"frames_per_minute":60}`, LiveFrameConfig{1, 60}},
-		{`{"interval_minutes":1,"frames_per_interval":61}`, LiveFrameConfig{1, 2}},
-		{"invalid", LiveFrameConfig{1, 2}},
+		{`{"interval_minutes":10,"frames_per_interval":1}`, LiveFrameConfig{10, 1, 24}},
+		{`{"interval_minutes":10,"frames_per_interval":3,"retain_hours":8}`, LiveFrameConfig{10, 3, 8}},
+		{`{"frames_per_minute":60}`, LiveFrameConfig{1, 60, 24}},
+		{`{"interval_minutes":1,"frames_per_interval":61}`, LiveFrameConfig{1, 2, 24}},
+		{"invalid", LiveFrameConfig{1, 2, 24}},
 	} {
 		if got := DecodeLiveFrameConfig(test.raw); got != test.want {
 			t.Fatalf("DecodeLiveFrameConfig(%q) = %#v, want %#v", test.raw, got, test.want)

@@ -30,6 +30,7 @@ export interface VideoSource {
   sampling_enabled: boolean
   sampling_interval_minutes: number
   sampling_frame_count: number
+  sampling_retain_hours: number
   frame_count: number
   last_captured_at?: string
 }
