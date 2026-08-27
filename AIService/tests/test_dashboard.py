@@ -33,6 +33,10 @@ class FakeMediaClient:
             return []
         if path.startswith("/api/portal/segments"):
             return {"segments": []}
+        if path.startswith("/api/portal/events"):
+            return {"events": []}
+        if path.startswith("/api/portal/analysis-rules"):
+            return {"rules": []}
         if path == "/api/portal/jobs":
             return {"jobs": []}
         if path == "/api/portal/customers":
@@ -223,6 +227,41 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(self.client.stream_path, "/api/portal/segments/12/video")
         self.assertEqual(self.client.stream_headers["Range"], "bytes=0-8")
         self.assertEqual(self.client.authorization, "Bearer customer-session")
+
+    def test_customer_event_evidence_and_review_are_proxied(self) -> None:
+        headers = {"Authorization": "Bearer customer-session"}
+        request = urllib.request.Request(
+            self.base + "/api/customer/events?status=pending", headers=headers
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(json.loads(response.read()), {"events": []})
+
+        request = urllib.request.Request(
+            self.base + "/api/customer/events/8/snapshot", headers=headers
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(response.read(), b"jpeg-data")
+
+        request = urllib.request.Request(
+            self.base + "/api/customer/events/8/clip",
+            headers={**headers, "Range": "bytes=0-8"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(response.status, 206)
+            self.assertEqual(response.read(), b"mp4-bytes")
+        self.assertEqual(self.client.stream_path, "/api/portal/events/8/clip")
+
+        payload = {"status": "confirmed"}
+        request = urllib.request.Request(
+            self.base + "/api/customer/events/8/review",
+            data=json.dumps(payload).encode(),
+            method="PUT",
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(self.client.saved_path, "/api/portal/events/8/review")
+        self.assertEqual(self.client.saved, payload)
 
     def test_customer_cannot_enter_platform_dashboard(self) -> None:
         request = urllib.request.Request(

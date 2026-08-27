@@ -135,7 +135,10 @@ class AnalysisWorker:
                 worker_id=self._settings.worker_id,
                 hostname=socket.gethostname(),
                 version=__version__,
-                capabilities=self._registry.capabilities,
+                capabilities=sorted(set(
+                    self._registry.capabilities
+                    + self._registry.realtime_capabilities
+                )),
                 status=status,
                 active_jobs=len(self._futures),
                 last_error=str(snapshot["last_error"]),

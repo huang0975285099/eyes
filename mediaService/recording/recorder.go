@@ -23,11 +23,12 @@ import (
 )
 
 const (
-	defaultSegmentDuration = 600
-	defaultCheckInterval   = 30
-	defaultRetainHours     = 48
-	defaultFrameRetainDays = 30
-	cleanupInterval        = 10 * time.Minute
+	defaultSegmentDuration  = 600
+	defaultCheckInterval    = 30
+	defaultRetainHours      = 48
+	defaultFrameRetainDays  = 30
+	defaultEventRetainHours = 30 * 24
+	cleanupInterval         = 10 * time.Minute
 	// SRS 的 /api/v1/streams 默认只返回前 ~10 条（HTTP API 内置分页上限）。
 	// 不带 count 时会漏掉绝大多数在推的流，导致只录到一小撮设备。
 	// 显式带足够大的 count 取全量；SRS 会返回 min(实际, count)。
@@ -44,7 +45,10 @@ type Config struct {
 	// FrameRetainDays controls lifecycle cleanup for AIService-produced frame
 	// artifacts. Frame extraction itself does not run in MediaService.
 	FrameRetainDays int
-	FFmpegPath      string
+	// EventRetainHours is the fallback for realtime rules without a valid
+	// retain_hours value in config_json.
+	EventRetainHours int
+	FFmpegPath       string
 }
 
 type srsStream struct {
@@ -91,6 +95,9 @@ func NewRecorderManager(cfg Config) *RecorderManager {
 	}
 	if cfg.FrameRetainDays <= 0 {
 		cfg.FrameRetainDays = defaultFrameRetainDays
+	}
+	if cfg.EventRetainHours <= 0 {
+		cfg.EventRetainHours = defaultEventRetainHours
 	}
 	if cfg.FFmpegPath == "" {
 		cfg.FFmpegPath = "ffmpeg"
@@ -332,7 +339,7 @@ func (m *RecorderManager) indexExistingFiles() {
 			continue
 		}
 		streamName := streamEntry.Name()
-		if streamName == "_frames" {
+		if streamName == "_frames" || streamName == "_events" {
 			continue
 		}
 		streamDir := filepath.Join(root, streamName)
@@ -533,6 +540,47 @@ func (m *RecorderManager) cleanupExpired() {
 		log.Printf("[recording] 清理过期帧 %d 条", len(expiredFrames))
 	}
 
+	// Realtime event evidence has independent retention. A rule may override
+	// the deployment default with retain_hours in its generic config JSON.
+	type eventRetainRule struct {
+		VideoSourceID uint
+		AlgorithmCode string
+		ConfigJSON    string
+	}
+	var eventRules []eventRetainRule
+	database.DB.Model(&models.VideoAnalysisRule{}).
+		Where("algorithm_code <> ?", analysis.AlgorithmFrameSampler).
+		Find(&eventRules)
+	eventRetention := make(map[string]int, len(eventRules))
+	for _, rule := range eventRules {
+		eventRetention[eventRetentionKey(rule.VideoSourceID, rule.AlgorithmCode)] =
+			decodeEventRetainHours(rule.ConfigJSON, m.cfg.EventRetainHours)
+	}
+	var eventCandidates []models.AIEvent
+	database.DB.Unscoped().Where("started_at < ?", now.Add(-time.Hour)).Find(&eventCandidates)
+	expiredEventIDs := make([]uint, 0)
+	evidenceRoot := filepath.Join(m.cfg.OutputDir, "_events")
+	for _, event := range eventCandidates {
+		hours := eventRetention[eventRetentionKey(event.VideoSourceID, event.AlgorithmCode)]
+		if hours <= 0 {
+			hours = m.cfg.EventRetainHours
+		}
+		reference := event.StartedAt
+		if event.EndedAt != nil {
+			reference = *event.EndedAt
+		}
+		if !reference.Before(now.Add(-time.Duration(hours) * time.Hour)) {
+			continue
+		}
+		removeEvidenceFile(evidenceRoot, event.SnapshotPath)
+		removeEvidenceFile(evidenceRoot, event.ClipPath)
+		expiredEventIDs = append(expiredEventIDs, event.ID)
+	}
+	if len(expiredEventIDs) > 0 {
+		database.DB.Unscoped().Where("id IN ?", expiredEventIDs).Delete(&models.AIEvent{})
+		log.Printf("[analysis] 清理过期AI事件 %d 条", len(expiredEventIDs))
+	}
+
 	// 实时抽帧任务只用于可靠调度，图片结果有独立索引；保留7天任务状态即可。
 	jobCutoff := time.Now().AddDate(0, 0, -7)
 	jobResult := database.DB.Where("input_type = ? AND created_at < ?", "live_stream", jobCutoff).
@@ -674,7 +722,7 @@ func (m *RecorderManager) cleanupEmptyDirs() {
 		if !streamEntry.IsDir() {
 			continue
 		}
-		if streamEntry.Name() == "_frames" {
+		if streamEntry.Name() == "_frames" || streamEntry.Name() == "_events" {
 			continue
 		}
 		streamDir := filepath.Join(root, streamEntry.Name())
@@ -696,6 +744,42 @@ func (m *RecorderManager) cleanupEmptyDirs() {
 		if len(dayEntries2) == 0 {
 			os.Remove(streamDir)
 		}
+	}
+}
+
+func eventRetentionKey(videoSourceID uint, algorithmCode string) string {
+	return strconv.FormatUint(uint64(videoSourceID), 10) + ":" + algorithmCode
+}
+
+func decodeEventRetainHours(raw string, fallback int) int {
+	config := struct {
+		RetainHours int `json:"retain_hours"`
+	}{}
+	if json.Unmarshal([]byte(raw), &config) != nil || config.RetainHours < 1 || config.RetainHours > 87600 {
+		return fallback
+	}
+	return config.RetainHours
+}
+
+func removeEvidenceFile(root, target string) {
+	if strings.TrimSpace(target) == "" {
+		return
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return
+	}
+	rel, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		log.Printf("[analysis] 拒绝删除_events目录外的证据文件 %s", target)
+		return
+	}
+	if err := os.Remove(targetAbs); err != nil && !os.IsNotExist(err) {
+		log.Printf("[analysis] 删除过期AI证据失败 %s: %v", targetAbs, err)
 	}
 }
 

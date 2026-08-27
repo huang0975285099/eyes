@@ -89,6 +89,13 @@ MediaService按规则和SRS在线状态创建持久化实时抽帧任务；AISer
 拉取SRS实时流、执行FFmpeg并回报图片。这个过程不读取录像片段，也不依赖该视频源的录像开关。
 两个容器只为持久化AI图片而共享`recordings`卷。
 
+后续实时算法使用独立的长连接控制面：AIService按自身能力同步在线流和逐路规则，
+同一路视频只解码一次，再把帧分发给多个算法。连续命中、告警冷却、事件打开/关闭、
+截图和短视频证据由AIService公共运行时统一处理；MediaService负责事件持久化、租户隔离
+查询和人工复核。P0底座已完成，但未实现的业务算法不会被注册或产生模拟告警。
+AI事件默认保留720小时，可通过`AI_EVENT_RETAIN_HOURS`修改；单路算法配置中的
+`retain_hours`可以覆盖默认值。过期数据库记录、截图和短视频每10分钟统一清理。
+
 两台目标服务器没有GPU不影响当前`frame_sampler`：抽帧由CPU上的FFmpeg完成。
 `.env`已经预留`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`和`QWEN_VL_MODEL`并传入
 AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合作为低频图片/视频片段
@@ -109,6 +116,11 @@ AIService容器，但当前代码尚未调用Qwen。后续Qwen视觉模型适合
 - `GET /api/portal/frames`、`GET /api/portal/frames/{id}/image`：按客户隔离的抽帧结果。
 - `GET /api/ai/algorithms`：AI能力目录；当前抽帧已启用，打架、安全帽和火灾为后续模块。
 - `GET /api/ai/jobs/stats`：AI任务状态和Worker心跳概览。
+- `GET/PUT /api/portal/analysis-rules`：查询或保存逐路实时算法通用配置。
+- `GET /api/portal/events`、`GET /api/portal/events/{id}/snapshot|clip`：按客户隔离查询AI事件及证据。
+- `PUT /api/portal/events/{id}/review`：将事件标记为待确认、已确认或误报。
+- `GET /api/internal/ai/realtime-config`：按Worker能力同步在线流及实时算法规则。
+- `POST /api/internal/ai/events`：幂等上报实时事件打开/关闭及证据路径。
 - `/api/internal/ai/*`：AIService任务领取、结果上报和心跳接口，仅供Docker内部网络或可信局域网调用。
 - `GET /api/client-updates/latest`：客户端检查更新。
 - `POST /api/client-updates/upload`：上传更新 ZIP，必须提供 `X-Update-Key: <UPDATE_ADMIN_KEY>`。

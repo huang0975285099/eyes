@@ -7,6 +7,7 @@ from .api_client import MediaAPIClient
 from .config import Settings
 from .health import start_health_server
 from .modules import AnalyzerRegistry, FrameSamplerAnalyzer
+from .realtime import RealtimeCoordinator
 from .state import ServiceState
 from .worker import AnalysisWorker
 
@@ -25,7 +26,11 @@ def main() -> None:
             command_timeout_seconds=settings.ffmpeg_timeout_seconds,
         )
     )
-    state = ServiceState(settings.worker_id, registry.capabilities)
+    state = ServiceState(
+        settings.worker_id,
+        registry.capabilities,
+        registry.realtime_capabilities,
+    )
     client = MediaAPIClient(
         settings.media_api, settings.request_timeout_seconds
     )
@@ -36,15 +41,18 @@ def main() -> None:
         settings.srs_public_base,
     )
     worker = AnalysisWorker(settings, client, registry, state)
+    realtime = RealtimeCoordinator(settings, client, registry, state)
 
     def stop(_signum: int, _frame: object) -> None:
         worker.stop()
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+    realtime.start()
     try:
         worker.run()
     finally:
+        realtime.stop()
         health_server.shutdown()
         health_server.server_close()
 

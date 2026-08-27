@@ -10,6 +10,7 @@ from typing import Any
 class ServiceState:
     worker_id: str
     capabilities: list[str]
+    realtime_capabilities: list[str] = field(default_factory=list)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _lock: Lock = field(default_factory=Lock, repr=False)
     _status: str = "starting"
@@ -18,6 +19,11 @@ class ServiceState:
     _failed_jobs: int = 0
     _last_error: str = ""
     _last_heartbeat_at: str = ""
+    _active_streams: int = 0
+    _processed_frames: int = 0
+    _emitted_events: int = 0
+    _realtime_last_sync_at: str = ""
+    _realtime_last_error: str = ""
 
     def update(self, **values: Any) -> None:
         with self._lock:
@@ -36,10 +42,16 @@ class ServiceState:
                 "worker_id": self.worker_id,
                 "status": self._status,
                 "capabilities": self.capabilities,
+                "realtime_capabilities": self.realtime_capabilities,
                 "active_jobs": self._active_jobs,
                 "completed_jobs": self._completed_jobs,
                 "failed_jobs": self._failed_jobs,
                 "last_error": self._last_error,
                 "last_heartbeat_at": self._last_heartbeat_at,
+                "active_streams": self._active_streams,
+                "processed_frames": self._processed_frames,
+                "emitted_events": self._emitted_events,
+                "realtime_last_sync_at": self._realtime_last_sync_at,
+                "realtime_last_error": self._realtime_last_error,
                 "started_at": self.started_at.isoformat(),
             }

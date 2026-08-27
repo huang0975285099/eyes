@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -91,6 +92,30 @@ class MediaAPIClient:
                 "active_jobs": active_jobs,
                 "last_error": last_error[:4000],
             },
+        )
+
+    def get_realtime_config(
+        self, worker_id: str, capabilities: list[str]
+    ) -> dict[str, Any]:
+        query = urllib.parse.urlencode(
+            {
+                "worker_id": worker_id,
+                "capabilities": ",".join(sorted(capabilities)),
+            }
+        )
+        value = self.get_json(f"/api/internal/ai/realtime-config?{query}")
+        if not isinstance(value, dict):
+            raise MediaAPIError("realtime config response is not an object")
+        return value
+
+    def report_events(
+        self, worker_id: str, events: list[dict[str, Any]]
+    ) -> None:
+        if not events:
+            return
+        self._post(
+            "/api/internal/ai/events",
+            {"worker_id": worker_id, "events": events},
         )
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:

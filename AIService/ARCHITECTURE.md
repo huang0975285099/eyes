@@ -34,7 +34,7 @@ MediaService内部API访问，不建立第二套数据库连接。JPEG写共享�
 AIService不直连数据库；浏览器也不会获得MediaService会话令牌。平台管理员能管理全部
 视频源，客户管理员只能访问自己`customer_id`对应的数据。
 
-## 实时算法扩展阶段
+## 实时算法公共底座（已实现）
 
 打架、安全帽和火灾同样分析SRS实时流。多算法启用后，继续扩展为每路流只拉取和解码
 一次的共享会话：
@@ -70,8 +70,8 @@ MediaService 视频源与规则
 
 - `AnalyzerRegistry`：模块注册与能力上报。
 - `frame_sampler`：当前已实现的SRS实时流抽帧模块。
-- `StreamManager`：下一阶段实现长连接拉流、重连和多算法共享解码。
-- `EventAggregator`：下一阶段实现连续命中、事件合并、冷却和证据导出。
+- `StreamManager`：已实现长连接拉流、重连、多算法共享解码和按算法采样。
+- `EventAggregator`：已实现连续命中、事件打开/关闭、冷却和证据导出。
 - MediaService：配置、任务、事件、录像索引和数据API的控制中心。
 
 `fight`、`helmet`、`fire`已经进入算法目录但保持禁用，避免未接入模型时产生虚假能力。

@@ -19,6 +19,18 @@
 | `helmet` | 已登记、未启用 | 视频帧 | 异常事件 |
 | `fire` | 已登记、未启用 | 连续视频帧 | 异常事件 |
 
+## 已完成的实时AI公共底座
+
+P0实时基础设施已经接入，但不会注册或模拟尚未实现的业务算法：
+
+- AIService按Worker实际注册的实时能力同步在线流和逐路规则。
+- `StreamManager`保证同一路视频只启动一个FFmpeg长连接解码进程。
+- 解码帧按每种算法的`sample_fps`分发；推理繁忙时丢弃过期帧，不积压实时延迟。
+- 内存环形缓存保留告警前后帧，写入`_events`目录的JPEG截图和MP4短视频。
+- `EventAggregator`统一处理连续命中、事件打开/关闭、冷却和幂等上报。
+- MediaService提供租户隔离的事件查询、证据读取和人工确认/误报复核接口。
+- 事件及证据按规则`retain_hours`清理；未配置时使用`AI_EVENT_RETAIN_HOURS`（默认720小时）。
+
 抽帧规则按视频源配置。可在Web后台选择摄像头，并设置“每N分钟抽M帧”；例如设置
 每10分钟1帧，系统约每10分钟从当前实时画面抽取一张。平均频率最高每分钟60帧。
 离线视频源不创建空任务，已有但尚未执行的实时任务会被丢弃，恢复推流后自动继续。
@@ -95,8 +107,18 @@ Qwen视觉复核模块使用；`frame_sampler`当前不会消耗Qwen额度。Qwe
 4. 在 MediaService 算法目录启用对应能力并配置视频源规则。
 5. 图片和视频证据写共享存储，只把路径、时间、置信度和模型版本上报。
 
-实时算法下一阶段会增加共享拉流/解码和帧环形缓存。不要让每一个算法模块独立
-拉取同一路视频，否则会重复消耗网络、解码器和GPU资源。
+实时算法实现`RealtimeAnalyzer`并通过`register_realtime`注册，不应自行连接视频流。
+通用规则参数包括`sample_fps`、`min_hits`、`max_gap_seconds`、
+`clear_after_seconds`和`cooldown_seconds`。
+
+实时控制面接口：
+
+- `GET /api/internal/ai/realtime-config?worker_id=...&capabilities=...`：按Worker能力和稳定流归属返回在线流与规则。
+- `POST /api/internal/ai/events`：幂等上报事件打开/关闭及证据路径。
+- `GET/PUT /api/portal/analysis-rules`：查询或保存逐路通用算法规则。
+- `GET /api/portal/events`：按租户、视频源、算法、状态和日期查询事件。
+- `GET /api/portal/events/{id}/snapshot|clip`：读取事件证据。
+- `PUT /api/portal/events/{id}/review`：保存`confirmed`或`rejected`人工复核结果。
 
 ## 本地测试
 

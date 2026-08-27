@@ -24,6 +24,10 @@ _FRAME_IMAGE = re.compile(r"^/api/dashboard/frames/(\d+)/image$")
 _CUSTOMER_FRAME_IMAGE = re.compile(r"^/api/customer/frames/(\d+)/image$")
 _DASHBOARD_SEGMENT_VIDEO = re.compile(r"^/api/dashboard/segments/(\d+)/video$")
 _CUSTOMER_SEGMENT_VIDEO = re.compile(r"^/api/customer/segments/(\d+)/video$")
+_EVENT_ARTIFACT = re.compile(
+    r"^/api/(dashboard|customer)/events/(\d+)/(snapshot|clip)$"
+)
+_EVENT_REVIEW = re.compile(r"^/api/(dashboard|customer)/events/(\d+)/review$")
 _SESSION_COOKIE = "eyes_session"
 _MPEGTS_CDN = "https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"
 
@@ -44,7 +48,11 @@ def start_health_server(
                 self._json(200 if payload["ok"] else 503, payload)
                 return
             if parsed.path == "/api/modules":
-                self._json(200, {"worker_id": state.worker_id, "capabilities": state.capabilities})
+                self._json(200, {
+                    "worker_id": state.worker_id,
+                    "capabilities": state.capabilities,
+                    "realtime_capabilities": state.realtime_capabilities,
+                })
                 return
             get_routes = {
                 "/api/dashboard/auth/status": ("/api/portal/auth/status", False, ""),
@@ -54,11 +62,15 @@ def start_health_server(
                 "/api/dashboard/jobs": ("/api/portal/jobs", True, "platform_admin"),
                 "/api/dashboard/frames": ("/api/portal/frames", True, "platform_admin"),
                 "/api/dashboard/segments": ("/api/portal/segments", True, "platform_admin"),
+                "/api/dashboard/events": ("/api/portal/events", True, "platform_admin"),
+                "/api/dashboard/analysis-rules": ("/api/portal/analysis-rules", True, "platform_admin"),
                 "/api/customer/auth/me": ("/api/portal/auth/me", True, "customer_admin"),
                 "/api/customer/sources": ("/api/portal/sources", True, "customer_admin"),
                 "/api/customer/jobs": ("/api/portal/jobs", True, "customer_admin"),
                 "/api/customer/frames": ("/api/portal/frames", True, "customer_admin"),
                 "/api/customer/segments": ("/api/portal/segments", True, "customer_admin"),
+                "/api/customer/events": ("/api/portal/events", True, "customer_admin"),
+                "/api/customer/analysis-rules": ("/api/portal/analysis-rules", True, "customer_admin"),
             }
             if parsed.path in get_routes:
                 target, authenticated, required_role = get_routes[parsed.path]
@@ -92,6 +104,16 @@ def start_health_server(
             if customer_segment_match:
                 self._proxy_segment_video(
                     customer_segment_match.group(1), required_role="customer_admin"
+                )
+                return
+            event_artifact_match = _EVENT_ARTIFACT.match(parsed.path)
+            if event_artifact_match:
+                platform, event_id, artifact = event_artifact_match.groups()
+                required_role = (
+                    "platform_admin" if platform == "dashboard" else "customer_admin"
+                )
+                self._proxy_event_artifact(
+                    event_id, artifact, required_role=required_role
                 )
                 return
             if parsed.path == "/customer" or parsed.path.startswith("/customer/"):
@@ -159,6 +181,25 @@ def start_health_server(
 
         def do_PUT(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
+            event_review_match = _EVENT_REVIEW.match(path)
+            if event_review_match:
+                platform, event_id = event_review_match.groups()
+                payload = self._read_json()
+                if payload is None:
+                    return
+                required_role = (
+                    "platform_admin" if platform == "dashboard" else "customer_admin"
+                )
+                try:
+                    headers = self._authorized_headers(required_role)
+                    result = client.put_json(
+                        f"/api/portal/events/{event_id}/review", payload, headers
+                    )
+                except MediaAPIError as exc:
+                    self._media_error(exc)
+                    return
+                self._json(200, result)
+                return
             routes = {
                 "/api/dashboard/sources": "/api/portal/sources",
                 "/api/dashboard/source-owner": "/api/portal/source-owner",
@@ -166,6 +207,8 @@ def start_health_server(
                 "/api/dashboard/customers": "/api/portal/customers",
                 "/api/customer/sources": "/api/portal/sources",
                 "/api/customer/auth/password": "/api/portal/auth/password",
+                "/api/dashboard/analysis-rules": "/api/portal/analysis-rules",
+                "/api/customer/analysis-rules": "/api/portal/analysis-rules",
             }
             if path not in routes:
                 self._json(404, {"error": "not found"})
@@ -237,6 +280,67 @@ def start_health_server(
                     headers["Range"] = range_value
                 upstream = client.open_stream(
                     f"/api/portal/segments/{segment_id}/video", headers
+                )
+                status = int(getattr(upstream, "status", 200))
+                self.send_response(status)
+                for name in (
+                    "Content-Type", "Content-Length", "Content-Range",
+                    "Accept-Ranges", "Last-Modified", "ETag",
+                ):
+                    value = upstream.headers.get(name)
+                    if value:
+                        self.send_header(name, value)
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                if urlsplit(self.path).path.startswith("/api/customer/"):
+                    self._cors_headers()
+                self.end_headers()
+                while True:
+                    chunk = upstream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except MediaAPIError as exc:
+                self._media_error(exc)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                if upstream is not None:
+                    upstream.close()
+
+        def _proxy_event_artifact(
+            self, event_id: str, artifact: str, required_role: str
+        ) -> None:
+            if artifact == "snapshot":
+                try:
+                    headers = self._authorized_headers(required_role)
+                    body, content_type = client.get_bytes(
+                        f"/api/portal/events/{event_id}/snapshot", headers
+                    )
+                except MediaAPIError as exc:
+                    self._media_error(exc)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", content_type or "image/jpeg")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "private, max-age=300")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                if urlsplit(self.path).path.startswith("/api/customer/"):
+                    self._cors_headers()
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self._proxy_event_clip(event_id, required_role)
+
+        def _proxy_event_clip(self, event_id: str, required_role: str) -> None:
+            upstream = None
+            try:
+                headers = self._authorized_headers(required_role)
+                range_value = self.headers.get("Range", "").strip()
+                if range_value:
+                    headers["Range"] = range_value
+                upstream = client.open_stream(
+                    f"/api/portal/events/{event_id}/clip", headers
                 )
                 status = int(getattr(upstream, "status", 200))
                 self.send_response(status)

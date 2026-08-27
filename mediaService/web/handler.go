@@ -64,6 +64,9 @@ func (s *Server) Start(port int) {
 	mux.HandleFunc("/api/portal/segments/", s.handlePortalSegmentVideo)
 	mux.HandleFunc("/api/portal/frames", s.handlePortalFrames)
 	mux.HandleFunc("/api/portal/frames/", s.handlePortalFrameImage)
+	mux.HandleFunc("/api/portal/events", s.handlePortalEvents)
+	mux.HandleFunc("/api/portal/events/", s.handlePortalEventArtifact)
+	mux.HandleFunc("/api/portal/analysis-rules", s.handlePortalAnalysisRules)
 	mux.HandleFunc("/api/portal/jobs", s.handlePortalJobs)
 	mux.HandleFunc("/api/client-updates/latest", s.handleClientUpdateLatest)
 	mux.HandleFunc("/api/client-updates/upload", s.handleClientUpdateUpload)
@@ -74,6 +77,8 @@ func (s *Server) Start(port int) {
 	mux.HandleFunc("/api/internal/ai/jobs/claim", s.handleAIJobClaim)
 	mux.HandleFunc("/api/internal/ai/jobs/report", s.handleAIJobReport)
 	mux.HandleFunc("/api/internal/ai/workers/heartbeat", s.handleAIWorkerHeartbeat)
+	mux.HandleFunc("/api/internal/ai/realtime-config", s.handleAIRealtimeConfig)
+	mux.HandleFunc("/api/internal/ai/events", s.handleAIEvents)
 	mux.HandleFunc("/segments/", s.handleVideo)
 
 	addr := fmt.Sprintf(":%d", port)

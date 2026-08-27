@@ -35,14 +35,15 @@ func main() {
 	}
 
 	mgr := recording.NewRecorderManager(recording.Config{
-		SRSApiBase:      cfg.Recording.SRSApiBase,
-		RTMPHost:        cfg.Recording.RTMPHost,
-		OutputDir:       cfg.Recording.OutputDir,
-		SegmentDuration: cfg.Recording.SegmentDuration,
-		CheckInterval:   cfg.Recording.CheckInterval,
-		RetainHours:     cfg.Recording.RetainHours,
-		FrameRetainDays: cfg.Recording.FrameRetainDays,
-		FFmpegPath:      cfg.Recording.FFmpegPath,
+		SRSApiBase:       cfg.Recording.SRSApiBase,
+		RTMPHost:         cfg.Recording.RTMPHost,
+		OutputDir:        cfg.Recording.OutputDir,
+		SegmentDuration:  cfg.Recording.SegmentDuration,
+		CheckInterval:    cfg.Recording.CheckInterval,
+		RetainHours:      cfg.Recording.RetainHours,
+		FrameRetainDays:  cfg.Recording.FrameRetainDays,
+		EventRetainHours: cfg.Recording.EventRetainHours,
+		FFmpegPath:       cfg.Recording.FFmpegPath,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

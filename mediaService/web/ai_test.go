@@ -1,6 +1,7 @@
 package web
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -44,5 +45,44 @@ func TestPathIsWithin(t *testing.T) {
 	}
 	if pathIsWithin(root, outside) {
 		t.Fatalf("expected %q to be outside %q", outside, root)
+	}
+}
+
+func TestValidateEventFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "recordings", "_events")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := filepath.Join(root, "camera-1", "event.jpg")
+	if err := os.MkdirAll(filepath.Dir(snapshot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(snapshot, []byte("jpeg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateEventFile(root, snapshot, []string{".jpg"}, true); err != nil {
+		t.Fatalf("expected valid event file: %v", err)
+	}
+	if err := validateEventFile(root, filepath.Join(filepath.Dir(root), "outside.jpg"), []string{".jpg"}, true); err == nil {
+		t.Fatal("expected outside path to be rejected")
+	}
+	if err := validateEventFile(root, "", []string{".mp4"}, false); err != nil {
+		t.Fatalf("optional empty clip should be accepted: %v", err)
+	}
+}
+
+func TestChooseRealtimeWorkerIsStableAndRequiresCapabilities(t *testing.T) {
+	workers := map[string]map[string]struct{}{
+		"worker-a": capabilitySet([]string{"quality", "intrusion"}),
+		"worker-b": capabilitySet([]string{"quality", "intrusion"}),
+		"worker-c": capabilitySet([]string{"quality"}),
+	}
+	first := chooseRealtimeWorker("camera-1", []string{"quality", "intrusion"}, workers)
+	second := chooseRealtimeWorker("camera-1", []string{"quality", "intrusion"}, workers)
+	if first != second {
+		t.Fatalf("assignment is not stable: %q != %q", first, second)
+	}
+	if first == "worker-c" || first == "" {
+		t.Fatalf("assigned an ineligible worker: %q", first)
 	}
 }
