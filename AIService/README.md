@@ -25,11 +25,16 @@ P0实时基础设施已经接入，但不会注册或模拟尚未实现的业务
 
 - AIService按Worker实际注册的实时能力同步在线流和逐路规则。
 - `StreamManager`保证同一路视频只启动一个FFmpeg长连接解码进程。
-- 解码帧按每种算法的`sample_fps`分发；推理繁忙时丢弃过期帧，不积压实时延迟。
-- 内存环形缓存保留告警前后帧，写入`_events`目录的JPEG截图和MP4短视频。
+- 阈值、ROI、冷却等算法配置热更新不重连；只有输入地址、协商FPS或分辨率变化才重启该路。
+- 解码帧按每种算法的`sample_fps`分发；每种算法有独立并发配额，繁忙时丢弃过期帧。
+- 证据缓存低频长保留，时序缓存高频短保留；`TemporalRealtimeAnalyzer`直接读取连续帧窗口。
+- 算法连续失败会按视频源和算法独立熔断，等待后自动恢复，不影响同路其他算法。
+- 内存环形缓存写入`_events`目录的JPEG截图和MP4短视频；同一事件有序、不同事件并行处理。
 - `EventAggregator`统一处理连续命中、事件打开/关闭、冷却和幂等上报。
 - MediaService提供租户隔离的事件查询、证据读取和人工确认/误报复核接口。
 - 事件及证据按规则`retain_hours`清理；未配置时使用`AI_EVENT_RETAIN_HOURS`（默认720小时）。
+- 多Worker按整路所需能力分配视频；没有单个Worker覆盖全部能力时明确报告`unassigned_streams`，不会重复拉流。
+- Worker心跳持续上报活跃流、丢帧、推理失败、熔断和未分配流指标。
 
 抽帧规则按视频源配置。可在Web后台选择摄像头，并设置“每N分钟抽M帧”；例如设置
 每10分钟1帧，系统约每10分钟从当前实时画面抽取一张。平均频率最高每分钟60帧。
@@ -107,9 +112,10 @@ Qwen视觉复核模块使用；`frame_sampler`当前不会消耗Qwen额度。Qwe
 4. 在 MediaService 算法目录启用对应能力并配置视频源规则。
 5. 图片和视频证据写共享存储，只把路径、时间、置信度和模型版本上报。
 
-实时算法实现`RealtimeAnalyzer`并通过`register_realtime`注册，不应自行连接视频流。
+单帧算法实现`RealtimeAnalyzer`，时序算法实现`TemporalRealtimeAnalyzer`，并通过
+`register_realtime`注册；算法不应自行连接视频流。模块可用`max_concurrency`声明并发配额。
 通用规则参数包括`sample_fps`、`min_hits`、`max_gap_seconds`、
-`clear_after_seconds`和`cooldown_seconds`。
+`clear_after_seconds`、`cooldown_seconds`、`frame_width`和`window_seconds`。
 
 实时控制面接口：
 

@@ -48,6 +48,7 @@ class RealtimeAnalyzer(ABC):
 
     code: str
     model_version: str = ""
+    max_concurrency: int = 1
 
     @abstractmethod
     def analyze_frame(
@@ -56,10 +57,32 @@ class RealtimeAnalyzer(ABC):
         raise NotImplementedError
 
 
+class TemporalRealtimeAnalyzer(ABC):
+    """Consumes an ordered recent frame window from the shared stream."""
+
+    code: str
+    model_version: str = ""
+    max_concurrency: int = 1
+
+    def window_seconds(self, config: dict[str, Any]) -> float:
+        try:
+            return max(0.5, float(config.get("window_seconds", 4.0)))
+        except (TypeError, ValueError):
+            return 4.0
+
+    @abstractmethod
+    def analyze_window(
+        self, frames: list[VideoFrame], config: dict[str, Any]
+    ) -> list[Detection]:
+        raise NotImplementedError
+
+
 class AnalyzerRegistry:
     def __init__(self) -> None:
         self._analyzers: dict[str, Analyzer] = {}
-        self._realtime_analyzers: dict[str, RealtimeAnalyzer] = {}
+        self._realtime_analyzers: dict[
+            str, RealtimeAnalyzer | TemporalRealtimeAnalyzer
+        ] = {}
 
     def register(self, analyzer: Analyzer) -> None:
         code = analyzer.code.strip().lower()
@@ -77,7 +100,9 @@ class AnalyzerRegistry:
                 f"unsupported analyzer: {code}", retryable=False
             ) from exc
 
-    def register_realtime(self, analyzer: RealtimeAnalyzer) -> None:
+    def register_realtime(
+        self, analyzer: RealtimeAnalyzer | TemporalRealtimeAnalyzer
+    ) -> None:
         code = analyzer.code.strip().lower()
         if not code:
             raise ValueError("realtime analyzer code cannot be empty")
@@ -85,7 +110,9 @@ class AnalyzerRegistry:
             raise ValueError(f"realtime analyzer {code!r} is already registered")
         self._realtime_analyzers[code] = analyzer
 
-    def get_realtime(self, code: str) -> RealtimeAnalyzer:
+    def get_realtime(
+        self, code: str
+    ) -> RealtimeAnalyzer | TemporalRealtimeAnalyzer:
         try:
             return self._realtime_analyzers[code]
         except KeyError as exc:

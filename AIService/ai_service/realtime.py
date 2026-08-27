@@ -5,7 +5,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, BinaryIO, Callable, Iterable
@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from .api_client import MediaAPIClient, MediaAPIError
 from .config import Settings
 from .events import AggregatedEvent, EventAggregator, EventEvidenceWriter, EventPolicy
-from .modules import AnalyzerRegistry, VideoFrame
+from .modules import AnalyzerRegistry, TemporalRealtimeAnalyzer, VideoFrame
 from .state import ServiceState
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,13 @@ class RealtimeRule:
         except (TypeError, ValueError):
             value = 1.0
         return max(0.05, min(maximum, value))
+
+    def frame_width(self, maximum: int) -> int:
+        try:
+            value = int(self.config.get("frame_width", maximum))
+        except (TypeError, ValueError):
+            value = maximum
+        return max(160, min(maximum, value))
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,17 @@ class StreamConfig:
             rules=tuple(rules),
         )
 
+    def connection_key(self) -> tuple[int, str, str, str]:
+        return self.customer_id, self.stream_name, self.input_url, self.fallback_url
+
+    def processing_profile(
+        self, maximum_fps: float, maximum_width: int
+    ) -> tuple[float, int]:
+        return (
+            max(rule.sample_fps(maximum_fps) for rule in self.rules),
+            max(rule.frame_width(maximum_width) for rule in self.rules),
+        )
+
 
 class FrameRingBuffer:
     def __init__(self, retain_seconds: int) -> None:
@@ -92,9 +110,24 @@ class FrameRingBuffer:
         with self._lock:
             return list(self._frames)
 
+    def window(self, end_at: datetime, seconds: float) -> list[VideoFrame]:
+        start_at = end_at - timedelta(seconds=seconds)
+        with self._lock:
+            return [
+                frame
+                for frame in self._frames
+                if start_at <= frame.captured_at <= end_at
+            ]
 
-FrameCallback = Callable[[StreamConfig, RealtimeRule, VideoFrame, FrameRingBuffer], None]
-RemoveCallback = Callable[[StreamConfig, FrameRingBuffer], None]
+
+@dataclass(frozen=True)
+class StreamBuffers:
+    evidence: FrameRingBuffer
+    temporal: FrameRingBuffer
+
+
+FrameCallback = Callable[[StreamConfig, RealtimeRule, VideoFrame, StreamBuffers], None]
+RemoveCallback = Callable[[StreamConfig, StreamBuffers], None]
 
 
 class StreamSession:
@@ -107,13 +140,18 @@ class StreamSession:
         ffmpeg_path: str,
         max_fps: float,
         ring_seconds: int,
+        temporal_seconds: int,
         reconnect_seconds: float,
         frame_width: int,
         ring_fps: float,
         callback: FrameCallback,
     ) -> None:
-        self.config = config
-        self.ring = FrameRingBuffer(ring_seconds)
+        self._config = config
+        self._config_lock = threading.Lock()
+        self.buffers = StreamBuffers(
+            evidence=FrameRingBuffer(ring_seconds),
+            temporal=FrameRingBuffer(temporal_seconds),
+        )
         self._ffmpeg_path = ffmpeg_path
         self._max_fps = max_fps
         self._reconnect_seconds = reconnect_seconds
@@ -131,6 +169,30 @@ class StreamSession:
         self._sequence = 0
         self._next_due: dict[str, float] = {}
         self._last_ring_at = 0.0
+
+    @property
+    def config(self) -> StreamConfig:
+        with self._config_lock:
+            return self._config
+
+    def update_config(self, config: StreamConfig) -> StreamConfig | None:
+        with self._config_lock:
+            previous = self._config
+            self._config = config
+        current_codes = {rule.algorithm_code for rule in config.rules}
+        removed_rules = tuple(
+            rule for rule in previous.rules if rule.algorithm_code not in current_codes
+        )
+        if not removed_rules:
+            return None
+        return StreamConfig(
+            video_source_id=previous.video_source_id,
+            customer_id=previous.customer_id,
+            stream_name=previous.stream_name,
+            input_url=previous.input_url,
+            fallback_url=previous.fallback_url,
+            rules=removed_rules,
+        )
 
     def start(self) -> None:
         self._thread.start()
@@ -150,7 +212,8 @@ class StreamSession:
             process.kill()
 
     def _run(self) -> None:
-        urls = list(dict.fromkeys(filter(None, [self.config.input_url, self.config.fallback_url])))
+        config = self.config
+        urls = list(dict.fromkeys(filter(None, [config.input_url, config.fallback_url])))
         while not self._stop.is_set():
             produced = False
             for url in urls:
@@ -161,7 +224,7 @@ class StreamSession:
                 except Exception:
                     logger.exception(
                         "realtime stream failed source=%s url=%s",
-                        self.config.video_source_id,
+                        config.video_source_id,
                         url,
                     )
                 if produced:
@@ -170,8 +233,8 @@ class StreamSession:
                 self._stop.wait(self._reconnect_seconds)
 
     def _consume(self, url: str) -> bool:
-        decode_fps = max(
-            rule.sample_fps(self._max_fps) for rule in self.config.rules
+        decode_fps, frame_width = self.config.processing_profile(
+            self._max_fps, self._frame_width
         )
         command = [
             self._ffmpeg_path,
@@ -189,7 +252,7 @@ class StreamSession:
             "-map",
             "0:v:0",
             "-vf",
-            f"scale=w='min(iw,{self._frame_width})':h=-2,fps={decode_fps:g}",
+            f"scale=w='min(iw,{frame_width})':h=-2,fps={decode_fps:g}",
             "-q:v",
             "4",
             "-f",
@@ -218,9 +281,10 @@ class StreamSession:
                     captured_at=datetime.now(timezone.utc),
                     jpeg=jpeg,
                 )
+                self.buffers.temporal.add(frame)
                 now = time.monotonic()
                 if now - self._last_ring_at >= self._ring_interval:
-                    self.ring.add(frame)
+                    self.buffers.evidence.add(frame)
                     self._last_ring_at = now
                 self._dispatch(frame)
         finally:
@@ -237,18 +301,19 @@ class StreamSession:
 
     def _dispatch(self, frame: VideoFrame) -> None:
         now = time.monotonic()
-        for rule in self.config.rules:
+        config = self.config
+        for rule in config.rules:
             due = self._next_due.get(rule.algorithm_code, 0.0)
             if now < due:
                 continue
             interval = 1.0 / rule.sample_fps(self._max_fps)
             self._next_due[rule.algorithm_code] = now + interval
             try:
-                self._callback(self.config, rule, frame, self.ring)
+                self._callback(config, rule, frame, self.buffers)
             except Exception:
                 logger.exception(
                     "realtime frame callback failed source=%s algorithm=%s",
-                    self.config.video_source_id,
+                    config.video_source_id,
                     rule.algorithm_code,
                 )
 
@@ -260,6 +325,7 @@ class StreamManager:
         ffmpeg_path: str,
         max_fps: float,
         ring_seconds: int,
+        temporal_seconds: int,
         reconnect_seconds: float,
         frame_width: int,
         ring_fps: float,
@@ -269,6 +335,7 @@ class StreamManager:
         self._ffmpeg_path = ffmpeg_path
         self._max_fps = max_fps
         self._ring_seconds = ring_seconds
+        self._temporal_seconds = temporal_seconds
         self._reconnect_seconds = reconnect_seconds
         self._frame_width = frame_width
         self._ring_fps = ring_fps
@@ -281,11 +348,21 @@ class StreamManager:
         desired = {config.video_source_id: config for config in configs if config.rules}
         removed: list[StreamSession] = []
         added: list[StreamSession] = []
+        rules_removed: list[tuple[StreamConfig, StreamBuffers]] = []
         with self._lock:
             for source_id, session in list(self._sessions.items()):
                 replacement = desired.get(source_id)
-                if replacement != session.config:
+                current = session.config
+                if replacement is None or (
+                    replacement.connection_key() != current.connection_key()
+                    or replacement.processing_profile(self._max_fps, self._frame_width)
+                    != current.processing_profile(self._max_fps, self._frame_width)
+                ):
                     removed.append(self._sessions.pop(source_id))
+                else:
+                    removed_config = session.update_config(replacement)
+                    if removed_config is not None:
+                        rules_removed.append((removed_config, session.buffers))
             for source_id, config in desired.items():
                 if source_id in self._sessions:
                     continue
@@ -294,6 +371,7 @@ class StreamManager:
                     ffmpeg_path=self._ffmpeg_path,
                     max_fps=self._max_fps,
                     ring_seconds=self._ring_seconds,
+                    temporal_seconds=self._temporal_seconds,
                     reconnect_seconds=self._reconnect_seconds,
                     frame_width=self._frame_width,
                     ring_fps=self._ring_fps,
@@ -303,7 +381,9 @@ class StreamManager:
                 added.append(session)
         for session in removed:
             session.stop()
-            self._remove_callback(session.config, session.ring)
+            self._remove_callback(session.config, session.buffers)
+        for config, buffers in rules_removed:
+            self._remove_callback(config, buffers)
         for session in added:
             session.start()
 
@@ -313,7 +393,7 @@ class StreamManager:
             self._sessions.clear()
         for session in sessions:
             session.stop()
-            self._remove_callback(session.config, session.ring)
+            self._remove_callback(session.config, session.buffers)
 
     @property
     def active_streams(self) -> int:
@@ -343,9 +423,7 @@ class RealtimeRuntime:
             settings.event_clip_fps,
         )
         self._event_executor = ThreadPoolExecutor(
-            # Preserve open/close ordering for a given event. Event generation
-            # is infrequent; inference remains independently parallel.
-            max_workers=1,
+            max_workers=settings.event_concurrency,
             thread_name_prefix="event-evidence",
         )
         self._inference_executor = ThreadPoolExecutor(
@@ -354,34 +432,75 @@ class RealtimeRuntime:
         )
         self._busy: set[tuple[int, str]] = set()
         self._busy_lock = threading.Lock()
+        self._enabled_keys: set[tuple[int, str]] = set()
+        self._generations: dict[tuple[int, str], int] = {}
+        self._algorithm_slots: dict[str, threading.BoundedSemaphore] = {}
+        self._slots_lock = threading.Lock()
+        self._failures: dict[tuple[int, str], int] = {}
+        self._circuit_until: dict[tuple[int, str], float] = {}
+        self._event_tails: dict[str, Future[None]] = {}
+        self._event_tails_lock = threading.Lock()
 
     def handle_frame(
         self,
         stream: StreamConfig,
         rule: RealtimeRule,
         frame: VideoFrame,
-        ring: FrameRingBuffer,
+        buffers: StreamBuffers,
     ) -> None:
         key = (stream.video_source_id, rule.algorithm_code)
+        now = time.monotonic()
         with self._busy_lock:
-            if key in self._busy:
+            self._enabled_keys.add(key)
+            generation = self._generations.get(key, 0)
+            circuit_until = self._circuit_until.get(key, 0.0)
+            if circuit_until > now:
+                self._state.increment("dropped_frames")
                 return
+            if circuit_until:
+                self._circuit_until.pop(key, None)
+                self._failures.pop(key, None)
+                self._state.update(open_circuits=len(self._circuit_until))
+            if key in self._busy:
+                self._state.increment("dropped_frames")
+                return
+        analyzer = self._registry.get_realtime(rule.algorithm_code)
+        slot = self._algorithm_slot(
+            rule.algorithm_code,
+            max(1, min(self._settings.realtime_concurrency, analyzer.max_concurrency)),
+        )
+        if not slot.acquire(blocking=False):
+            self._state.increment("dropped_frames")
+            return
+        with self._busy_lock:
             self._busy.add(key)
         future = self._inference_executor.submit(
-            self._analyze, stream, rule, frame, ring
+            self._analyze, stream, rule, frame, buffers, generation
         )
-        future.add_done_callback(lambda _future: self._release(key))
+        future.add_done_callback(lambda _future: self._release(key, slot))
 
     def _analyze(
         self,
         stream: StreamConfig,
         rule: RealtimeRule,
         frame: VideoFrame,
-        ring: FrameRingBuffer,
+        buffers: StreamBuffers,
+        generation: int,
     ) -> None:
         analyzer = self._registry.get_realtime(rule.algorithm_code)
+        key = (stream.video_source_id, rule.algorithm_code)
         try:
-            detections = analyzer.analyze_frame(frame, rule.config)
+            if isinstance(analyzer, TemporalRealtimeAnalyzer):
+                seconds = min(
+                    float(self._settings.realtime_temporal_seconds),
+                    analyzer.window_seconds(rule.config),
+                )
+                detections = analyzer.analyze_window(
+                    buffers.temporal.window(frame.captured_at, seconds),
+                    rule.config,
+                )
+            else:
+                detections = analyzer.analyze_frame(frame, rule.config)
         except Exception as exc:
             logger.exception(
                 "realtime analyzer failed source=%s algorithm=%s",
@@ -389,7 +508,12 @@ class RealtimeRuntime:
                 rule.algorithm_code,
             )
             self._state.update(realtime_last_error=str(exc))
+            if self._is_generation_current(key, generation):
+                self._record_failure(key)
             return
+        if not self._is_generation_current(key, generation):
+            return
+        self._record_success(key)
         self._state.increment("processed_frames")
         policy = EventPolicy.from_config(rule.config)
         if policy.clear_after_seconds < self._settings.event_post_seconds:
@@ -408,21 +532,31 @@ class RealtimeRuntime:
             captured_at=frame.captured_at,
             policy=policy,
         )
-        frames = ring.snapshot()
+        frames = buffers.evidence.snapshot()
         for event in events:
-            self._event_executor.submit(self._publish, event, frames)
+            self._submit_event(event, frames)
 
-    def _release(self, key: tuple[int, str]) -> None:
+    def _release(
+        self, key: tuple[int, str], slot: threading.BoundedSemaphore
+    ) -> None:
         with self._busy_lock:
             self._busy.discard(key)
+        slot.release()
 
-    def remove_stream(self, stream: StreamConfig, ring: FrameRingBuffer) -> None:
-        frames = ring.snapshot()
+    def remove_stream(self, stream: StreamConfig, buffers: StreamBuffers) -> None:
+        frames = buffers.evidence.snapshot()
         for rule in stream.rules:
+            key = (stream.video_source_id, rule.algorithm_code)
+            with self._busy_lock:
+                self._enabled_keys.discard(key)
+                self._generations[key] = self._generations.get(key, 0) + 1
+                self._failures.pop(key, None)
+                self._circuit_until.pop(key, None)
+                self._state.update(open_circuits=len(self._circuit_until))
             for event in self._aggregator.flush_stream(
                 stream.video_source_id, rule.algorithm_code
             ):
-                self._event_executor.submit(self._publish, event, frames)
+                self._submit_event(event, frames)
 
     def stop(self) -> None:
         self._inference_executor.shutdown(wait=True, cancel_futures=False)
@@ -439,6 +573,68 @@ class RealtimeRuntime:
         except Exception as exc:
             logger.exception("failed to persist realtime event=%s", event.event_id)
             self._state.update(realtime_last_error=str(exc))
+
+    def _algorithm_slot(
+        self, algorithm_code: str, concurrency: int
+    ) -> threading.BoundedSemaphore:
+        with self._slots_lock:
+            slot = self._algorithm_slots.get(algorithm_code)
+            if slot is None:
+                slot = threading.BoundedSemaphore(concurrency)
+                self._algorithm_slots[algorithm_code] = slot
+            return slot
+
+    def _record_failure(self, key: tuple[int, str]) -> None:
+        self._state.increment("analyzer_failures")
+        with self._busy_lock:
+            failures = self._failures.get(key, 0) + 1
+            self._failures[key] = failures
+            if failures >= self._settings.algorithm_failure_threshold:
+                self._circuit_until[key] = (
+                    time.monotonic() + self._settings.algorithm_retry_seconds
+                )
+                self._state.update(open_circuits=len(self._circuit_until))
+
+    def _record_success(self, key: tuple[int, str]) -> None:
+        with self._busy_lock:
+            self._failures.pop(key, None)
+
+    def _is_generation_current(
+        self, key: tuple[int, str], generation: int
+    ) -> bool:
+        with self._busy_lock:
+            return (
+                key in self._enabled_keys
+                and self._generations.get(key, 0) == generation
+            )
+
+    def _submit_event(
+        self, event: AggregatedEvent, frames: list[VideoFrame]
+    ) -> None:
+        with self._event_tails_lock:
+            previous = self._event_tails.get(event.event_id)
+            future = self._event_executor.submit(
+                self._publish_after, previous, event, frames
+            )
+            self._event_tails[event.event_id] = future
+        future.add_done_callback(
+            lambda completed: self._clear_event_tail(event.event_id, completed)
+        )
+
+    def _publish_after(
+        self,
+        previous: Future[None] | None,
+        event: AggregatedEvent,
+        frames: list[VideoFrame],
+    ) -> None:
+        if previous is not None:
+            previous.result()
+        self._publish(event, frames)
+
+    def _clear_event_tail(self, event_id: str, completed: Future[None]) -> None:
+        with self._event_tails_lock:
+            if self._event_tails.get(event_id) is completed:
+                self._event_tails.pop(event_id, None)
 
 
 class RealtimeCoordinator:
@@ -458,6 +654,7 @@ class RealtimeCoordinator:
             ffmpeg_path=settings.ffmpeg_path,
             max_fps=settings.realtime_max_fps,
             ring_seconds=settings.realtime_ring_seconds,
+            temporal_seconds=settings.realtime_temporal_seconds,
             reconnect_seconds=settings.realtime_reconnect_seconds,
             frame_width=settings.realtime_frame_width,
             ring_fps=settings.event_clip_fps,
@@ -493,6 +690,8 @@ class RealtimeCoordinator:
                 values = response.get("streams", [])
                 if not isinstance(values, list):
                     raise MediaAPIError("realtime config streams is not a list")
+                unassigned = response.get("unassigned_streams", [])
+                unassigned_count = len(unassigned) if isinstance(unassigned, list) else 0
                 capabilities = set(self._registry.realtime_capabilities)
                 configs: list[StreamConfig] = []
                 for value in values:
@@ -518,8 +717,13 @@ class RealtimeCoordinator:
                 self._manager.sync(configs)
                 self._state.update(
                     active_streams=self._manager.active_streams,
+                    unassigned_streams=unassigned_count,
                     realtime_last_sync_at=datetime.now(timezone.utc).isoformat(),
-                    realtime_last_error="",
+                    realtime_last_error=(
+                        f"{unassigned_count} realtime streams have no worker with all required capabilities"
+                        if unassigned_count
+                        else ""
+                    ),
                 )
             except Exception as exc:
                 logger.warning("realtime config sync failed: %s", exc)

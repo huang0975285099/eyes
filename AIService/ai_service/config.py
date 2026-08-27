@@ -45,12 +45,16 @@ class Settings:
     realtime_sync_seconds: float
     realtime_max_fps: float
     realtime_ring_seconds: int
+    realtime_temporal_seconds: int
     realtime_reconnect_seconds: float
     realtime_concurrency: int
     realtime_frame_width: int
     event_pre_seconds: float
     event_post_seconds: float
     event_clip_fps: float
+    event_concurrency: int
+    algorithm_failure_threshold: int
+    algorithm_retry_seconds: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -75,6 +79,9 @@ class Settings:
             realtime_sync_seconds=_positive_float("AI_REALTIME_SYNC_INTERVAL", 5),
             realtime_max_fps=_positive_float("AI_REALTIME_MAX_FPS", 8),
             realtime_ring_seconds=_positive_int("AI_REALTIME_RING_SECONDS", 30),
+            realtime_temporal_seconds=_positive_int(
+                "AI_REALTIME_TEMPORAL_SECONDS", 8
+            ),
             realtime_reconnect_seconds=_positive_float(
                 "AI_REALTIME_RECONNECT_INTERVAL", 3
             ),
@@ -83,4 +90,11 @@ class Settings:
             event_pre_seconds=_positive_float("AI_EVENT_PRE_SECONDS", 5),
             event_post_seconds=_positive_float("AI_EVENT_POST_SECONDS", 3),
             event_clip_fps=_positive_float("AI_EVENT_CLIP_FPS", 4),
+            event_concurrency=_positive_int("AI_EVENT_CONCURRENCY", 2),
+            algorithm_failure_threshold=_positive_int(
+                "AI_ALGORITHM_FAILURE_THRESHOLD", 5
+            ),
+            algorithm_retry_seconds=_positive_float(
+                "AI_ALGORITHM_RETRY_SECONDS", 30
+            ),
         )

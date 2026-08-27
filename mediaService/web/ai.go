@@ -64,13 +64,18 @@ type aiJobReportRequest struct {
 }
 
 type aiWorkerHeartbeatRequest struct {
-	WorkerID     string   `json:"worker_id"`
-	Hostname     string   `json:"hostname"`
-	Version      string   `json:"version"`
-	Capabilities []string `json:"capabilities"`
-	Status       string   `json:"status"`
-	ActiveJobs   int      `json:"active_jobs"`
-	LastError    string   `json:"last_error"`
+	WorkerID          string   `json:"worker_id"`
+	Hostname          string   `json:"hostname"`
+	Version           string   `json:"version"`
+	Capabilities      []string `json:"capabilities"`
+	Status            string   `json:"status"`
+	ActiveJobs        int      `json:"active_jobs"`
+	ActiveStreams     int      `json:"active_streams"`
+	DroppedFrames     int64    `json:"dropped_frames"`
+	AnalyzerFailures  int64    `json:"analyzer_failures"`
+	OpenCircuits      int      `json:"open_circuits"`
+	UnassignedStreams int      `json:"unassigned_streams"`
+	LastError         string   `json:"last_error"`
 }
 
 func (s *Server) handleAIAlgorithms(w http.ResponseWriter, r *http.Request) {
@@ -404,15 +409,34 @@ func (s *Server) handleAIWorkerHeartbeat(w http.ResponseWriter, r *http.Request)
 	if req.ActiveJobs < 0 {
 		req.ActiveJobs = 0
 	}
+	if req.ActiveStreams < 0 {
+		req.ActiveStreams = 0
+	}
+	if req.DroppedFrames < 0 {
+		req.DroppedFrames = 0
+	}
+	if req.AnalyzerFailures < 0 {
+		req.AnalyzerFailures = 0
+	}
+	if req.OpenCircuits < 0 {
+		req.OpenCircuits = 0
+	}
+	if req.UnassignedStreams < 0 {
+		req.UnassignedStreams = 0
+	}
 	worker := models.AIWorker{
 		WorkerID: req.WorkerID, Hostname: req.Hostname, Version: req.Version,
 		CapabilitiesJSON: string(capabilities), Status: status, ActiveJobs: req.ActiveJobs,
-		LastError: req.LastError, HeartbeatAt: time.Now(),
+		ActiveStreams: req.ActiveStreams, DroppedFrames: req.DroppedFrames,
+		AnalyzerFailures: req.AnalyzerFailures, OpenCircuits: req.OpenCircuits,
+		UnassignedStreams: req.UnassignedStreams,
+		LastError:         req.LastError, HeartbeatAt: time.Now(),
 	}
 	err := database.DB.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "worker_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"hostname", "version", "capabilities_json", "status", "active_jobs",
+			"active_streams", "dropped_frames", "analyzer_failures", "open_circuits", "unassigned_streams",
 			"last_error", "heartbeat_at", "updated_at",
 		}),
 	}).Create(&worker).Error

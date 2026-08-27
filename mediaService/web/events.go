@@ -82,8 +82,8 @@ func (s *Server) handleAIRealtimeConfig(w http.ResponseWriter, r *http.Request) 
 	}
 	var rules []models.VideoAnalysisRule
 	if err := database.DB.Where(
-		"video_source_id IN ? AND enabled = ? AND algorithm_code <> ? AND algorithm_code IN ? AND algorithm_code IN (?)",
-		sourceIDs, true, analysis.AlgorithmFrameSampler, capabilities,
+		"video_source_id IN ? AND enabled = ? AND algorithm_code <> ? AND algorithm_code IN (?)",
+		sourceIDs, true, analysis.AlgorithmFrameSampler,
 		database.DB.Model(&models.AIAlgorithm{}).Select("code").Where("enabled = ?", true),
 	).Order("algorithm_code").Find(&rules).Error; err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询实时AI规则失败"})
@@ -110,11 +110,20 @@ func (s *Server) handleAIRealtimeConfig(w http.ResponseWriter, r *http.Request) 
 			Rules:       streamRules,
 		})
 	}
-	payloads = s.assignRealtimeStreams(workerID, capabilities, payloads)
-	writeJSON(w, http.StatusOK, map[string]any{"generated_at": time.Now(), "streams": payloads})
+	assigned, unassigned := s.assignRealtimeStreams(workerID, capabilities, payloads)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"generated_at": time.Now(), "streams": assigned,
+		"unassigned_streams": unassigned,
+	})
 }
 
-func (s *Server) assignRealtimeStreams(workerID string, capabilities []string, streams []realtimeStreamPayload) []realtimeStreamPayload {
+type unassignedRealtimeStream struct {
+	VideoSourceID        uint     `json:"video_source_id"`
+	StreamName           string   `json:"stream_name"`
+	RequiredCapabilities []string `json:"required_capabilities"`
+}
+
+func (s *Server) assignRealtimeStreams(workerID string, capabilities []string, streams []realtimeStreamPayload) ([]realtimeStreamPayload, []unassignedRealtimeStream) {
 	workers := map[string]map[string]struct{}{workerID: capabilitySet(capabilities)}
 	var peers []models.AIWorker
 	if err := database.DB.Where("heartbeat_at >= ? AND status IN ?", time.Now().Add(-30*time.Second), []string{"online", "idle", "running"}).Find(&peers).Error; err == nil {
@@ -131,16 +140,24 @@ func (s *Server) assignRealtimeStreams(workerID string, capabilities []string, s
 		}
 	}
 	assigned := make([]realtimeStreamPayload, 0, len(streams))
+	unassigned := make([]unassignedRealtimeStream, 0)
 	for _, stream := range streams {
 		required := make([]string, 0, len(stream.Rules))
 		for _, rule := range stream.Rules {
 			required = append(required, rule.AlgorithmCode)
 		}
-		if chooseRealtimeWorker(stream.StreamName, required, workers) == workerID {
+		owner := chooseRealtimeWorker(stream.StreamName, required, workers)
+		if owner == "" {
+			sort.Strings(required)
+			unassigned = append(unassigned, unassignedRealtimeStream{
+				VideoSourceID: stream.VideoSourceID, StreamName: stream.StreamName,
+				RequiredCapabilities: required,
+			})
+		} else if owner == workerID {
 			assigned = append(assigned, stream)
 		}
 	}
-	return assigned
+	return assigned, unassigned
 }
 
 func capabilitySet(values []string) map[string]struct{} {

@@ -24,6 +24,10 @@ class ServiceState:
     _emitted_events: int = 0
     _realtime_last_sync_at: str = ""
     _realtime_last_error: str = ""
+    _dropped_frames: int = 0
+    _analyzer_failures: int = 0
+    _open_circuits: int = 0
+    _unassigned_streams: int = 0
 
     def update(self, **values: Any) -> None:
         with self._lock:
@@ -53,5 +57,9 @@ class ServiceState:
                 "emitted_events": self._emitted_events,
                 "realtime_last_sync_at": self._realtime_last_sync_at,
                 "realtime_last_error": self._realtime_last_error,
+                "dropped_frames": self._dropped_frames,
+                "analyzer_failures": self._analyzer_failures,
+                "open_circuits": self._open_circuits,
+                "unassigned_streams": self._unassigned_streams,
                 "started_at": self.started_at.isoformat(),
             }

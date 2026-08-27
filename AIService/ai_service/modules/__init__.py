@@ -5,6 +5,7 @@ from .base import (
     AnalyzerRegistry,
     Detection,
     RealtimeAnalyzer,
+    TemporalRealtimeAnalyzer,
     VideoFrame,
 )
 from .frame_sampler import FrameSamplerAnalyzer
@@ -17,5 +18,6 @@ __all__ = [
     "Detection",
     "FrameSamplerAnalyzer",
     "RealtimeAnalyzer",
+    "TemporalRealtimeAnalyzer",
     "VideoFrame",
 ]

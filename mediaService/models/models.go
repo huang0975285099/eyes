@@ -154,16 +154,21 @@ type AIJob struct {
 
 // AIWorker records AIService process health and capabilities.
 type AIWorker struct {
-	WorkerID         string    `gorm:"size:100;primaryKey" json:"worker_id"`
-	Hostname         string    `gorm:"size:200" json:"hostname"`
-	Version          string    `gorm:"size:50" json:"version"`
-	CapabilitiesJSON string    `gorm:"type:text" json:"capabilities_json"`
-	Status           string    `gorm:"size:20;not null;index" json:"status"`
-	ActiveJobs       int       `gorm:"not null;default:0" json:"active_jobs"`
-	LastError        string    `gorm:"type:text" json:"last_error"`
-	HeartbeatAt      time.Time `gorm:"index" json:"heartbeat_at"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	WorkerID          string    `gorm:"size:100;primaryKey" json:"worker_id"`
+	Hostname          string    `gorm:"size:200" json:"hostname"`
+	Version           string    `gorm:"size:50" json:"version"`
+	CapabilitiesJSON  string    `gorm:"type:text" json:"capabilities_json"`
+	Status            string    `gorm:"size:20;not null;index" json:"status"`
+	ActiveJobs        int       `gorm:"not null;default:0" json:"active_jobs"`
+	ActiveStreams     int       `gorm:"not null;default:0" json:"active_streams"`
+	DroppedFrames     int64     `gorm:"not null;default:0" json:"dropped_frames"`
+	AnalyzerFailures  int64     `gorm:"not null;default:0" json:"analyzer_failures"`
+	OpenCircuits      int       `gorm:"not null;default:0" json:"open_circuits"`
+	UnassignedStreams int       `gorm:"not null;default:0" json:"unassigned_streams"`
+	LastError         string    `gorm:"type:text" json:"last_error"`
+	HeartbeatAt       time.Time `gorm:"index" json:"heartbeat_at"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // AIEvent is the common result model for fight, helmet, fire and future event

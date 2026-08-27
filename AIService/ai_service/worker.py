@@ -141,7 +141,14 @@ class AnalysisWorker:
                 )),
                 status=status,
                 active_jobs=len(self._futures),
-                last_error=str(snapshot["last_error"]),
+                active_streams=int(snapshot["active_streams"]),
+                dropped_frames=int(snapshot["dropped_frames"]),
+                analyzer_failures=int(snapshot["analyzer_failures"]),
+                open_circuits=int(snapshot["open_circuits"]),
+                unassigned_streams=int(snapshot["unassigned_streams"]),
+                last_error=str(
+                    snapshot["realtime_last_error"] or snapshot["last_error"]
+                ),
             )
             self._state.update(
                 last_heartbeat_at=datetime.now(timezone.utc).isoformat()

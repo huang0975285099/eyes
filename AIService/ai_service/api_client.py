@@ -79,6 +79,11 @@ class MediaAPIClient:
         capabilities: list[str],
         status: str,
         active_jobs: int,
+        active_streams: int,
+        dropped_frames: int,
+        analyzer_failures: int,
+        open_circuits: int,
+        unassigned_streams: int,
         last_error: str,
     ) -> None:
         self._post(
@@ -90,6 +95,11 @@ class MediaAPIClient:
                 "capabilities": capabilities,
                 "status": status,
                 "active_jobs": active_jobs,
+                "active_streams": active_streams,
+                "dropped_frames": dropped_frames,
+                "analyzer_failures": analyzer_failures,
+                "open_circuits": open_circuits,
+                "unassigned_streams": unassigned_streams,
                 "last_error": last_error[:4000],
             },
         )

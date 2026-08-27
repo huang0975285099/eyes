@@ -85,4 +85,7 @@ func TestChooseRealtimeWorkerIsStableAndRequiresCapabilities(t *testing.T) {
 	if first == "worker-c" || first == "" {
 		t.Fatalf("assigned an ineligible worker: %q", first)
 	}
+	if got := chooseRealtimeWorker("camera-1", []string{"fire"}, workers); got != "" {
+		t.Fatalf("expected no eligible worker, got %q", got)
+	}
 }
