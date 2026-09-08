@@ -32,6 +32,7 @@ let initialized = false;
 let audioContext = null;
 let polling = false;
 let toastTimer = null;
+let nativeNotifications = false;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -39,7 +40,7 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
+  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data;
 }
 
@@ -74,18 +75,18 @@ function playAlert() {
 
 function notify(event) {
   if ("Notification" in window && Notification.permission === "granted") {
-    new Notification("检测到画面变化", { body: event.display_time, silent: true });
+    new Notification("Visual change detected", { body: event.display_time, silent: true });
   }
 }
 
 function displayAlert(event) {
-  ui.alertTime.textContent = `${event.display_time} · 变化 ${event.motion_score.toFixed(2)}%`;
+  ui.alertTime.textContent = `${event.display_time} · Change ${event.motion_score.toFixed(2)}%`;
   ui.alertBanner.classList.add("visible");
   ui.cameraFrame.classList.remove("alerting");
   void ui.cameraFrame.offsetWidth;
   ui.cameraFrame.classList.add("alerting");
   playAlert();
-  notify(event);
+  if (!nativeNotifications) notify(event);
 }
 
 function renderEvents(events) {
@@ -94,8 +95,8 @@ function renderEvents(events) {
     ui.eventList.innerHTML = `
       <div class="empty-state">
         <span class="empty-rings"></span>
-        <strong>暂时一切安静</strong>
-        <small>检测到变化后会记录在这里</small>
+        <strong>All quiet for now</strong>
+        <small>Detected changes will appear here</small>
       </div>`;
     return;
   }
@@ -106,7 +107,7 @@ function renderEvents(events) {
     visual.className = `event-thumb${event.snapshot_url ? "" : " blank"}`;
     if (event.snapshot_url) {
       visual.src = event.snapshot_url;
-      visual.alt = "预警截图";
+      visual.alt = "Alert snapshot";
     } else {
       visual.textContent = "!";
     }
@@ -114,7 +115,7 @@ function renderEvents(events) {
     const title = document.createElement("strong");
     title.textContent = event.display_time;
     const detail = document.createElement("small");
-    detail.textContent = `变化面积 ${Number(event.motion_score).toFixed(2)}%`;
+    detail.textContent = `Changed area ${Number(event.motion_score).toFixed(2)}%`;
     copy.append(title, detail);
     item.append(visual, copy);
     return item;
@@ -124,16 +125,16 @@ function renderEvents(events) {
 function setConnection(ok, error) {
   ui.connectionPill.classList.toggle("connected", ok);
   ui.connectionPill.classList.toggle("error", !ok);
-  ui.connectionText.textContent = ok ? "摄像头已连接" : "摄像头未连接";
+  ui.connectionText.textContent = ok ? "Camera connected" : "Camera disconnected";
   ui.cameraPlaceholder.classList.toggle("hidden", ok);
-  if (!ok) ui.cameraError.textContent = error || "请确认 USB 摄像头已连接";
+  if (!ok) ui.cameraError.textContent = error || "Make sure the USB camera is connected";
 }
 
 function setMonitoring(enabled) {
   monitoring = enabled;
   ui.monitorToggle.classList.toggle("active", enabled);
   ui.cameraFrame.classList.toggle("monitoring", enabled);
-  ui.monitorToggleText.textContent = enabled ? "停止变化监控" : "开启变化监控";
+  ui.monitorToggleText.textContent = enabled ? "Stop Change Detection" : "Start Change Detection";
 }
 
 function populateSettings(config) {
@@ -151,6 +152,7 @@ async function pollStatus() {
   polling = true;
   try {
     const status = await api("/api/status");
+    nativeNotifications = Boolean(status.native_notifications);
     setConnection(status.camera_ok, status.error);
     setMonitoring(status.monitoring);
     ui.fpsValue.textContent = status.camera_ok ? status.fps.toFixed(1) : "--";
@@ -165,7 +167,7 @@ async function pollStatus() {
       displayAlert(status.latest_event);
     }
   } catch (error) {
-    setConnection(false, "本地服务连接失败，请确认程序仍在运行");
+    setConnection(false, "Local service unavailable. Make sure the application is still running.");
   } finally {
     polling = false;
   }
@@ -173,7 +175,7 @@ async function pollStatus() {
 
 ui.monitorToggle.addEventListener("click", async () => {
   try {
-    if (!monitoring && "Notification" in window && Notification.permission === "default") {
+    if (!monitoring && !nativeNotifications && "Notification" in window && Notification.permission === "default") {
       Notification.requestPermission();
     }
     if (!monitoring && soundEnabled) {
@@ -185,7 +187,7 @@ ui.monitorToggle.addEventListener("click", async () => {
       body: JSON.stringify({ enabled: !monitoring }),
     });
     setMonitoring(status.monitoring);
-    showToast(status.monitoring ? "监控已开启，正在学习当前画面" : "监控已停止");
+    showToast(status.monitoring ? "Detection started. Learning the current scene." : "Detection stopped");
   } catch (error) {
     showToast(error.message);
   }
@@ -195,7 +197,40 @@ ui.soundToggle.addEventListener("click", () => {
   soundEnabled = !soundEnabled;
   ui.soundToggle.setAttribute("aria-pressed", String(soundEnabled));
   ui.soundIcon.textContent = soundEnabled ? "♪" : "×";
-  showToast(soundEnabled ? "声音告警已开启" : "声音告警已关闭");
+  showToast(soundEnabled ? "Sound alerts enabled" : "Sound alerts disabled");
+});
+
+$("#testNotification").addEventListener("click", async () => {
+  const button = $("#testNotification");
+  const originalText = "Test Notification";
+  button.disabled = true;
+  button.classList.remove("sent");
+  button.textContent = "Sending...";
+  try {
+    const result = await api("/api/test-notification", { method: "POST", body: "{}" });
+    if (!result.native) {
+      if ("Notification" in window && Notification.permission === "default") {
+        await Notification.requestPermission();
+      }
+      if ("Notification" in window && Notification.permission === "granted") {
+        new Notification("Sentinel test notification", { body: "Browser notifications are working." });
+      } else {
+        throw new Error("Notification permission was not granted");
+      }
+    }
+    button.classList.add("sent");
+    button.textContent = "Sent ✓";
+    showToast("Test notification sent");
+  } catch (error) {
+    button.textContent = "Try Again";
+    showToast(error.message);
+  } finally {
+    setTimeout(() => {
+      button.disabled = false;
+      button.classList.remove("sent");
+      button.textContent = originalText;
+    }, 1800);
+  }
 });
 
 ui.sensitivity.addEventListener("input", () => {
@@ -222,7 +257,7 @@ $("#saveSettings").addEventListener("click", async () => {
         save_snapshots: ui.saveSnapshots.checked,
       }),
     });
-    showToast("设置已保存");
+    showToast("Settings saved");
   } catch (error) {
     showToast(error.message);
   }

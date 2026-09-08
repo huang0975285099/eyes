@@ -1,9 +1,10 @@
+import threading
 import unittest
 
 import cv2
 import numpy as np
 
-from app import MonitorConfig, MotionDetector
+from app import CameraEngine, MonitorConfig, MotionDetector, TrayApplication
 
 
 class MonitorConfigTests(unittest.TestCase):
@@ -55,6 +56,37 @@ class MotionDetectorTests(unittest.TestCase):
         changed = np.full_like(base, 255)
         _, triggered, _ = detector.process(changed, config, 105, 100)
         self.assertFalse(triggered)
+
+
+class NotificationTests(unittest.TestCase):
+    def test_native_test_notification_callback(self) -> None:
+        engine = CameraEngine(MonitorConfig(save_snapshots=False))
+        received = []
+        ready = threading.Event()
+
+        def callback(event) -> None:
+            received.append(event)
+            ready.set()
+
+        engine.notification_callback = callback
+        self.assertTrue(engine.test_notification())
+        self.assertTrue(ready.wait(1.0))
+        self.assertTrue(received[0]["test"])
+        self.assertIn("display_time", received[0])
+
+    def test_tray_passes_motion_event_to_popup(self) -> None:
+        calls = []
+
+        class FakePopup:
+            def show(self, event) -> bool:
+                calls.append(event)
+                return True
+
+        tray = object.__new__(TrayApplication)
+        tray.popup_notifier = FakePopup()
+        event = {"display_time": "2026-09-07 20:30:00", "motion_score": 2.345}
+        tray.show_notification(event)
+        self.assertEqual(calls[0], event)
 
 
 if __name__ == "__main__":

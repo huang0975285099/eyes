@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import signal
+import socket
 import sys
 import threading
 import time
@@ -14,14 +16,15 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
+from urllib.request import urlopen
 
 import cv2
 import numpy as np
 
 
-APP_NAME = "USB 摄像头变化预警"
+APP_NAME = "USB Camera Motion Alert"
 
 
 def resource_dir() -> Path:
@@ -45,7 +48,7 @@ def writable_data_dir() -> Path:
             return root
         except OSError as exc:
             errors.append(f"{root}: {exc}")
-    raise RuntimeError("无法创建数据目录：" + "; ".join(errors))
+    raise RuntimeError("Unable to create a data directory: " + "; ".join(errors))
 
 
 @dataclass
@@ -161,7 +164,7 @@ class CameraEngine:
         self.frame_sequence = 0
         self.monitoring = False
         self.camera_ok = False
-        self.error = "正在连接摄像头…"
+        self.error = "Connecting to the camera..."
         self.fps = 0.0
         self.motion_score = 0.0
         self.last_alert_at = 0.0
@@ -171,6 +174,8 @@ class CameraEngine:
         self.started_at = time.time()
         self.requested_camera_index = config.camera_index
         self.active_camera_index: int | None = None
+        self.native_notifications = False
+        self.notification_callback: Callable[[dict[str, Any]], None] | None = None
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run, name="camera", daemon=True)
@@ -198,7 +203,7 @@ class CameraEngine:
             if old_index != self.config.camera_index:
                 self.requested_camera_index = self.config.camera_index
                 self.camera_ok = False
-                self.error = f"正在切换到摄像头 {self.config.camera_index}…"
+                self.error = f"Switching to camera {self.config.camera_index}..."
             return asdict(self.config)
 
     def status(self) -> dict[str, Any]:
@@ -213,11 +218,25 @@ class CameraEngine:
                 "motion_score": round(self.motion_score, 2),
                 "last_alert_at": self.last_alert_at,
                 "alert_count": self.alert_count,
+                "native_notifications": self.native_notifications,
                 "latest_event": self.latest_event,
                 "events": list(self.events),
                 "config": asdict(self.config),
                 "uptime_seconds": int(time.time() - self.started_at),
             }
+
+    def test_notification(self) -> bool:
+        callback = self.notification_callback
+        if callback is None:
+            return False
+        now = datetime.now()
+        event = {
+            "test": True,
+            "display_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "motion_score": 0.0,
+        }
+        threading.Thread(target=callback, args=(event,), name="test-notification", daemon=True).start()
+        return True
 
     def wait_for_frame(self, previous_sequence: int, timeout: float = 2.0) -> tuple[int, bytes | None]:
         with self.frame_ready:
@@ -259,7 +278,11 @@ class CameraEngine:
             self.active_camera_index = requested
             self.detector.reset()
             self.camera_ok = self.capture.isOpened()
-            self.error = "" if self.camera_ok else f"无法打开摄像头 {requested}，请检查连接或更换编号。"
+            self.error = (
+                ""
+                if self.camera_ok
+                else f"Unable to open camera {requested}. Check the connection or try another index."
+            )
 
     def _record_event(self, frame: np.ndarray, score: float) -> None:
         timestamp = datetime.now()
@@ -281,6 +304,9 @@ class CameraEngine:
         self.events.appendleft(event)
         self.alert_count += 1
         self.last_alert_at = time.time()
+        callback = self.notification_callback
+        if callback is not None:
+            threading.Thread(target=callback, args=(event,), name="alert-notification", daemon=True).start()
 
     def _run(self) -> None:
         failures = 0
@@ -302,7 +328,7 @@ class CameraEngine:
                 if failures >= 10:
                     with self.lock:
                         self.camera_ok = False
-                        self.error = "摄像头读取失败，正在重连…"
+                        self.error = "Camera read failed. Reconnecting..."
                     self.capture.release()
                     self.capture = None
                     failures = 0
@@ -352,19 +378,24 @@ class CameraEngine:
 
 class CameraHttpServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = False
 
     def __init__(self, address: tuple[str, int], engine: CameraEngine):
         super().__init__(address, RequestHandler)
         self.engine = engine
         self.static_dir = resource_dir() / "static"
 
+    def server_bind(self) -> None:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
 
 class RequestHandler(BaseHTTPRequestHandler):
     server: CameraHttpServer
 
     def log_message(self, format: str, *args: Any) -> None:
-        if self.path != "/api/status":
+        if self.path != "/api/status" and sys.stderr is not None:
             super().log_message(format, *args)
 
     def _json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -379,7 +410,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length > 64 * 1024:
-            raise ValueError("请求内容过大")
+            raise ValueError("Request body is too large")
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8")) if raw else {}
 
@@ -405,11 +436,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             if path == "/api/monitor":
                 self.server.engine.set_monitoring(bool(body.get("enabled", False)))
                 self._json(self.server.engine.status())
+            elif path == "/api/test-notification":
+                delivered = self.server.engine.test_notification()
+                self._json({"ok": True, "native": delivered})
             elif path == "/api/config":
                 config = self.server.engine.update_config(body)
                 self._json({"ok": True, "config": config})
             else:
-                self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
+                self._json({"error": "Endpoint not found"}, HTTPStatus.NOT_FOUND)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
@@ -473,29 +507,270 @@ class RequestHandler(BaseHTTPRequestHandler):
             pass
 
 
+class PopupNotifier:
+    """A reliable bottom-right alert window independent of browser permissions."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.events: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.stop_event = threading.Event()
+        self.ready = threading.Event()
+        self.available = False
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self._run, name="popup-notifier", daemon=True)
+        self.thread.start()
+        self.ready.wait(timeout=2.0)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=1.5)
+
+    def show(self, event: dict[str, Any]) -> bool:
+        if not self.available:
+            return False
+        self.events.put(event)
+        return True
+
+    def _run(self) -> None:
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+            root.withdraw()
+            self.available = True
+            self.ready.set()
+            popup: tk.Toplevel | None = None
+
+            def show_next() -> None:
+                nonlocal popup
+                if self.stop_event.is_set():
+                    root.destroy()
+                    return
+                latest: dict[str, Any] | None = None
+                try:
+                    while True:
+                        latest = self.events.get_nowait()
+                except queue.Empty:
+                    pass
+                if latest is not None:
+                    if popup is not None and popup.winfo_exists():
+                        popup.destroy()
+                    popup = self._create_popup(tk, root, latest)
+                root.after(100, show_next)
+
+            root.after(0, show_next)
+            root.mainloop()
+        except Exception:
+            self.available = False
+            self.ready.set()
+
+    def _create_popup(self, tk: Any, root: Any, event: dict[str, Any]) -> Any:
+        is_test = bool(event.get("test"))
+        title = "Sentinel Test" if is_test else "Visual Change Detected"
+        if is_test:
+            message = "Background alerts are working."
+            accent = "#b9ef49"
+        else:
+            message = (
+                f"Detected at {event['display_time']}\n"
+                f"Changed area: {float(event['motion_score']):.2f}%"
+            )
+            accent = "#ff5b55"
+
+        window = tk.Toplevel(root)
+        window.overrideredirect(True)
+        window.attributes("-topmost", True)
+        window.configure(bg=accent)
+        width, height = 390, 164
+        x = max(12, window.winfo_screenwidth() - width - 18)
+        y = max(12, window.winfo_screenheight() - height - 58)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+
+        panel = tk.Frame(window, bg="#101512", padx=18, pady=14)
+        panel.pack(fill="both", expand=True, padx=2, pady=2)
+        tk.Label(
+            panel,
+            text=title,
+            bg="#101512",
+            fg=accent,
+            font=("Segoe UI", 13, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            panel,
+            text=message,
+            bg="#101512",
+            fg="#e8efea",
+            font=("Segoe UI", 10),
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", pady=(8, 10))
+
+        actions = tk.Frame(panel, bg="#101512")
+        actions.pack(fill="x")
+
+        def open_dashboard() -> None:
+            webbrowser.open(self.url)
+            window.destroy()
+
+        tk.Button(
+            actions,
+            text="Open Dashboard",
+            command=open_dashboard,
+            bg="#b9ef49",
+            fg="#101512",
+            activebackground="#d0ff6b",
+            relief="flat",
+            padx=12,
+            pady=4,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        tk.Button(
+            actions,
+            text="Dismiss",
+            command=window.destroy,
+            bg="#27312c",
+            fg="#e8efea",
+            activebackground="#35423b",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=4,
+            cursor="hand2",
+            font=("Segoe UI", 9),
+        ).pack(side="right")
+        window.after(12000, lambda: window.destroy() if window.winfo_exists() else None)
+        return window
+
+
+class TrayApplication:
+    def __init__(self, engine: CameraEngine, server: CameraHttpServer, url: str) -> None:
+        import pystray
+        from PIL import Image, ImageDraw
+
+        self.engine = engine
+        self.server = server
+        self.url = url
+        self.pystray = pystray
+        self.popup_notifier = PopupNotifier(url)
+
+        image = Image.new("RGBA", (64, 64), (13, 20, 16, 255))
+        draw = ImageDraw.Draw(image)
+        green = (185, 239, 73, 255)
+        draw.rounded_rectangle((2, 2, 61, 61), radius=16, outline=green, width=4)
+        draw.ellipse((13, 21, 51, 43), outline=green, width=4)
+        draw.ellipse((26, 25, 38, 39), fill=green)
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Open Dashboard", self.open_dashboard, default=True),
+            pystray.MenuItem("Start / Stop Detection", self.toggle_detection),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Exit Sentinel", self.exit_application),
+        )
+        self.icon = pystray.Icon("Sentinel", image, "Sentinel - USB Camera Motion Alert", menu)
+        self.engine.notification_callback = self.show_notification
+        self.engine.native_notifications = True
+
+    def start(self) -> None:
+        self.popup_notifier.start()
+        self.icon.run_detached()
+
+    def stop(self) -> None:
+        self.engine.notification_callback = None
+        self.engine.native_notifications = False
+        self.popup_notifier.stop()
+        self.icon.stop()
+
+    def open_dashboard(self, *_: Any) -> None:
+        webbrowser.open(self.url)
+
+    def toggle_detection(self, *_: Any) -> None:
+        enabled = not self.engine.status()["monitoring"]
+        self.engine.set_monitoring(enabled)
+        message = "Change detection started." if enabled else "Change detection stopped."
+        self.icon.notify(message, "Sentinel")
+
+    def show_notification(self, event: dict[str, Any]) -> None:
+        try:
+            if not self.popup_notifier.show(event):
+                title = "Sentinel Test" if event.get("test") else "Visual Change Detected"
+                self.icon.notify("Background alert received.", title)
+        except Exception:
+            # Detection and snapshot storage must continue if Windows rejects a notification.
+            pass
+
+    def exit_application(self, *_: Any) -> None:
+        self.icon.stop()
+        threading.Thread(target=self.server.shutdown, name="server-shutdown", daemon=True).start()
+
+
+def show_error(message: str) -> None:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
+            return
+        except Exception:
+            pass
+    print(message, file=sys.stderr)
+
+
+def existing_sentinel_running(url: str) -> bool:
+    try:
+        with urlopen(f"{url}/api/status", timeout=1.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return payload.get("app_name") == APP_NAME
+    except Exception:
+        return False
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=APP_NAME)
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认仅本机可访问")
-    parser.add_argument("--port", type=int, default=8765, help="网页端口")
-    parser.add_argument("--camera", type=int, default=0, help="摄像头编号")
-    parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    parser.add_argument("--host", default="127.0.0.1", help="Listen address; local access only by default")
+    parser.add_argument("--port", type=int, default=8765, help="Web interface port")
+    parser.add_argument("--camera", type=int, default=0, help="Camera index")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically")
+    parser.add_argument("--no-tray", action="store_true", help="Disable the Windows tray icon")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    url = f"http://127.0.0.1:{args.port}"
     config = MonitorConfig(camera_index=max(0, args.camera))
-    engine = CameraEngine(config)
     try:
+        engine = CameraEngine(config)
         server = CameraHttpServer((args.host, args.port), engine)
     except OSError as exc:
-        print(f"无法启动服务：{exc}", file=sys.stderr)
+        if existing_sentinel_running(url):
+            if not args.no_browser:
+                webbrowser.open(url)
+            return 0
+        show_error(f"Unable to start the server:\n\n{exc}")
+        return 1
+    except RuntimeError as exc:
+        show_error(str(exc))
         return 1
 
     engine.start()
-    url = f"http://127.0.0.1:{args.port}"
-    print(f"{APP_NAME} 已启动：{url}")
-    print("按 Ctrl+C 退出。")
+    print(f"{APP_NAME} started: {url}")
+    print("Press Ctrl+C to exit.")
+
+    tray: TrayApplication | None = None
+    if os.name == "nt" and not args.no_tray:
+        try:
+            tray = TrayApplication(engine, server, url)
+            tray.start()
+        except Exception as exc:
+            engine.stop()
+            server.server_close()
+            show_error(f"Unable to start the system tray icon:\n\n{exc}")
+            return 1
 
     shutting_down = threading.Event()
 
@@ -513,6 +788,8 @@ def main() -> int:
     try:
         server.serve_forever(poll_interval=0.3)
     finally:
+        if tray is not None:
+            tray.stop()
         server.server_close()
         engine.stop()
     return 0

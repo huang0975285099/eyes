@@ -1,36 +1,55 @@
-# 守望：USB 摄像头变化预警
+# Sentinel: USB Camera Motion Alert
 
-一个完全在本机运行的摄像头监控工具。它可以实时显示 USB 摄像头画面，在画面出现持续变化时进行红色提示、播放声音，并可保存预警截图。
+A fully local USB camera monitoring tool. It displays a live camera feed and warns you when sustained visual changes are detected. Alerts can flash on screen, play a sound, send a browser notification, and save a snapshot.
 
-## 最快启动
+## Quick Start
 
-环境要求：Windows 10/11、Python 3.10 或更高版本、一个 USB 摄像头。
+Requirements: Windows 10/11, Python 3.10 or newer, and a USB camera.
 
-双击 `start.cmd`。第一次启动会自动创建独立环境并安装依赖，之后会自动打开：
+For the ready-to-run version, double-click:
+
+```text
+dist\LocalCamera.exe
+```
+
+The application opens its interface at:
 
 ```text
 http://127.0.0.1:8765
 ```
 
-浏览器只是界面，摄像头由这台电脑上的 Python 程序读取。服务默认只监听 `127.0.0.1`，局域网内的其他设备无法访问。
+The browser is only the interface. The local application reads the camera. By default, the server listens only on `127.0.0.1`, so other devices on the network cannot access it.
 
-## 使用方法
+## How to Use
 
-1. 接入 USB 摄像头，双击 `start.cmd`。
-2. 如果画面不是目标摄像头，把“摄像头编号”从 `0` 改为 `1` 或 `2`，然后保存。
-3. 调好摄像头位置后，点击“开启变化监控”。程序会先用约 1 秒学习静止背景。
-4. 检测到持续变化时，网页会闪红、播放提示音，并在右侧留下事件记录。
+1. Connect the USB camera and open `dist\LocalCamera.exe`. The dashboard opens in your default browser and a Sentinel icon appears in the Windows system tray.
+2. If the wrong camera appears, change **Camera Index** from `0` to `1` or `2`, then click **Save**.
+3. Position the camera and click **Start Change Detection**. The app learns the stationary background for about one second.
+4. You may minimize or close the browser. Camera detection continues in the background.
+5. Sustained visual changes trigger a Sentinel popup at the bottom-right and are added to **Recent Alerts**.
+6. To reopen the dashboard or stop the application, click the Sentinel tray icon. Choose **Exit Sentinel** to fully exit.
 
-常用设置：
+Use **Test Notification** in the dashboard to confirm that background alerts are working. The Sentinel popup is generated directly by the EXE and does not depend on Chrome notification permission or the Windows notification-sender list.
 
-- **灵敏度**：越高越容易识别轻微变化，也越容易受到光线或摄像头噪点影响。
-- **最小变化区域**：变化面积小于该比例时忽略。误报多可从 `0.8%` 调到 `1.5%–3%`。
-- **连续确认帧数**：连续多少帧都有变化才报警。误报多可从 `3` 调到 `5–8`。
-- **保存预警截图**：保存在程序目录下的 `data/events/`；若 EXE 所在目录不可写，则使用 `%LOCALAPPDATA%\LocalCamera\events\`。
+## System Tray
 
-画面突然变亮、变暗或摄像头本身晃动也属于“画面变化”，因此也会报警。
+- Click the Sentinel tray icon to open the dashboard.
+- Right-click it for **Open Dashboard**, **Start / Stop Detection**, and **Exit Sentinel**.
+- Closing the browser does not stop monitoring.
+- Exiting Sentinel from the tray stops the camera and local server.
 
-## 命令行启动
+## Detection Settings
+
+- **Sensitivity:** Higher values detect smaller visual differences but may react more often to lighting changes or camera noise.
+- **Minimum Change Area:** Changes below this percentage of the image are ignored. Increase the default `0.8%` to `1.5%–3%` if there are too many false alerts.
+- **Confirmation Frames:** The number of consecutive changed frames required before an alert. Increase the default `3` to `5–8` to reduce false alerts.
+- **Save Alert Snapshots:** Stores images under `data\events\` beside the application. If the EXE directory is not writable, `%LOCALAPPDATA%\LocalCamera\events\` is used instead.
+
+A sudden lighting change or physical camera movement is also considered a visual change and may trigger an alert.
+
+## Run From Source
+
+Double-click `start.cmd`, or run:
 
 ```powershell
 python -m venv .venv
@@ -38,26 +57,26 @@ python -m venv .venv
 .\.venv\Scripts\python.exe app.py --camera 0
 ```
 
-可选参数：
+Optional arguments:
 
 ```text
---camera 1       默认使用编号 1 的摄像头
---port 9000      修改网页端口
---no-browser     不自动打开浏览器
+--camera 1       Start with camera index 1
+--port 9000      Change the web interface port
+--no-browser     Do not open the browser automatically
 ```
 
-## 打包成 EXE
+## Build the EXE
 
-在 PowerShell 中运行：
+Run in PowerShell:
 
 ```powershell
 .\build-exe.ps1
 ```
 
-生成文件为 `dist\LocalCamera.exe`。EXE 仍会打开默认浏览器作为界面，但运行机器不再需要单独安装 Python。
+The output is `dist\LocalCamera.exe`. It runs without a console window, and the target computer does not need Python installed.
 
-## 隐私说明
+## Privacy
 
-- 摄像头画面不会上传到网络。
-- 只有开启“保存预警截图”时才会落盘。
-- 浏览器桌面通知需要用户授权；即使拒绝，网页内红色提示和声音仍然有效。
+- Camera images are not uploaded to the internet.
+- Images are written to disk only when **Save Alert Snapshots** is enabled and an alert occurs.
+- Browser desktop notifications require permission. The visual and sound alerts continue to work if permission is denied.

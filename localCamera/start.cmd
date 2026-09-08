@@ -9,7 +9,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo [2/3] Checking dependencies...
-".venv\Scripts\python.exe" -c "import cv2, numpy" >nul 2>nul
+".venv\Scripts\python.exe" -c "import cv2, numpy, PIL, pystray" >nul 2>nul
 if errorlevel 1 (
   echo Installing dependencies for the first run...
   ".venv\Scripts\python.exe" -m pip install -r requirements.txt

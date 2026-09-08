@@ -12,9 +12,11 @@ if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
     --noconfirm `
     --clean `
     --onefile `
+    --windowed `
     --name "LocalCamera" `
     --add-data "static;static" `
     --collect-all cv2 `
+    --collect-all pystray `
     app.py
 if ($LASTEXITCODE -ne 0) { throw "Build failed." }
 
