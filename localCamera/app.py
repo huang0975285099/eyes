@@ -175,7 +175,9 @@ class CameraEngine:
         self.requested_camera_index = config.camera_index
         self.active_camera_index: int | None = None
         self.native_notifications = False
-        self.notification_callback: Callable[[dict[str, Any]], None] | None = None
+        self.notification_error = ""
+        self.notification_status = "Not initialized"
+        self.notification_callback: Callable[[dict[str, Any]], bool | None] | None = None
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run, name="camera", daemon=True)
@@ -219,6 +221,8 @@ class CameraEngine:
                 "last_alert_at": self.last_alert_at,
                 "alert_count": self.alert_count,
                 "native_notifications": self.native_notifications,
+                "notification_error": self.notification_error,
+                "notification_status": self.notification_status,
                 "latest_event": self.latest_event,
                 "events": list(self.events),
                 "config": asdict(self.config),
@@ -235,8 +239,7 @@ class CameraEngine:
             "display_time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "motion_score": 0.0,
         }
-        threading.Thread(target=callback, args=(event,), name="test-notification", daemon=True).start()
-        return True
+        return callback(event) is not False
 
     def wait_for_frame(self, previous_sequence: int, timeout: float = 2.0) -> tuple[int, bytes | None]:
         with self.frame_ready:
@@ -510,141 +513,355 @@ class RequestHandler(BaseHTTPRequestHandler):
 class PopupNotifier:
     """A reliable bottom-right alert window independent of browser permissions."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        status_callback: Callable[[str, str], None] | None = None,
+    ) -> None:
         self.url = url
+        self.status_callback = status_callback
         self.events: queue.Queue[dict[str, Any]] = queue.Queue()
-        self.stop_event = threading.Event()
         self.ready = threading.Event()
         self.available = False
+        self.error = ""
         self.thread: threading.Thread | None = None
+        self.hwnd: int | None = None
+        self.show_message_id = 0x8001
+        self.stop_message_id = 0x8002
+
+    def _set_status(self, status: str, error: str = "") -> None:
+        self.error = error
+        if self.status_callback:
+            self.status_callback(status, error)
 
     def start(self) -> None:
+        self._set_status("Starting")
         self.thread = threading.Thread(target=self._run, name="popup-notifier", daemon=True)
         self.thread.start()
         self.ready.wait(timeout=2.0)
 
     def stop(self) -> None:
-        self.stop_event.set()
+        if self.hwnd:
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                post_message = ctypes.windll.user32.PostMessageW
+                post_message.argtypes = [
+                    wintypes.HWND,
+                    wintypes.UINT,
+                    wintypes.WPARAM,
+                    wintypes.LPARAM,
+                ]
+                post_message.restype = wintypes.BOOL
+                post_message(self.hwnd, self.stop_message_id, 0, 0)
+            except Exception:
+                pass
         if self.thread:
             self.thread.join(timeout=1.5)
 
     def show(self, event: dict[str, Any]) -> bool:
         if not self.available:
+            self._set_status("Unavailable", self.error or "Popup window is not available.")
             return False
         self.events.put(event)
-        return True
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            post_message = ctypes.windll.user32.PostMessageW
+            post_message.argtypes = [
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            post_message.restype = wintypes.BOOL
+            posted = bool(post_message(self.hwnd, self.show_message_id, 0, 0))
+            self._set_status("Posted" if posted else "PostMessage failed")
+            return posted
+        except Exception as exc:
+            self._set_status("PostMessage failed", f"{type(exc).__name__}: {exc}")
+            return False
 
     def _run(self) -> None:
         try:
-            import tkinter as tk
+            import ctypes
+            from ctypes import wintypes
 
-            root = tk.Tk()
-            root.withdraw()
-            self.available = True
-            self.ready.set()
-            popup: tk.Toplevel | None = None
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hinstance = kernel32.GetModuleHandleW(None)
 
-            def show_next() -> None:
-                nonlocal popup
-                if self.stop_event.is_set():
-                    root.destroy()
-                    return
-                latest: dict[str, Any] | None = None
-                try:
-                    while True:
-                        latest = self.events.get_nowait()
-                except queue.Empty:
-                    pass
-                if latest is not None:
-                    if popup is not None and popup.winfo_exists():
-                        popup.destroy()
-                    popup = self._create_popup(tk, root, latest)
-                root.after(100, show_next)
-
-            root.after(0, show_next)
-            root.mainloop()
-        except Exception:
-            self.available = False
-            self.ready.set()
-
-    def _create_popup(self, tk: Any, root: Any, event: dict[str, Any]) -> Any:
-        is_test = bool(event.get("test"))
-        title = "Sentinel Test" if is_test else "Visual Change Detected"
-        if is_test:
-            message = "Background alerts are working."
-            accent = "#b9ef49"
-        else:
-            message = (
-                f"Detected at {event['display_time']}\n"
-                f"Changed area: {float(event['motion_score']):.2f}%"
+            wndproc_type = ctypes.WINFUNCTYPE(
+                ctypes.c_ssize_t,
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
             )
-            accent = "#ff5b55"
 
-        window = tk.Toplevel(root)
-        window.overrideredirect(True)
-        window.attributes("-topmost", True)
-        window.configure(bg=accent)
-        width, height = 390, 164
-        x = max(12, window.winfo_screenwidth() - width - 18)
-        y = max(12, window.winfo_screenheight() - height - 58)
-        window.geometry(f"{width}x{height}+{x}+{y}")
+            class WndClass(ctypes.Structure):
+                _fields_ = [
+                    ("style", wintypes.UINT),
+                    ("lpfnWndProc", wndproc_type),
+                    ("cbClsExtra", ctypes.c_int),
+                    ("cbWndExtra", ctypes.c_int),
+                    ("hInstance", wintypes.HINSTANCE),
+                    ("hIcon", wintypes.HICON),
+                    ("hCursor", wintypes.HANDLE),
+                    ("hbrBackground", wintypes.HBRUSH),
+                    ("lpszMenuName", wintypes.LPCWSTR),
+                    ("lpszClassName", wintypes.LPCWSTR),
+                ]
 
-        panel = tk.Frame(window, bg="#101512", padx=18, pady=14)
-        panel.pack(fill="both", expand=True, padx=2, pady=2)
-        tk.Label(
-            panel,
-            text=title,
-            bg="#101512",
-            fg=accent,
-            font=("Segoe UI", 13, "bold"),
-            anchor="w",
-        ).pack(fill="x")
-        tk.Label(
-            panel,
-            text=message,
-            bg="#101512",
-            fg="#e8efea",
-            font=("Segoe UI", 10),
-            justify="left",
-            anchor="w",
-        ).pack(fill="x", pady=(8, 10))
+            class Rect(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
 
-        actions = tk.Frame(panel, bg="#101512")
-        actions.pack(fill="x")
+            kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+            user32.LoadIconW.restype = wintypes.HICON
+            user32.LoadCursorW.restype = wintypes.HANDLE
+            user32.RegisterClassW.argtypes = [ctypes.POINTER(WndClass)]
+            user32.RegisterClassW.restype = ctypes.c_ushort
+            user32.CreateWindowExW.argtypes = [
+                wintypes.DWORD,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.HWND,
+                wintypes.HMENU,
+                wintypes.HINSTANCE,
+                wintypes.LPVOID,
+            ]
+            user32.CreateWindowExW.restype = wintypes.HWND
+            user32.DefWindowProcW.argtypes = [
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            user32.DefWindowProcW.restype = ctypes.c_ssize_t
+            user32.PostMessageW.argtypes = [
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            user32.PostMessageW.restype = wintypes.BOOL
+            user32.SetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
+            user32.SetWindowTextW.restype = wintypes.BOOL
+            user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.ShowWindow.restype = wintypes.BOOL
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND,
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.UINT,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            user32.DestroyWindow.argtypes = [wintypes.HWND]
+            user32.DestroyWindow.restype = wintypes.BOOL
 
-        def open_dashboard() -> None:
-            webbrowser.open(self.url)
-            window.destroy()
+            WM_COMMAND = 0x0111
+            WM_CLOSE = 0x0010
+            WM_DESTROY = 0x0002
+            WM_TIMER = 0x0113
+            WS_POPUP = 0x80000000
+            WS_CAPTION = 0x00C00000
+            WS_SYSMENU = 0x00080000
+            WS_CHILD = 0x40000000
+            WS_VISIBLE = 0x10000000
+            WS_TABSTOP = 0x00010000
+            WS_EX_TOPMOST = 0x00000008
+            WS_EX_TOOLWINDOW = 0x00000080
+            BS_PUSHBUTTON = 0x00000000
+            SS_LEFT = 0x00000000
+            SW_HIDE = 0
+            SW_SHOWNOACTIVATE = 4
+            HWND_TOPMOST = -1
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOACTIVATE = 0x0010
+            SWP_SHOWWINDOW = 0x0040
+            SPI_GETWORKAREA = 0x0030
+            ID_OPEN = 1001
+            ID_DISMISS = 1002
+            TIMER_HIDE = 1
+            width, height = 410, 190
 
-        tk.Button(
-            actions,
-            text="Open Dashboard",
-            command=open_dashboard,
-            bg="#b9ef49",
-            fg="#101512",
-            activebackground="#d0ff6b",
-            relief="flat",
-            padx=12,
-            pady=4,
-            cursor="hand2",
-            font=("Segoe UI", 9, "bold"),
-        ).pack(side="left")
-        tk.Button(
-            actions,
-            text="Dismiss",
-            command=window.destroy,
-            bg="#27312c",
-            fg="#e8efea",
-            activebackground="#35423b",
-            activeforeground="#ffffff",
-            relief="flat",
-            padx=12,
-            pady=4,
-            cursor="hand2",
-            font=("Segoe UI", 9),
-        ).pack(side="right")
-        window.after(12000, lambda: window.destroy() if window.winfo_exists() else None)
-        return window
+            label_handle = None
+
+            def window_proc(hwnd: int, message: int, wparam: int, lparam: int) -> int:
+                nonlocal label_handle
+                if message == self.show_message_id:
+                    try:
+                        latest: dict[str, Any] | None = None
+                        try:
+                            while True:
+                                latest = self.events.get_nowait()
+                        except queue.Empty:
+                            pass
+                        if latest is not None and label_handle:
+                            if latest.get("test"):
+                                title = "Sentinel Test"
+                                text = "Background alerts are working."
+                            else:
+                                title = "Visual Change Detected"
+                                text = (
+                                    f"Detected at {latest['display_time']}\r\n"
+                                    f"Changed area: {float(latest['motion_score']):.2f}%"
+                                )
+                            user32.SetWindowTextW(hwnd, title)
+                            user32.SetWindowTextW(label_handle, text)
+                            work_area = Rect()
+                            user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work_area), 0)
+                            x = max(work_area.left + 12, work_area.right - width - 12)
+                            y = max(work_area.top + 12, work_area.bottom - height - 12)
+                            user32.SetWindowPos(
+                                hwnd,
+                                wintypes.HWND(HWND_TOPMOST),
+                                x,
+                                y,
+                                width,
+                                height,
+                                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                            )
+                            user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+                            user32.SetTimer(hwnd, TIMER_HIDE, 12000, None)
+                            user32.MessageBeep(0x00000030)
+                            self._set_status("Shown")
+                        else:
+                            self._set_status("Ignored", "No event or label window was available.")
+                    except Exception as exc:
+                        self._set_status("Show failed", f"{type(exc).__name__}: {exc}")
+                    return 0
+                if message == self.stop_message_id:
+                    user32.DestroyWindow(hwnd)
+                    return 0
+                if message == WM_COMMAND:
+                    command = int(wparam) & 0xFFFF
+                    if command == ID_OPEN:
+                        webbrowser.open(self.url)
+                        user32.ShowWindow(hwnd, SW_HIDE)
+                    elif command == ID_DISMISS:
+                        user32.ShowWindow(hwnd, SW_HIDE)
+                    return 0
+                if message == WM_TIMER and int(wparam) == TIMER_HIDE:
+                    user32.KillTimer(hwnd, TIMER_HIDE)
+                    user32.ShowWindow(hwnd, SW_HIDE)
+                    return 0
+                if message == WM_CLOSE:
+                    user32.ShowWindow(hwnd, SW_HIDE)
+                    return 0
+                if message == WM_DESTROY:
+                    user32.PostQuitMessage(0)
+                    return 0
+                return user32.DefWindowProcW(hwnd, message, wparam, lparam)
+
+            window_proc_callback = wndproc_type(window_proc)
+            class_name = f"SentinelPopup_{kernel32.GetCurrentProcessId()}"
+            window_class = WndClass(
+                style=0,
+                lpfnWndProc=window_proc_callback,
+                cbClsExtra=0,
+                cbWndExtra=0,
+                hInstance=hinstance,
+                hIcon=user32.LoadIconW(None, 32512),
+                hCursor=user32.LoadCursorW(None, 32512),
+                hbrBackground=ctypes.c_void_p(6),
+                lpszMenuName=None,
+                lpszClassName=class_name,
+            )
+            if not user32.RegisterClassW(ctypes.byref(window_class)):
+                raise ctypes.WinError()
+
+            user32.CreateWindowExW.restype = wintypes.HWND
+            hwnd = user32.CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                class_name,
+                "Sentinel Alert",
+                WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                0,
+                0,
+                width,
+                height,
+                None,
+                None,
+                hinstance,
+                None,
+            )
+            if not hwnd:
+                raise ctypes.WinError()
+            self.hwnd = hwnd
+
+            label_handle = user32.CreateWindowExW(
+                0,
+                "STATIC",
+                "",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                20,
+                22,
+                360,
+                62,
+                hwnd,
+                None,
+                hinstance,
+                None,
+            )
+            user32.CreateWindowExW(
+                0,
+                "BUTTON",
+                "Open Dashboard",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                20,
+                98,
+                155,
+                34,
+                hwnd,
+                ctypes.c_void_p(ID_OPEN),
+                hinstance,
+                None,
+            )
+            user32.CreateWindowExW(
+                0,
+                "BUTTON",
+                "Dismiss",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                275,
+                98,
+                105,
+                34,
+                hwnd,
+                ctypes.c_void_p(ID_DISMISS),
+                hinstance,
+                None,
+            )
+
+            self.available = True
+            self._set_status("Ready")
+            self.ready.set()
+            message = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(message))
+                user32.DispatchMessageW(ctypes.byref(message))
+            self.available = False
+            self.hwnd = None
+        except Exception as exc:
+            self.available = False
+            self._set_status("Startup failed", f"{type(exc).__name__}: {exc}")
+            self.ready.set()
 
 
 class TrayApplication:
@@ -656,7 +873,7 @@ class TrayApplication:
         self.server = server
         self.url = url
         self.pystray = pystray
-        self.popup_notifier = PopupNotifier(url)
+        self.popup_notifier = PopupNotifier(url, self._update_notification_state)
 
         image = Image.new("RGBA", (64, 64), (13, 20, 16, 255))
         draw = ImageDraw.Draw(image)
@@ -675,8 +892,14 @@ class TrayApplication:
         self.engine.notification_callback = self.show_notification
         self.engine.native_notifications = True
 
+    def _update_notification_state(self, status: str, error: str) -> None:
+        with self.engine.lock:
+            self.engine.notification_status = status
+            self.engine.notification_error = error
+
     def start(self) -> None:
         self.popup_notifier.start()
+        self.engine.notification_error = self.popup_notifier.error
         self.icon.run_detached()
 
     def stop(self) -> None:
@@ -694,14 +917,17 @@ class TrayApplication:
         message = "Change detection started." if enabled else "Change detection stopped."
         self.icon.notify(message, "Sentinel")
 
-    def show_notification(self, event: dict[str, Any]) -> None:
+    def show_notification(self, event: dict[str, Any]) -> bool:
         try:
-            if not self.popup_notifier.show(event):
+            if self.popup_notifier.show(event):
+                return True
+            else:
                 title = "Sentinel Test" if event.get("test") else "Visual Change Detected"
                 self.icon.notify("Background alert received.", title)
+                return True
         except Exception:
             # Detection and snapshot storage must continue if Windows rejects a notification.
-            pass
+            return False
 
     def exit_application(self, *_: Any) -> None:
         self.icon.stop()
