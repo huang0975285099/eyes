@@ -1,0 +1,6 @@
+.venv/
+models/
+.tts-cache/
+logs/
+__pycache__/
+*.pyc

@@ -1,0 +1,25 @@
+{
+  "input_device": "Deli-1080P-Camera-Audio",
+  "output_device": "Deli-1080P-Camera Audio",
+  "wake_phrases": [
+    "小布 小布",
+    "小步 小步"
+  ],
+  "command_timeout_seconds": 15.0,
+  "tts_voice": "zh-CN-XiaoxiaoNeural",
+  "tts_rate": "+0%",
+  "tts_volume": "+0%",
+  "ollama_enabled": true,
+  "ollama_url": "http://127.0.0.1:11434",
+  "ollama_model": "qwen3.5:4b",
+  "ollama_timeout_seconds": 120.0,
+  "ollama_system_prompt": "你是小布，一个运行在本机的中文语音助手。请直接、准确、口语化地回答，不要使用Markdown、列表、网址或表情。答案尽量控制在80个汉字以内。",
+  "web_enabled": true,
+  "web_host": "127.0.0.1",
+  "web_port": 8765,
+  "open_browser": true,
+  "camera_name_keywords": ["Deli", "1080P", "MM101S"],
+  "camera_frame_max_age_seconds": 6.0,
+  "model_path": "models/vosk-model-small-cn-0.22",
+  "model_url": "https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip"
+}
