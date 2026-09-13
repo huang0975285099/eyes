@@ -18,6 +18,7 @@ import socket
 import sys
 import threading
 import time
+from urllib.parse import urlencode
 import urllib.request
 import webbrowser
 import zipfile
@@ -35,6 +36,7 @@ DEFAULT_MODEL_URL = (
     "https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip"
 )
 PUNCTUATION_RE = re.compile(r"[\s，。！？,.!?、：:；;‘’“”\-]+")
+SPEECH_BOUNDARY_RE = re.compile(r"[。！？!?；;\n]")
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,10 @@ class Config:
     ollama_timeout_seconds: float
     ollama_keep_alive: str
     ollama_system_prompt: str
+    internet_tools_enabled: bool
+    internet_timeout_seconds: float
+    internet_retry_count: int
+    weather_default_location: str
     web_enabled: bool
     web_host: str
     web_port: int
@@ -81,12 +87,12 @@ def load_config(path: Path) -> Config:
     return Config(
         input_device=raw.get("input_device", "Deli-1080P-Camera-Audio"),
         output_device=raw.get("output_device", "Deli-1080P-Camera Audio"),
-        wake_phrases=tuple(raw.get("wake_phrases", ["小布 小布", "小步 小步"])),
+        wake_phrases=tuple(raw.get("wake_phrases", ["老 叶 老 叶", "老爷 老爷"])),
         command_timeout_seconds=float(raw.get("command_timeout_seconds", 8.0)),
         conversation_history_turns=max(
             1, int(raw.get("conversation_history_turns", 6))
         ),
-        tts_voice=raw.get("tts_voice", "zh-CN-XiaoxiaoNeural"),
+        tts_voice=raw.get("tts_voice", "zh-CN-YunyangNeural"),
         tts_rate=raw.get("tts_rate", "+0%"),
         tts_volume=raw.get("tts_volume", "+0%"),
         ollama_enabled=bool(raw.get("ollama_enabled", True)),
@@ -97,9 +103,17 @@ def load_config(path: Path) -> Config:
         ollama_system_prompt=str(
             raw.get(
                 "ollama_system_prompt",
-                "你是小布，一个简洁、口语化的中文语音助手。",
+                "你是老叶，一个简洁、口语化的中文语音助手。",
             )
         ),
+        internet_tools_enabled=bool(raw.get("internet_tools_enabled", True)),
+        internet_timeout_seconds=max(
+            1.0, float(raw.get("internet_timeout_seconds", 10.0))
+        ),
+        internet_retry_count=max(0, int(raw.get("internet_retry_count", 2))),
+        weather_default_location=str(
+            raw.get("weather_default_location", "Los Angeles")
+        ).strip(),
         web_enabled=bool(raw.get("web_enabled", True)),
         web_host=str(raw.get("web_host", "127.0.0.1")),
         web_port=int(raw.get("web_port", 8765)),
@@ -230,6 +244,29 @@ def normalize_text(text: str) -> str:
     return PUNCTUATION_RE.sub("", text).casefold()
 
 
+def take_speech_segments(text: str, flush: bool = False) -> tuple[list[str], str]:
+    """Return complete, speakable pieces while keeping an unfinished suffix."""
+    segments: list[str] = []
+    remaining = text
+    while remaining:
+        boundary = SPEECH_BOUNDARY_RE.search(remaining)
+        if boundary:
+            cut = boundary.end()
+        elif len(remaining) >= 42:
+            comma = max(remaining.rfind("，", 12, 42), remaining.rfind(",", 12, 42))
+            cut = comma + 1 if comma >= 0 else 36
+        else:
+            break
+        segment = remaining[:cut].strip()
+        remaining = remaining[cut:]
+        if segment:
+            segments.append(segment)
+    if flush and remaining.strip():
+        segments.append(remaining.strip())
+        remaining = ""
+    return segments, remaining
+
+
 def contains_wake_phrase(text: str, phrases: tuple[str, ...]) -> bool:
     normalized = normalize_text(text)
     return any(normalize_text(phrase) in normalized for phrase in phrases)
@@ -240,6 +277,102 @@ def is_time_command(text: str) -> bool:
     return any(phrase in normalized for phrase in ("现在几点", "几点了", "几点"))
 
 
+def is_weather_command(text: str) -> bool:
+    normalized = normalize_text(text)
+    return any(
+        phrase in normalized
+        for phrase in (
+            "天气",
+            "气温",
+            "温度",
+            "多少度",
+            "冷不冷",
+            "热不热",
+            "会下雨",
+            "会不会下雨",
+            "天气预报",
+        )
+    )
+
+
+def is_weather_follow_up(text: str) -> bool:
+    normalized = normalize_text(text).removesuffix("呢")
+    return normalized in {
+        "今天",
+        "现在",
+        "明天",
+        "后天",
+        "未来三天",
+        "三天",
+        "会下雨",
+        "会不会下雨",
+        "多少度",
+        "冷不冷",
+        "热不热",
+    }
+
+
+def parse_weather_query(text: str, default_location: str) -> tuple[str, list[int]]:
+    normalized = normalize_text(text)
+    if "未来三天" in normalized or "三天天气" in normalized:
+        day_indexes = [0, 1, 2]
+    elif "后天" in normalized:
+        day_indexes = [2]
+    elif "明天" in normalized:
+        day_indexes = [1]
+    else:
+        day_indexes = [0]
+
+    location = text
+    removable = (
+        "帮我",
+        "给我",
+        "我要",
+        "我想",
+        "想知道",
+        "麻烦",
+        "请问",
+        "请",
+        "查询",
+        "查一下",
+        "查查",
+        "搜索",
+        "搜一下",
+        "看一下",
+        "看看",
+        "用",
+        "一下",
+        "未来三天",
+        "三天",
+        "今天",
+        "明天",
+        "后天",
+        "现在",
+        "当地",
+        "天气预报",
+        "天气",
+        "气温",
+        "温度",
+        "多少度",
+        "冷不冷",
+        "热不热",
+        "会不会下雨",
+        "会下雨吗",
+        "下雨吗",
+        "怎么样",
+        "如何",
+        "情况",
+        "预报",
+        "的",
+        "吗",
+        "呢",
+    )
+    for phrase in sorted(removable, key=len, reverse=True):
+        location = location.replace(phrase, "")
+    location = re.sub(r"[\s，。！？,.!?、：:；;]+", " ", location).strip()
+    return location or default_location, day_indexes
+
+
 def is_exit_command(text: str) -> bool:
     normalized = normalize_text(text)
     return any(
@@ -248,9 +381,9 @@ def is_exit_command(text: str) -> bool:
             "退出助手",
             "关闭助手",
             "停止助手",
-            "退出小布",
-            "关闭小布",
-            "停止小布",
+            "退出老叶",
+            "关闭老叶",
+            "停止老叶",
         )
     )
 
@@ -268,6 +401,55 @@ def is_end_conversation_command(text: str) -> bool:
             "再见",
         )
     )
+
+
+def is_stop_speaking_command(text: str) -> bool:
+    normalized = normalize_text(text)
+    for prefix in ("麻烦你", "麻烦", "请你", "请"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
+    for suffix in ("可以吗", "好吗", "谢谢", "吧"):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)]
+            break
+    return normalized in {
+        "停",
+        "停下",
+        "停下来",
+        "停一下",
+        "别说了",
+        "别讲了",
+        "别播了",
+        "别说话了",
+        "不要说了",
+        "不要讲了",
+        "停止回答",
+        "停止播报",
+        "安静",
+    }
+
+
+def interruption_action(text: str, wake_phrases: tuple[str, ...]) -> str | None:
+    normalized = normalize_text(text)
+    for prefix in ("那个", "喂", "哎"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
+    for phrase in wake_phrases:
+        wake_phrase = normalize_text(phrase)
+        if normalized == wake_phrase:
+            return "wake"
+        if normalized.startswith(wake_phrase):
+            remainder = normalized[len(wake_phrase) :]
+            if is_stop_speaking_command(remainder):
+                return "stop"
+            # Calling the wake word during playback always stops the current
+            # answer and returns to command listening.
+            return "wake"
+    if is_stop_speaking_command(text):
+        return "stop"
+    return None
 
 
 def is_vision_command(text: str) -> bool:
@@ -462,7 +644,11 @@ class Speaker:
         digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
         return APP_DIR / ".tts-cache" / f"{digest}.mp3"
 
-    def say(self, text: str) -> None:
+    def prepare(
+        self, text: str, cancel_event: threading.Event | None = None
+    ) -> np.ndarray | None:
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         cache_path = self._cache_path(text)
         if cache_path.exists():
             audio_bytes = cache_path.read_bytes()
@@ -473,6 +659,8 @@ class Speaker:
                 cache_path.write_bytes(audio_bytes)
         if not audio_bytes:
             raise RuntimeError("语音合成没有返回音频")
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         decoded = miniaudio.decode(
             audio_bytes, output_format=miniaudio.SampleFormat.SIGNED16
         )
@@ -481,12 +669,239 @@ class Speaker:
         samples = resample_pcm(samples, decoded.sample_rate, self.device.sample_rate)
         if samples.shape[1] == 1:
             samples = np.repeat(samples, 2, axis=1)
+        return samples
+
+    def play_prepared(
+        self,
+        samples: np.ndarray,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            return
         sd.play(
             samples,
             self.device.sample_rate,
             device=self.device.index,
             blocking=True,
         )
+
+    def say(self, text: str, cancel_event: threading.Event | None = None) -> None:
+        samples = self.prepare(text, cancel_event)
+        if samples is not None:
+            self.play_prepared(samples, cancel_event)
+
+
+class OnlineSearchTools:
+    GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
+    FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+    # The configured home city is used most often. Keeping its coordinates
+    # locally avoids a second network dependency before every weather request.
+    KNOWN_LOCATIONS = {
+        "成都": {
+            "name": "成都",
+            "admin1": "四川",
+            "latitude": 30.5728,
+            "longitude": 104.0668,
+        },
+        "成都市": {
+            "name": "成都",
+            "admin1": "四川",
+            "latitude": 30.5728,
+            "longitude": 104.0668,
+        },
+        "四川省成都市": {
+            "name": "成都",
+            "admin1": "四川",
+            "latitude": 30.5728,
+            "longitude": 104.0668,
+        },
+        "中华人民共和国四川省成都市": {
+            "name": "成都",
+            "admin1": "四川",
+            "latitude": 30.5728,
+            "longitude": 104.0668,
+        },
+    }
+
+    WEATHER_CODES = {
+        0: "晴",
+        1: "晴间多云",
+        2: "多云",
+        3: "阴",
+        45: "有雾",
+        48: "有雾凇",
+        51: "有轻微毛毛雨",
+        53: "有毛毛雨",
+        55: "有较强毛毛雨",
+        56: "有冻毛毛雨",
+        57: "有较强冻毛毛雨",
+        61: "有小雨",
+        63: "有中雨",
+        65: "有大雨",
+        66: "有冻雨",
+        67: "有较强冻雨",
+        71: "有小雪",
+        73: "有中雪",
+        75: "有大雪",
+        77: "有米雪",
+        80: "有小阵雨",
+        81: "有中等阵雨",
+        82: "有强阵雨",
+        85: "有小阵雪",
+        86: "有强阵雪",
+        95: "有雷雨",
+        96: "有雷雨和冰雹",
+        99: "有强雷雨和冰雹",
+    }
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.last_weather_location = ""
+        self._location_cache: dict[str, dict] = {}
+
+    def start_conversation(self) -> None:
+        self.last_weather_location = ""
+
+    def _get_json(self, url: str, parameters: dict) -> dict:
+        request = urllib.request.Request(
+            f"{url}?{urlencode(parameters)}",
+            headers={
+                "User-Agent": "LaoyeVoiceAssistant/1.0",
+                "Connection": "close",
+            },
+        )
+        last_error: Exception | None = None
+        for attempt in range(self.config.internet_retry_count + 1):
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self.config.internet_timeout_seconds
+                ) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except Exception as error:
+                last_error = error
+                if attempt < self.config.internet_retry_count:
+                    time.sleep(0.4 * (attempt + 1))
+        raise RuntimeError(f"联网请求失败：{last_error}") from last_error
+
+    @staticmethod
+    def _number(value) -> int:
+        return int(round(float(value)))
+
+    @staticmethod
+    def _location_candidates(query: str) -> list[str]:
+        candidates = [query.strip()]
+        shortened = re.sub(r"^(中华人民共和国|中国)", "", query).strip()
+        if shortened:
+            candidates.append(shortened)
+        city_match = re.search(r"([^省自治区]+市)", shortened)
+        if city_match:
+            candidates.append(city_match.group(1).removesuffix("市"))
+        if "省" in shortened:
+            province_tail = shortened.rsplit("省", 1)[-1]
+            candidates.append(province_tail.split("市", 1)[0])
+        candidates.append(re.sub(r"(市|省|区|县)$", "", shortened))
+        return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+    def _find_location(self, query: str) -> dict:
+        cache_key = query.casefold()
+        if cache_key in self._location_cache:
+            return self._location_cache[cache_key]
+        for candidate in self._location_candidates(query):
+            known_location = self.KNOWN_LOCATIONS.get(candidate)
+            if known_location:
+                location = dict(known_location)
+                self._location_cache[cache_key] = location
+                self._location_cache[str(location["name"]).casefold()] = location
+                return location
+            response = self._get_json(
+                self.GEOCODING_URL,
+                {
+                    "name": candidate,
+                    "count": 1,
+                    "language": "zh",
+                    "format": "json",
+                },
+            )
+            results = response.get("results", [])
+            if results:
+                location = results[0]
+                self._location_cache[cache_key] = location
+                canonical_name = str(location.get("name", "")).casefold()
+                if canonical_name:
+                    self._location_cache[canonical_name] = location
+                return location
+        raise RuntimeError(f"没有找到地点“{query}”")
+
+    def search_weather(self, question: str) -> str:
+        if not self.config.internet_tools_enabled:
+            raise RuntimeError("联网工具已在配置中关闭")
+        location_query, day_indexes = parse_weather_query(
+            question,
+            self.last_weather_location or self.config.weather_default_location,
+        )
+        if not location_query:
+            return "请告诉我需要查询哪个城市的天气。"
+
+        location = self._find_location(location_query)
+        self.last_weather_location = str(location.get("name", location_query))
+        forecast = self._get_json(
+            self.FORECAST_URL,
+            {
+                "latitude": location["latitude"],
+                "longitude": location["longitude"],
+                "current": (
+                    "temperature_2m,apparent_temperature,weather_code,"
+                    "wind_speed_10m"
+                ),
+                "daily": (
+                    "weather_code,temperature_2m_max,temperature_2m_min,"
+                    "precipitation_probability_max"
+                ),
+                "timezone": "auto",
+                "forecast_days": 3,
+            },
+        )
+        daily = forecast.get("daily", {})
+        day_names = ("今天", "明天", "后天")
+        descriptions: list[str] = []
+        for day_index in day_indexes:
+            try:
+                weather_code = int(daily["weather_code"][day_index])
+                high = self._number(daily["temperature_2m_max"][day_index])
+                low = self._number(daily["temperature_2m_min"][day_index])
+                rain_probability = self._number(
+                    daily["precipitation_probability_max"][day_index]
+                )
+            except (IndexError, KeyError, TypeError, ValueError) as error:
+                raise RuntimeError("天气服务返回的数据不完整") from error
+            condition = self.WEATHER_CODES.get(weather_code, "天气状况未知")
+            if day_index == 0 and len(day_indexes) == 1:
+                current = forecast.get("current", {})
+                try:
+                    temperature = self._number(current["temperature_2m"])
+                    apparent = self._number(current["apparent_temperature"])
+                    wind = self._number(current["wind_speed_10m"])
+                    current_code = int(current["weather_code"])
+                except (KeyError, TypeError, ValueError) as error:
+                    raise RuntimeError("天气服务没有返回当前天气") from error
+                condition = self.WEATHER_CODES.get(current_code, condition)
+                descriptions.append(
+                    f"今天{condition}，当前{temperature}度，体感{apparent}度，"
+                    f"最高{high}度，最低{low}度，降雨概率{rain_probability}%，"
+                    f"风速{wind}公里每小时"
+                )
+            else:
+                descriptions.append(
+                    f"{day_names[day_index]}{condition}，最高{high}度，"
+                    f"最低{low}度，降雨概率{rain_probability}%"
+                )
+
+        location_name = str(location.get("name", location_query))
+        admin1 = str(location.get("admin1", ""))
+        if admin1 and admin1 != location_name:
+            location_name = f"{location_name}，{admin1}"
+        return f"{location_name}：" + "；".join(descriptions) + "。"
 
 
 class OllamaClient:
@@ -528,6 +943,21 @@ class OllamaClient:
         ) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def _stream_request(self, path: str, payload: dict):
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.config.ollama_url}{path}",
+            data=data,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        with urllib.request.urlopen(
+            request, timeout=self.config.ollama_timeout_seconds
+        ) as response:
+            for raw_line in response:
+                line = raw_line.strip()
+                if line:
+                    yield json.loads(line.decode("utf-8"))
+
     def check(self) -> tuple[bool, str]:
         if not self.config.ollama_enabled:
             return False, "配置中已关闭"
@@ -555,30 +985,69 @@ class OllamaClient:
             },
         )
 
-    def ask(self, question: str) -> str:
+    def _chat(
+        self,
+        messages: list[dict],
+        temperature: float,
+        num_predict: int,
+        on_segment=None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        payload = {
+            "model": self.config.ollama_model,
+            "messages": messages,
+            "stream": True,
+            "think": False,
+            "keep_alive": self.config.ollama_keep_alive,
+            "options": {"temperature": temperature, "num_predict": num_predict},
+        }
+        answer_parts: list[str] = []
+        speech_buffer = ""
+        for chunk in self._stream_request("/api/chat", payload):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            content = str(chunk.get("message", {}).get("content", ""))
+            if not content:
+                continue
+            answer_parts.append(content)
+            speech_buffer += content
+            segments, speech_buffer = take_speech_segments(speech_buffer)
+            if on_segment:
+                for segment in segments:
+                    on_segment(segment)
+        if cancel_event is None or not cancel_event.is_set():
+            segments, _ = take_speech_segments(speech_buffer, flush=True)
+            if on_segment:
+                for segment in segments:
+                    on_segment(segment)
+        answer = "".join(answer_parts).strip()
+        if not answer and (cancel_event is None or not cancel_event.is_set()):
+            raise RuntimeError("Ollama 没有返回回答")
+        return answer
+
+    def ask(
+        self,
+        question: str,
+        on_segment=None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
         messages = [
             {"role": "system", "content": self.config.ollama_system_prompt},
             *self.history[-self._history_message_limit :],
             {"role": "user", "content": question},
         ]
-        response = self._request(
-            "/api/chat",
-            {
-                "model": self.config.ollama_model,
-                "messages": messages,
-                "stream": False,
-                "think": False,
-                "keep_alive": self.config.ollama_keep_alive,
-                "options": {"temperature": 0.4, "num_predict": 160},
-            },
-        )
-        answer = str(response.get("message", {}).get("content", "")).strip()
-        if not answer:
-            raise RuntimeError("Ollama 没有返回回答")
-        self.remember(question, answer)
+        answer = self._chat(messages, 0.4, 160, on_segment, cancel_event)
+        if cancel_event is None or not cancel_event.is_set():
+            self.remember(question, answer)
         return answer
 
-    def ask_vision(self, question: str, image_bytes: bytes) -> str:
+    def ask_vision(
+        self,
+        question: str,
+        image_bytes: bytes,
+        on_segment=None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
         image_base64 = base64.b64encode(image_bytes).decode("ascii")
         messages: list[dict] = [
             {"role": "system", "content": self.config.ollama_system_prompt},
@@ -592,21 +1061,9 @@ class OllamaClient:
                 "images": [image_base64],
             },
         ]
-        response = self._request(
-            "/api/chat",
-            {
-                "model": self.config.ollama_model,
-                "messages": messages,
-                "stream": False,
-                "think": False,
-                "keep_alive": self.config.ollama_keep_alive,
-                "options": {"temperature": 0.2, "num_predict": 180},
-            },
-        )
-        answer = str(response.get("message", {}).get("content", "")).strip()
-        if not answer:
-            raise RuntimeError("Ollama 没有返回画面说明")
-        self.remember(question, answer)
+        answer = self._chat(messages, 0.2, 180, on_segment, cancel_event)
+        if cancel_event is None or not cancel_event.is_set():
+            self.remember(question, answer)
         return answer
 
 
@@ -883,7 +1340,6 @@ class VoiceAssistant:
         "关闭 助手",
         "停止 助手",
     ]
-
     def __init__(
         self,
         config: Config,
@@ -891,6 +1347,7 @@ class VoiceAssistant:
         input_device: AudioDevice,
         speaker: Speaker,
         ollama: OllamaClient,
+        online_tools: OnlineSearchTools,
         dashboard: CameraDashboard | None,
     ) -> None:
         self.config = config
@@ -898,23 +1355,37 @@ class VoiceAssistant:
         self.input_device = input_device
         self.speaker = speaker
         self.ollama = ollama
+        self.online_tools = online_tools
         self.dashboard = dashboard
         self.audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=80)
+        self.interrupt_audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=40)
         self.speaking = threading.Event()
+        self.barge_in_enabled = threading.Event()
+        self.playback_cancel = threading.Event()
+        self._barge_in_stop = threading.Event()
+        self._interrupt_lock = threading.Lock()
+        self._interrupt_action: str | None = None
+
+    @staticmethod
+    def _put_latest(target_queue: queue.Queue[bytes], data: bytes) -> None:
+        try:
+            target_queue.put_nowait(data)
+        except queue.Full:
+            try:
+                target_queue.get_nowait()
+                target_queue.put_nowait(data)
+            except queue.Empty:
+                pass
 
     def _audio_callback(self, indata, frames, timing, status) -> None:
         if status:
             print(f"\n音频提示：{status}", file=sys.stderr)
+        if self.barge_in_enabled.is_set():
+            self._put_latest(self.interrupt_audio_queue, bytes(indata))
+            return
         if self.speaking.is_set():
             return
-        try:
-            self.audio_queue.put_nowait(bytes(indata))
-        except queue.Full:
-            try:
-                self.audio_queue.get_nowait()
-                self.audio_queue.put_nowait(bytes(indata))
-            except queue.Empty:
-                pass
+        self._put_latest(self.audio_queue, bytes(indata))
 
     def _clear_audio(self) -> None:
         while True:
@@ -922,6 +1393,58 @@ class VoiceAssistant:
                 self.audio_queue.get_nowait()
             except queue.Empty:
                 return
+
+    def _clear_interrupt_audio(self) -> None:
+        while True:
+            try:
+                self.interrupt_audio_queue.get_nowait()
+            except queue.Empty:
+                return
+
+    def _set_interrupt_action(self, action: str) -> None:
+        with self._interrupt_lock:
+            if self._interrupt_action is None:
+                self._interrupt_action = action
+
+    def _consume_interrupt_action(self) -> str | None:
+        with self._interrupt_lock:
+            action = self._interrupt_action
+            self._interrupt_action = None
+            return action
+
+    def _barge_in_loop(self, sample_rate: int) -> None:
+        # An unrestricted recognizer prevents arbitrary speech or speaker echo from
+        # being forced into one of a tiny number of interruption commands.
+        recognizer = KaldiRecognizer(self.model, sample_rate)
+        while not self._barge_in_stop.is_set():
+            try:
+                data = self.interrupt_audio_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if not self.barge_in_enabled.is_set():
+                recognizer.Reset()
+                continue
+            is_final = recognizer.AcceptWaveform(data)
+            result = recognizer.Result() if is_final else recognizer.PartialResult()
+            text = _result_text(result, "text" if is_final else "partial")
+            if not text or text == "[unk]":
+                continue
+            action = interruption_action(text, self.config.wake_phrases)
+            if action is None:
+                continue
+            print(f"[打断播报] {text}", flush=True)
+            self._set_interrupt_action(action)
+            self.playback_cancel.set()
+            if self.dashboard:
+                self.dashboard.store.set_assistant_status(
+                    self._continuation_status(action)
+                )
+            try:
+                sd.stop()
+            except Exception as error:
+                print(f"[停止播放失败] {error}", file=sys.stderr)
+            recognizer.Reset()
+            self._clear_interrupt_audio()
 
     def _play(self, action, *args) -> None:
         self.speaking.set()
@@ -932,21 +1455,157 @@ class VoiceAssistant:
             self._clear_audio()
             self.speaking.clear()
 
+    def _begin_interruptible_playback(self) -> None:
+        self._consume_interrupt_action()
+        self.playback_cancel.clear()
+        self._clear_interrupt_audio()
+        self.barge_in_enabled.set()
+
+    def _end_interruptible_playback(self) -> str | None:
+        self.barge_in_enabled.clear()
+        self._clear_interrupt_audio()
+        return self._consume_interrupt_action()
+
+    def _play_interruptible(self, action, *args) -> str | None:
+        self._begin_interruptible_playback()
+        try:
+            self._play(action, *args)
+        finally:
+            interrupt_action = self._end_interruptible_playback()
+        return interrupt_action
+
+    def _speak_streamed_answer(self, request) -> tuple[str, str | None]:
+        speech_queue: queue.Queue[str | None] = queue.Queue()
+        prepared_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=2)
+        generation_result: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+        playback_errors: list[Exception] = []
+        displayed_segments: list[str] = []
+        self._begin_interruptible_playback()
+
+        def on_segment(segment: str) -> None:
+            if self.playback_cancel.is_set():
+                return
+            displayed_segments.append(segment)
+            if self.dashboard:
+                self.dashboard.store.set_assistant_status(
+                    "正在回答", "".join(displayed_segments)
+                )
+            speech_queue.put(segment)
+
+        def generation_worker() -> None:
+            try:
+                generation_result.put(("answer", request(on_segment)))
+            except Exception as error:
+                generation_result.put(("error", error))
+            finally:
+                speech_queue.put(None)
+
+        def preparation_worker() -> None:
+            try:
+                while True:
+                    segment = speech_queue.get()
+                    if segment is None:
+                        break
+                    if self.playback_cancel.is_set():
+                        continue
+                    try:
+                        samples = self.speaker.prepare(
+                            segment, self.playback_cancel
+                        )
+                        if samples is not None:
+                            prepared_queue.put(("audio", samples))
+                    except Exception as error:
+                        prepared_queue.put(("error", error))
+            finally:
+                prepared_queue.put(("done", None))
+
+        worker = threading.Thread(
+            target=generation_worker, name="streaming-model", daemon=True
+        )
+        preparation = threading.Thread(
+            target=preparation_worker, name="streaming-tts", daemon=True
+        )
+        worker.start()
+        preparation.start()
+        playback_failed = False
+        try:
+            while True:
+                item_kind, item_value = prepared_queue.get()
+                if item_kind == "done":
+                    break
+                if item_kind == "error":
+                    if isinstance(item_value, Exception):
+                        playback_errors.append(item_value)
+                    else:
+                        playback_errors.append(RuntimeError(str(item_value)))
+                    playback_failed = True
+                    try:
+                        self._play(self.speaker.chime, False)
+                    except Exception:
+                        pass
+                    continue
+                if playback_failed or self.playback_cancel.is_set():
+                    continue
+                try:
+                    # Synthesis is prefetched in streaming-tts, but WASAPI playback
+                    # stays on the main voice thread for reliable Windows output.
+                    self._play(
+                        self.speaker.play_prepared,
+                        item_value,
+                        self.playback_cancel,
+                    )
+                except Exception as error:
+                    playback_errors.append(error)
+                    playback_failed = True
+                    try:
+                        self._play(self.speaker.chime, False)
+                    except Exception:
+                        pass
+        finally:
+            worker.join()
+            preparation.join()
+            interrupt_action = self._end_interruptible_playback()
+        result_kind, result_value = generation_result.get()
+        if result_kind == "error":
+            if isinstance(result_value, Exception):
+                raise result_value
+            raise RuntimeError(str(result_value))
+        if playback_errors:
+            print(f"[语音合成失败] {playback_errors[0]}", file=sys.stderr)
+        return str(result_value), interrupt_action
+
+    @staticmethod
+    def _continuation_status(interrupt_action: str | None) -> str:
+        if interrupt_action == "wake":
+            return "回答已打断，请直接说新问题"
+        if interrupt_action == "stop":
+            return "已停止播报，可以继续提问"
+        return "可以继续提问，无需再次唤醒"
+
     def run(self) -> None:
         sample_rate = self.input_device.sample_rate
         wake_recognizer = _recognizer(
             self.model, sample_rate, list(self.config.wake_phrases)
         )
         command_recognizer = KaldiRecognizer(self.model, sample_rate)
+        self._barge_in_stop.clear()
+        barge_in_thread = threading.Thread(
+            target=self._barge_in_loop,
+            args=(sample_rate,),
+            name="barge-in-recognizer",
+            daemon=True,
+        )
+        barge_in_thread.start()
         state = "waiting"
         command_deadline = 0.0
         last_partial = ""
         vision_context_active = False
+        weather_context_active = False
 
-        print("\n已启动。请说：小布小布")
+        print("\n已启动。请说：老叶老叶")
         print("听到“我在”后开始提问（按 Ctrl+C 退出）\n")
         if self.dashboard:
-            self.dashboard.store.set_assistant_status("等待“小布小布”唤醒")
+            self.dashboard.store.set_assistant_status("等待“老叶老叶”唤醒")
 
         with sd.RawInputStream(
             samplerate=sample_rate,
@@ -962,13 +1621,15 @@ class VoiceAssistant:
                 if state == "command" and time.monotonic() > command_deadline:
                     print("[会话结束] 一段时间没有继续提问，重新等待唤醒。")
                     self.ollama.end_conversation()
+                    self.online_tools.start_conversation()
                     vision_context_active = False
+                    weather_context_active = False
                     state = "waiting"
                     wake_recognizer.Reset()
                     command_recognizer.Reset()
                     last_partial = ""
                     if self.dashboard:
-                        self.dashboard.store.set_assistant_status("等待“小布小布”唤醒")
+                        self.dashboard.store.set_assistant_status("等待“老叶老叶”唤醒")
 
                 try:
                     data = self.audio_queue.get(timeout=0.2)
@@ -1000,7 +1661,9 @@ class VoiceAssistant:
                     print("[已唤醒] 正在听……")
                     print("[回答] 我在")
                     self.ollama.start_conversation()
+                    self.online_tools.start_conversation()
                     vision_context_active = False
+                    weather_context_active = False
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status("我在，请开始提问", "我在")
                     try:
@@ -1016,16 +1679,20 @@ class VoiceAssistant:
 
                 if state == "command" and is_time_command(text):
                     vision_context_active = False
+                    weather_context_active = False
                     response = format_time_zh(datetime.now().astimezone())
                     self.ollama.remember(text, response)
                     print(f"[回答] {response}")
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status("回答完成", response)
                     try:
-                        self._play(self.speaker.say, response)
+                        interrupt_action = self._play_interruptible(
+                            self.speaker.say, response, self.playback_cancel
+                        )
                     except Exception as error:
                         print(f"[语音合成失败] {error}", file=sys.stderr)
                         self._play(self.speaker.chime, False)
+                        interrupt_action = None
                     state = "command"
                     command_deadline = (
                         time.monotonic() + self.config.command_timeout_seconds
@@ -1034,11 +1701,68 @@ class VoiceAssistant:
                     last_partial = ""
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status(
-                            "可以继续提问，无需再次唤醒", response
+                            self._continuation_status(interrupt_action), response
+                        )
+                elif (
+                    state == "command"
+                    and is_final
+                    and (
+                        is_weather_command(text)
+                        or (
+                            weather_context_active
+                            and is_weather_follow_up(text)
+                        )
+                    )
+                ):
+                    vision_context_active = False
+                    print(f"[联网天气查询] {text}")
+                    if self.dashboard:
+                        self.dashboard.store.set_assistant_status("正在联网查询天气")
+                    try:
+                        answer = self.online_tools.search_weather(text)
+                        weather_context_active = True
+                        weather_succeeded = True
+                    except Exception as error:
+                        print(f"[联网天气查询失败] {error}", file=sys.stderr)
+                        if "配置中关闭" in str(error):
+                            answer = "天气查询功能暂时关闭。"
+                        elif "没有找到地点" in str(error):
+                            answer = "没有找到这个城市，请重新说城市名，比如成都天气。"
+                        else:
+                            answer = "天气服务暂时连接失败，请稍后再试。"
+                        weather_context_active = False
+                        weather_succeeded = False
+                    self.ollama.remember(text, answer)
+                    print(f"[天气回答] {answer}")
+                    if self.dashboard:
+                        self.dashboard.store.set_assistant_status(
+                            "天气查询完成" if weather_succeeded else "天气查询失败",
+                            answer,
+                        )
+                    try:
+                        interrupt_action = self._play_interruptible(
+                            self.speaker.say, answer, self.playback_cancel
+                        )
+                    except Exception as error:
+                        print(f"[语音合成失败] {error}", file=sys.stderr)
+                        self._play(self.speaker.chime, False)
+                        interrupt_action = None
+                    state = "command"
+                    command_deadline = (
+                        time.monotonic() + self.config.command_timeout_seconds
+                    )
+                    command_recognizer.Reset()
+                    last_partial = ""
+                    if self.dashboard:
+                        self.dashboard.store.set_assistant_status(
+                            self._continuation_status(interrupt_action), answer
                         )
                 elif state == "command" and is_final and is_exit_command(text):
                     self.ollama.end_conversation()
+                    self.online_tools.start_conversation()
+                    self._barge_in_stop.set()
                     vision_context_active = False
+                    weather_context_active = False
                     print("再见。")
                     try:
                         self._play(self.speaker.say, "再见。")
@@ -1053,10 +1777,12 @@ class VoiceAssistant:
                     answer = "好的，需要时再叫我。"
                     print(f"[会话结束] {answer}")
                     self.ollama.end_conversation()
+                    self.online_tools.start_conversation()
                     vision_context_active = False
+                    weather_context_active = False
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status(
-                            "等待“小布小布”唤醒", answer
+                            "等待“老叶老叶”唤醒", answer
                         )
                     try:
                         self._play(self.speaker.say, answer)
@@ -1075,6 +1801,9 @@ class VoiceAssistant:
                         and is_vision_follow_up(text)
                     )
                 ):
+                    weather_context_active = False
+                    answer_was_streamed = False
+                    interrupt_action = None
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status(
                             "正在拍摄本次分析快照"
@@ -1093,7 +1822,15 @@ class VoiceAssistant:
                         if self.dashboard:
                             self.dashboard.store.set_assistant_status("正在分析当前画面")
                         try:
-                            answer = self.ollama.ask_vision(text, image_bytes)
+                            answer, interrupt_action = self._speak_streamed_answer(
+                                lambda on_segment: self.ollama.ask_vision(
+                                    text,
+                                    image_bytes,
+                                    on_segment,
+                                    self.playback_cancel,
+                                )
+                            )
+                            answer_was_streamed = True
                             vision_context_active = True
                         except Exception as error:
                             print(f"[视觉分析失败] {error}", file=sys.stderr)
@@ -1102,11 +1839,14 @@ class VoiceAssistant:
                     print(f"[视觉回答] {answer}")
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status("视觉回答完成", answer)
-                    try:
-                        self._play(self.speaker.say, answer)
-                    except Exception as error:
-                        print(f"[语音合成失败] {error}", file=sys.stderr)
-                        self._play(self.speaker.chime, False)
+                    if not answer_was_streamed:
+                        try:
+                            interrupt_action = self._play_interruptible(
+                                self.speaker.say, answer, self.playback_cancel
+                            )
+                        except Exception as error:
+                            print(f"[语音合成失败] {error}", file=sys.stderr)
+                            self._play(self.speaker.chime, False)
                     state = "command"
                     command_deadline = (
                         time.monotonic() + self.config.command_timeout_seconds
@@ -1115,20 +1855,25 @@ class VoiceAssistant:
                     last_partial = ""
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status(
-                            "可以继续提问，无需再次唤醒", answer
+                            self._continuation_status(interrupt_action), answer
                         )
                 elif state == "command" and is_final:
                     vision_context_active = False
+                    weather_context_active = False
                     print(f"[问题] {text}")
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status("正在生成回答")
                     try:
-                        answer = self.ollama.ask(text)
+                        answer, interrupt_action = self._speak_streamed_answer(
+                            lambda on_segment: self.ollama.ask(
+                                text, on_segment, self.playback_cancel
+                            )
+                        )
                         print(f"[Ollama] {answer}")
                         if self.dashboard:
                             self.dashboard.store.set_assistant_status("回答完成", answer)
-                        self._play(self.speaker.say, answer)
                     except Exception as error:
+                        interrupt_action = None
                         print(f"[Ollama 调用失败] {error}", file=sys.stderr)
                         try:
                             self._play(
@@ -1145,8 +1890,9 @@ class VoiceAssistant:
                     last_partial = ""
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status(
-                            "可以继续提问，无需再次唤醒"
+                            self._continuation_status(interrupt_action)
                         )
+        self._barge_in_stop.set()
         print("已收到关闭请求，语音助手安全退出。")
 
 
@@ -1192,12 +1938,13 @@ def main() -> int:
     )
     speaker = Speaker(output_device, config)
     if args.test_speaker:
-        speaker.say("小布语音助手已连接成功。")
+        speaker.say("老叶语音助手已连接成功。")
         print("扬声器测试完成。")
         return 0
 
     SetLogLevel(-1)
     ollama = OllamaClient(config)
+    online_tools = OnlineSearchTools(config)
     ollama_ready, ollama_status = ollama.check()
     if ollama_ready:
         print(f"Ollama：已连接 / {ollama_status}")
@@ -1215,7 +1962,15 @@ def main() -> int:
     if dashboard:
         dashboard.start()
     try:
-        VoiceAssistant(config, model, input_device, speaker, ollama, dashboard).run()
+        VoiceAssistant(
+            config,
+            model,
+            input_device,
+            speaker,
+            ollama,
+            online_tools,
+            dashboard,
+        ).run()
     finally:
         if dashboard:
             dashboard.stop()

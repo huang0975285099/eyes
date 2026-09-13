@@ -65,7 +65,7 @@ function Wait-AndActivateDashboard([string[]]$ProcessNames) {
     $Deadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
         $WindowProcess = Get-Process -Name $ProcessNames -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowTitle -like '*小布视觉助手*' } |
+            Where-Object { $_.MainWindowTitle -like '*老叶视觉助手*' } |
             Select-Object -First 1
         if ($WindowProcess) {
             return $true
@@ -141,7 +141,7 @@ try {
 
     $ExistingAssistant = Get-RunningAssistant
     if ($ExistingAssistant) {
-        $SuccessMessage = "小布语音助手已经在后台运行（进程 $($ExistingAssistant.ProcessId)）。"
+        $SuccessMessage = "老叶语音助手已经在后台运行（进程 $($ExistingAssistant.ProcessId)）。"
         Write-Host $SuccessMessage -ForegroundColor Green
         Write-Host '正在打开摄像头页面：http://localhost:8765/'
         Save-StartResult $SuccessMessage
@@ -151,7 +151,7 @@ try {
 
     & (Join-Path $ProjectDir 'ensure-ollama.ps1')
 
-    Write-Host '小布语音助手：正在后台启动……' -ForegroundColor Yellow
+    Write-Host '老叶语音助手：正在后台启动……' -ForegroundColor Yellow
     $PwshCommand = Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue
     $PowerShellExe = if ($PwshCommand) {
         $PwshCommand.Source
@@ -200,7 +200,7 @@ try {
         throw '语音助手在 40 秒内未能启动摄像头页面。'
     }
 
-    Write-Host '小布语音助手已由 Windows 后台任务托管。' -ForegroundColor Green
+    Write-Host '老叶语音助手已由 Windows 后台任务托管。' -ForegroundColor Green
     Write-Host '摄像头页面：http://localhost:8765/'
     Write-Host '关闭此 PowerShell 窗口不会停止语音助手。'
     Write-Host '需要停止时运行：.\stop.ps1'
@@ -212,7 +212,7 @@ try {
     Set-Content -LiteralPath $LauncherErrorLog -Value $ErrorMessage -Encoding UTF8
     Save-StartResult "启动失败：$ErrorMessage"
     Write-Host ''
-    Write-Host '小布语音助手启动失败：' -ForegroundColor Red
+    Write-Host '老叶语音助手启动失败：' -ForegroundColor Red
     Write-Host $ErrorMessage -ForegroundColor Red
     Write-Host "诊断日志：$LauncherErrorLog" -ForegroundColor Yellow
 }

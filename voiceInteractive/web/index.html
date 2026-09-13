@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>小布视觉助手</title>
+  <title>老叶视觉助手</title>
   <style>
     :root {
       color-scheme: dark;
@@ -156,7 +156,7 @@
       <div class="brand">
         <div class="orb" aria-hidden="true"></div>
         <div>
-          <h1>小布视觉助手</h1>
+          <h1>老叶视觉助手</h1>
           <p class="subtitle">摄像头画面仅在本机处理</p>
         </div>
       </div>
@@ -190,8 +190,8 @@
         </div>
         <div class="hint">
           <strong>使用方法</strong>
-          首次说“小布小布”即可连续交流；30秒没有继续提问后，需要再次唤醒。
-          <button id="shutdownButton" class="shutdown-button" type="button">关闭小布助手</button>
+          首次说“老叶老叶”即可连续交流；可以查询天气，播报时说“停一下”可打断，空闲30秒后需再次唤醒。
+          <button id="shutdownButton" class="shutdown-button" type="button">关闭老叶助手</button>
         </div>
       </aside>
     </section>
@@ -345,7 +345,7 @@
     connectButton.addEventListener('click', () => connectCamera(cameraSelect.value));
     cameraSelect.addEventListener('change', () => connectCamera(cameraSelect.value));
     shutdownButton.addEventListener('click', async () => {
-      if (!confirm('确定要关闭小布语音助手吗？')) return;
+      if (!confirm('确定要关闭老叶语音助手吗？')) return;
       shutdownButton.disabled = true;
       assistantState.textContent = '正在安全关闭';
       try {
@@ -355,7 +355,7 @@
           stream = null;
         }
         setCameraStatus('服务已关闭', false);
-        assistantState.textContent = '小布语音助手已关闭';
+        assistantState.textContent = '老叶语音助手已关闭';
       } catch (_) {
         assistantState.textContent = '关闭请求已发送';
       }

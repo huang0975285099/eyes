@@ -130,10 +130,10 @@ try {
     }
 
     if ($WasRunning) {
-        $Message = '小布语音助手已停止，端口 8765 已释放。'
+        $Message = '老叶语音助手已停止，端口 8765 已释放。'
         Write-Host $Message -ForegroundColor Green
     } else {
-        $Message = '小布语音助手当前没有运行，端口 8765 已释放。'
+        $Message = '老叶语音助手当前没有运行，端口 8765 已释放。'
         Write-Host $Message -ForegroundColor Yellow
     }
     Save-StopResult $Message
