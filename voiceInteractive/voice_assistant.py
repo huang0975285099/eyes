@@ -15,6 +15,7 @@ from pathlib import Path
 import queue
 import re
 import socket
+import sqlite3
 import sys
 import threading
 import time
@@ -49,6 +50,13 @@ class Config:
     tts_voice: str
     tts_rate: str
     tts_volume: str
+    llm_provider: str
+    online_api_base_url: str
+    online_api_key: str
+    online_api_key_env: str
+    online_config_db: Path | None
+    online_model: str
+    online_timeout_seconds: float
     ollama_enabled: bool
     ollama_url: str
     ollama_model: str
@@ -84,6 +92,10 @@ def load_config(path: Path) -> Config:
     model_path = Path(raw.get("model_path", "models/vosk-model-small-cn-0.22"))
     if not model_path.is_absolute():
         model_path = APP_DIR / model_path
+    online_config_db_value = str(raw.get("online_config_db", "")).strip()
+    online_config_db = Path(online_config_db_value) if online_config_db_value else None
+    if online_config_db is not None and not online_config_db.is_absolute():
+        online_config_db = APP_DIR / online_config_db
     return Config(
         input_device=raw.get("input_device", "Deli-1080P-Camera-Audio"),
         output_device=raw.get("output_device", "Deli-1080P-Camera Audio"),
@@ -95,6 +107,13 @@ def load_config(path: Path) -> Config:
         tts_voice=raw.get("tts_voice", "zh-CN-YunyangNeural"),
         tts_rate=raw.get("tts_rate", "+0%"),
         tts_volume=raw.get("tts_volume", "+0%"),
+        llm_provider=str(raw.get("llm_provider", "ollama")).strip().casefold(),
+        online_api_base_url=str(raw.get("online_api_base_url", "")).rstrip("/"),
+        online_api_key=str(raw.get("online_api_key", "")).strip(),
+        online_api_key_env=str(raw.get("online_api_key_env", "QWEN_API_KEY")).strip(),
+        online_config_db=online_config_db,
+        online_model=str(raw.get("online_model", "qwen3.8-flash")).strip(),
+        online_timeout_seconds=float(raw.get("online_timeout_seconds", 120.0)),
         ollama_enabled=bool(raw.get("ollama_enabled", True)),
         ollama_url=str(raw.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/"),
         ollama_model=str(raw.get("ollama_model", "qwen3.5:4b")),
@@ -692,73 +711,14 @@ class Speaker:
 
 
 class OnlineSearchTools:
-    GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
-    FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
-
-    # The configured home city is used most often. Keeping its coordinates
-    # locally avoids a second network dependency before every weather request.
-    KNOWN_LOCATIONS = {
-        "成都": {
-            "name": "成都",
-            "admin1": "四川",
-            "latitude": 30.5728,
-            "longitude": 104.0668,
-        },
-        "成都市": {
-            "name": "成都",
-            "admin1": "四川",
-            "latitude": 30.5728,
-            "longitude": 104.0668,
-        },
-        "四川省成都市": {
-            "name": "成都",
-            "admin1": "四川",
-            "latitude": 30.5728,
-            "longitude": 104.0668,
-        },
-        "中华人民共和国四川省成都市": {
-            "name": "成都",
-            "admin1": "四川",
-            "latitude": 30.5728,
-            "longitude": 104.0668,
-        },
-    }
-
-    WEATHER_CODES = {
-        0: "晴",
-        1: "晴间多云",
-        2: "多云",
-        3: "阴",
-        45: "有雾",
-        48: "有雾凇",
-        51: "有轻微毛毛雨",
-        53: "有毛毛雨",
-        55: "有较强毛毛雨",
-        56: "有冻毛毛雨",
-        57: "有较强冻毛毛雨",
-        61: "有小雨",
-        63: "有中雨",
-        65: "有大雨",
-        66: "有冻雨",
-        67: "有较强冻雨",
-        71: "有小雪",
-        73: "有中雪",
-        75: "有大雪",
-        77: "有米雪",
-        80: "有小阵雨",
-        81: "有中等阵雨",
-        82: "有强阵雨",
-        85: "有小阵雪",
-        86: "有强阵雪",
-        95: "有雷雨",
-        96: "有雷雨和冰雹",
-        99: "有强雷雨和冰雹",
-    }
+    WEATHER_URL = "https://uapis.cn/api/v1/misc/weather"
+    WEATHER_CACHE_SECONDS = 5 * 60
+    WEATHER_STALE_SECONDS = 30 * 60
 
     def __init__(self, config: Config) -> None:
         self.config = config
         self.last_weather_location = ""
-        self._location_cache: dict[str, dict] = {}
+        self._forecast_cache: dict[str, tuple[float, dict]] = {}
 
     def start_conversation(self) -> None:
         self.last_weather_location = ""
@@ -788,50 +748,32 @@ class OnlineSearchTools:
     def _number(value) -> int:
         return int(round(float(value)))
 
-    @staticmethod
-    def _location_candidates(query: str) -> list[str]:
-        candidates = [query.strip()]
-        shortened = re.sub(r"^(中华人民共和国|中国)", "", query).strip()
-        if shortened:
-            candidates.append(shortened)
-        city_match = re.search(r"([^省自治区]+市)", shortened)
-        if city_match:
-            candidates.append(city_match.group(1).removesuffix("市"))
-        if "省" in shortened:
-            province_tail = shortened.rsplit("省", 1)[-1]
-            candidates.append(province_tail.split("市", 1)[0])
-        candidates.append(re.sub(r"(市|省|区|县)$", "", shortened))
-        return list(dict.fromkeys(candidate for candidate in candidates if candidate))
-
-    def _find_location(self, query: str) -> dict:
-        cache_key = query.casefold()
-        if cache_key in self._location_cache:
-            return self._location_cache[cache_key]
-        for candidate in self._location_candidates(query):
-            known_location = self.KNOWN_LOCATIONS.get(candidate)
-            if known_location:
-                location = dict(known_location)
-                self._location_cache[cache_key] = location
-                self._location_cache[str(location["name"]).casefold()] = location
-                return location
-            response = self._get_json(
-                self.GEOCODING_URL,
+    def _get_forecast(self, location: str) -> tuple[dict, bool]:
+        cache_key = normalize_text(location)
+        cached = self._forecast_cache.get(cache_key)
+        now = time.monotonic()
+        if cached and now - cached[0] <= self.WEATHER_CACHE_SECONDS:
+            return cached[1], False
+        try:
+            forecast = self._get_json(
+                self.WEATHER_URL,
                 {
-                    "name": candidate,
-                    "count": 1,
-                    "language": "zh",
-                    "format": "json",
+                    "city": location,
+                    "forecast": "true",
+                    "extended": "true",
+                    "lang": "zh",
                 },
             )
-            results = response.get("results", [])
-            if results:
-                location = results[0]
-                self._location_cache[cache_key] = location
-                canonical_name = str(location.get("name", "")).casefold()
-                if canonical_name:
-                    self._location_cache[canonical_name] = location
-                return location
-        raise RuntimeError(f"没有找到地点“{query}”")
+        except Exception:
+            if cached and now - cached[0] <= self.WEATHER_STALE_SECONDS:
+                return cached[1], True
+            raise
+        cache_entry = (now, forecast)
+        self._forecast_cache[cache_key] = cache_entry
+        canonical_city = normalize_text(str(forecast.get("city", "")))
+        if canonical_city:
+            self._forecast_cache[canonical_city] = cache_entry
+        return forecast, False
 
     def search_weather(self, question: str) -> str:
         if not self.config.internet_tools_enabled:
@@ -843,65 +785,65 @@ class OnlineSearchTools:
         if not location_query:
             return "请告诉我需要查询哪个城市的天气。"
 
-        location = self._find_location(location_query)
-        self.last_weather_location = str(location.get("name", location_query))
-        forecast = self._get_json(
-            self.FORECAST_URL,
-            {
-                "latitude": location["latitude"],
-                "longitude": location["longitude"],
-                "current": (
-                    "temperature_2m,apparent_temperature,weather_code,"
-                    "wind_speed_10m"
-                ),
-                "daily": (
-                    "weather_code,temperature_2m_max,temperature_2m_min,"
-                    "precipitation_probability_max"
-                ),
-                "timezone": "auto",
-                "forecast_days": 3,
-            },
-        )
-        daily = forecast.get("daily", {})
+        forecast, used_stale_cache = self._get_forecast(location_query)
+        city = str(forecast.get("city", location_query)).strip()
+        if not city or "weather" not in forecast:
+            message = str(forecast.get("message") or forecast.get("error") or "")
+            raise RuntimeError(message or f"没有找到地点“{location_query}”")
+        self.last_weather_location = city
+        future_days = forecast.get("forecast", [])
         day_names = ("今天", "明天", "后天")
         descriptions: list[str] = []
         for day_index in day_indexes:
-            try:
-                weather_code = int(daily["weather_code"][day_index])
-                high = self._number(daily["temperature_2m_max"][day_index])
-                low = self._number(daily["temperature_2m_min"][day_index])
-                rain_probability = self._number(
-                    daily["precipitation_probability_max"][day_index]
-                )
-            except (IndexError, KeyError, TypeError, ValueError) as error:
-                raise RuntimeError("天气服务返回的数据不完整") from error
-            condition = self.WEATHER_CODES.get(weather_code, "天气状况未知")
-            if day_index == 0 and len(day_indexes) == 1:
-                current = forecast.get("current", {})
+            if day_index == 0:
                 try:
-                    temperature = self._number(current["temperature_2m"])
-                    apparent = self._number(current["apparent_temperature"])
-                    wind = self._number(current["wind_speed_10m"])
-                    current_code = int(current["weather_code"])
+                    condition = str(forecast["weather"])
+                    temperature = self._number(forecast["temperature"])
+                    apparent = self._number(forecast["feels_like"])
+                    high = self._number(forecast["temp_max"])
+                    low = self._number(forecast["temp_min"])
+                    humidity = self._number(forecast["humidity"])
                 except (KeyError, TypeError, ValueError) as error:
-                    raise RuntimeError("天气服务没有返回当前天气") from error
-                condition = self.WEATHER_CODES.get(current_code, condition)
+                    raise RuntimeError("国内天气服务没有返回完整实况") from error
+                wind = (
+                    f"{forecast.get('wind_direction', '')}"
+                    f"{forecast.get('wind_power', '')}"
+                ).strip()
+                air_quality = str(forecast.get("aqi_category", "")).strip()
                 descriptions.append(
                     f"今天{condition}，当前{temperature}度，体感{apparent}度，"
-                    f"最高{high}度，最低{low}度，降雨概率{rain_probability}%，"
-                    f"风速{wind}公里每小时"
+                    f"最高{high}度，最低{low}度，湿度{humidity}%"
+                    + (f"，{wind}" if wind else "")
+                    + (f"，空气质量{air_quality}" if air_quality else "")
                 )
             else:
+                try:
+                    daily = future_days[day_index - 1]
+                    high = self._number(daily["temp_max"])
+                    low = self._number(daily["temp_min"])
+                    rain_probability = self._number(daily["pop"])
+                    day_weather = str(daily["weather_day"])
+                    night_weather = str(daily["weather_night"])
+                except (IndexError, KeyError, TypeError, ValueError) as error:
+                    raise RuntimeError("国内天气服务返回的预报不完整") from error
+                condition = (
+                    day_weather
+                    if day_weather == night_weather
+                    else f"{day_weather}转{night_weather}"
+                )
                 descriptions.append(
                     f"{day_names[day_index]}{condition}，最高{high}度，"
                     f"最低{low}度，降雨概率{rain_probability}%"
                 )
 
-        location_name = str(location.get("name", location_query))
-        admin1 = str(location.get("admin1", ""))
-        if admin1 and admin1 != location_name:
-            location_name = f"{location_name}，{admin1}"
-        return f"{location_name}：" + "；".join(descriptions) + "。"
+        province = str(forecast.get("province", "")).strip()
+        location_name = city
+        if province and province not in city:
+            location_name = f"{city}，{province}"
+        answer = f"{location_name}：" + "；".join(descriptions) + "。"
+        if used_stale_cache:
+            answer += "天气服务刚刚连接不稳，这是最近一次成功查询的数据。"
+        return answer
 
 
 class OllamaClient:
@@ -1067,6 +1009,323 @@ class OllamaClient:
         return answer
 
 
+class OnlineQwenClient:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.history: list[dict[str, str]] = []
+        self.base_url = config.online_api_base_url
+        self.api_key = config.online_api_key
+        self._connection_error = ""
+        try:
+            self.base_url, self.api_key = self._resolve_connection()
+        except Exception as error:
+            self._connection_error = str(error)
+
+    @property
+    def _history_message_limit(self) -> int:
+        return self.config.conversation_history_turns * 2
+
+    def _resolve_connection(self) -> tuple[str, str]:
+        environment_key = (
+            os.environ.get(self.config.online_api_key_env, "").strip()
+            if self.config.online_api_key_env
+            else ""
+        )
+        api_key = environment_key or self.api_key
+        base_url = self.base_url
+        if api_key and base_url:
+            return base_url, api_key
+
+        database_path = self.config.online_config_db
+        if database_path is None or not database_path.is_file():
+            raise RuntimeError("没有找到在线模型 API 配置或密钥")
+        database_uri = database_path.resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(database_uri, uri=True) as database:
+            rows = dict(
+                database.execute(
+                    "SELECT key, value FROM config "
+                    "WHERE key IN ('openai.api_base_urls', 'openai.api_keys')"
+                )
+            )
+        urls = json.loads(rows.get("openai.api_base_urls", "[]"))
+        keys = json.loads(rows.get("openai.api_keys", "[]"))
+        if not urls or not keys:
+            raise RuntimeError("qwenchat 中没有可用的在线模型连接")
+        if base_url:
+            normalized_base = base_url.rstrip("/")
+            for index, candidate in enumerate(urls):
+                if str(candidate).rstrip("/") == normalized_base and index < len(keys):
+                    return normalized_base, str(keys[index])
+            raise RuntimeError("qwenchat 中没有找到匹配的在线接口地址")
+        return str(urls[0]).rstrip("/"), str(keys[0])
+
+    def _require_connection(self) -> None:
+        if self._connection_error:
+            raise RuntimeError(self._connection_error)
+        if not self.base_url or not self.api_key:
+            raise RuntimeError("在线模型连接配置不完整")
+
+    def _request(self, path: str, payload: dict | None = None) -> dict:
+        self._require_connection()
+        data = None
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+        )
+        with urllib.request.urlopen(
+            request, timeout=self.config.online_timeout_seconds
+        ) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _stream_request(self, path: str, payload: dict):
+        self._require_connection()
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json; charset=utf-8",
+                "Accept": "text/event-stream",
+            },
+        )
+        with urllib.request.urlopen(
+            request, timeout=self.config.online_timeout_seconds
+        ) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8").strip()
+                if not line.startswith("data:"):
+                    continue
+                event_data = line[5:].strip()
+                if not event_data or event_data == "[DONE]":
+                    continue
+                yield json.loads(event_data)
+
+    def check(self) -> tuple[bool, str]:
+        try:
+            response = self._request("/models")
+            model_ids = {
+                str(model.get("id", "")) for model in response.get("data", [])
+            }
+            if self.config.online_model not in model_ids:
+                return False, f"服务端没有模型 {self.config.online_model}"
+            return True, self.config.online_model
+        except Exception as error:
+            return False, str(error)
+
+    def warm_up(self) -> None:
+        # Online models do not need a paid warm-up request.
+        return None
+
+    def start_conversation(self) -> None:
+        self.history.clear()
+
+    def end_conversation(self) -> None:
+        self.history.clear()
+
+    def remember(self, question: str, answer: str) -> None:
+        self.history.extend(
+            (
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": answer},
+            )
+        )
+        self.history = self.history[-self._history_message_limit :]
+
+    def _chat(
+        self,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        on_segment=None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        payload = {
+            "model": self.config.online_model,
+            "messages": messages,
+            "stream": True,
+            "enable_thinking": False,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        answer_parts: list[str] = []
+        speech_buffer = ""
+        for chunk in self._stream_request("/chat/completions", payload):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            choices = chunk.get("choices", [])
+            if not choices:
+                continue
+            content = str(choices[0].get("delta", {}).get("content") or "")
+            if not content:
+                continue
+            answer_parts.append(content)
+            speech_buffer += content
+            segments, speech_buffer = take_speech_segments(speech_buffer)
+            if on_segment:
+                for segment in segments:
+                    on_segment(segment)
+        if cancel_event is None or not cancel_event.is_set():
+            segments, _ = take_speech_segments(speech_buffer, flush=True)
+            if on_segment:
+                for segment in segments:
+                    on_segment(segment)
+        answer = "".join(answer_parts).strip()
+        if not answer and (cancel_event is None or not cancel_event.is_set()):
+            raise RuntimeError("在线 Qwen 没有返回回答")
+        return answer
+
+    def ask(
+        self,
+        question: str,
+        on_segment=None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        messages = [
+            {"role": "system", "content": self.config.ollama_system_prompt},
+            *self.history[-self._history_message_limit :],
+            {"role": "user", "content": question},
+        ]
+        answer = self._chat(messages, 0.4, 160, on_segment, cancel_event)
+        if cancel_event is None or not cancel_event.is_set():
+            self.remember(question, answer)
+        return answer
+
+    def ask_vision(
+        self,
+        question: str,
+        image_bytes: bytes,
+        on_segment=None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        image_base64 = base64.b64encode(image_bytes).decode("ascii")
+        messages: list[dict] = [
+            {"role": "system", "content": self.config.ollama_system_prompt},
+            *self.history[-self._history_message_limit :],
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"{question}\n请根据这张摄像头的当前画面直接回答。"
+                            "只描述确实能看到的内容，不确定的地方要明确说明。"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_base64}"
+                        },
+                    },
+                ],
+            },
+        ]
+        answer = self._chat(messages, 0.2, 180, on_segment, cancel_event)
+        if cancel_event is None or not cancel_event.is_set():
+            self.remember(question, answer)
+        return answer
+
+
+class ModelRouter:
+    PROVIDER_ALIASES = {
+        "online": "online",
+        "qwen": "online",
+        "openai": "online",
+        "ollama": "ollama",
+        "local": "ollama",
+    }
+
+    def __init__(self, config: Config, config_path: Path) -> None:
+        self.config = config
+        self.config_path = config_path
+        self.online = OnlineQwenClient(config)
+        self.local = OllamaClient(config)
+        self._lock = threading.RLock()
+        self._provider = self.PROVIDER_ALIASES.get(config.llm_provider, "ollama")
+
+    def _client(self) -> OllamaClient | OnlineQwenClient:
+        with self._lock:
+            return self.online if self._provider == "online" else self.local
+
+    def info(self) -> dict[str, str]:
+        with self._lock:
+            if self._provider == "online":
+                return {
+                    "provider": "online",
+                    "model": self.config.online_model,
+                    "label": self.config.online_model,
+                }
+            return {
+                "provider": "ollama",
+                "model": self.config.ollama_model,
+                "label": self.config.ollama_model,
+            }
+
+    def check(self) -> tuple[bool, str]:
+        return self._client().check()
+
+    def warm_up(self) -> None:
+        self._client().warm_up()
+
+    def start_conversation(self) -> None:
+        self._client().start_conversation()
+
+    def end_conversation(self) -> None:
+        self._client().end_conversation()
+
+    def remember(self, question: str, answer: str) -> None:
+        self._client().remember(question, answer)
+
+    def ask(
+        self,
+        question: str,
+        on_segment=None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        return self._client().ask(question, on_segment, cancel_event)
+
+    def ask_vision(
+        self,
+        question: str,
+        image_bytes: bytes,
+        on_segment=None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        return self._client().ask_vision(
+            question, image_bytes, on_segment, cancel_event
+        )
+
+    def switch(self, provider: str) -> dict[str, str]:
+        normalized = self.PROVIDER_ALIASES.get(provider.strip().casefold())
+        if normalized is None:
+            raise ValueError("不支持的模型类型")
+        target = self.online if normalized == "online" else self.local
+        ready, status = target.check()
+        if not ready:
+            raise RuntimeError(status)
+        with self._lock:
+            if normalized != self._provider:
+                self.online.end_conversation()
+                self.local.end_conversation()
+                self._provider = normalized
+                self._persist_provider(normalized)
+            return self.info()
+
+    def _persist_provider(self, provider: str) -> None:
+        raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+        raw["llm_provider"] = provider
+        self.config_path.write_text(
+            json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
 class CameraFrameStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -1153,10 +1412,18 @@ class DashboardHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, handler, store: CameraFrameStore, config: Config):
+    def __init__(
+        self,
+        address,
+        handler,
+        store: CameraFrameStore,
+        config: Config,
+        model_router: ModelRouter,
+    ):
         super().__init__(address, handler)
         self.store = store
         self.config = config
+        self.model_router = model_router
 
 
 class DashboardHTTPServerV6(DashboardHTTPServer):
@@ -1196,7 +1463,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if request_path == "/api/config":
             self._send_json(
-                {"camera_name_keywords": self.server.config.camera_name_keywords}
+                {
+                    "camera_name_keywords": self.server.config.camera_name_keywords,
+                    "model": self.server.model_router.info(),
+                    "model_options": [
+                        {
+                            "provider": "online",
+                            "label": self.server.config.online_model,
+                        },
+                        {
+                            "provider": "ollama",
+                            "label": self.server.config.ollama_model,
+                        },
+                    ],
+                }
             )
             return
         if request_path == "/api/status":
@@ -1226,6 +1506,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if request_path == "/api/shutdown":
             self.server.store.request_shutdown()
             self._send_json({"accepted": True}, HTTPStatus.ACCEPTED)
+            return
+        if request_path == "/api/model-provider":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0 or content_length > 1024:
+                    raise ValueError("无效的请求内容")
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                model_info = self.server.model_router.switch(
+                    str(payload.get("provider", ""))
+                )
+                self.server.store.set_assistant_status(
+                    f"已切换为{model_info['label']}"
+                )
+                self._send_json({"ok": True, "model": model_info})
+            except (ValueError, RuntimeError, json.JSONDecodeError) as error:
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.BAD_REQUEST,
+                )
             return
         if request_path not in {"/api/frame", "/api/snapshot"}:
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -1265,8 +1564,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 class CameraDashboard:
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, model_router: ModelRouter) -> None:
         self.config = config
+        self.model_router = model_router
         self.store = CameraFrameStore()
         self.server: DashboardHTTPServer | None = None
         self.servers: list[DashboardHTTPServer] = []
@@ -1288,6 +1588,7 @@ class CameraDashboard:
             DashboardHandler,
             self.store,
             self.config,
+            self.model_router,
         )
         self.servers.append(self.server)
         thread = threading.Thread(
@@ -1303,6 +1604,7 @@ class CameraDashboard:
                     DashboardHandler,
                     self.store,
                     self.config,
+                    self.model_router,
                 )
                 self.servers.append(ipv6_server)
                 ipv6_thread = threading.Thread(
@@ -1346,7 +1648,7 @@ class VoiceAssistant:
         model: Model,
         input_device: AudioDevice,
         speaker: Speaker,
-        ollama: OllamaClient,
+        ollama: OllamaClient | OnlineQwenClient | ModelRouter,
         online_tools: OnlineSearchTools,
         dashboard: CameraDashboard | None,
     ) -> None:
@@ -1869,16 +2171,16 @@ class VoiceAssistant:
                                 text, on_segment, self.playback_cancel
                             )
                         )
-                        print(f"[Ollama] {answer}")
+                        print(f"[模型回答] {answer}")
                         if self.dashboard:
                             self.dashboard.store.set_assistant_status("回答完成", answer)
                     except Exception as error:
                         interrupt_action = None
-                        print(f"[Ollama 调用失败] {error}", file=sys.stderr)
+                        print(f"[模型调用失败] {error}", file=sys.stderr)
                         try:
                             self._play(
                                 self.speaker.say,
-                                "本地模型暂时无法回答，请确认奥拉马已经启动。",
+                                "模型服务暂时无法回答，请稍后再试。",
                             )
                         except Exception:
                             self._play(self.speaker.chime, False)
@@ -1943,22 +2245,25 @@ def main() -> int:
         return 0
 
     SetLogLevel(-1)
-    ollama = OllamaClient(config)
+    ollama = ModelRouter(config, args.config.resolve())
+    model_info = ollama.info()
+    model_service_name = model_info["label"]
     online_tools = OnlineSearchTools(config)
     ollama_ready, ollama_status = ollama.check()
     if ollama_ready:
-        print(f"Ollama：已连接 / {ollama_status}")
-        try:
-            print("正在预热 Ollama 模型……")
-            ollama.warm_up()
-            print("Ollama：模型已预热 / thinking 已关闭")
-        except Exception as error:
-            print(f"Ollama：模型预热失败，将在首次提问时重试 / {error}")
+        print(f"{model_service_name}：已连接 / {ollama_status}")
+        if config.llm_provider not in {"online", "qwen", "openai"}:
+            try:
+                print("正在预热 Ollama 模型……")
+                ollama.warm_up()
+                print("Ollama：模型已预热 / thinking 已关闭")
+            except Exception as error:
+                print(f"Ollama：模型预热失败，将在首次提问时重试 / {error}")
     else:
-        print(f"Ollama：不可用 / {ollama_status}")
+        print(f"{model_service_name}：不可用 / {ollama_status}")
     print("正在加载离线中文识别模型……")
     model = Model(str(model_path))
-    dashboard = CameraDashboard(config) if config.web_enabled else None
+    dashboard = CameraDashboard(config, ollama) if config.web_enabled else None
     if dashboard:
         dashboard.start()
     try:

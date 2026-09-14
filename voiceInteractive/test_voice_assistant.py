@@ -22,8 +22,10 @@ from voice_assistant import (
     is_weather_follow_up,
     is_vision_command,
     is_vision_follow_up,
+    ModelRouter,
     normalize_text,
     OllamaClient,
+    OnlineQwenClient,
     OnlineSearchTools,
     parse_weather_query,
     resample_pcm,
@@ -283,46 +285,131 @@ class OllamaClientTests(unittest.TestCase):
         self.assertEqual(self.client.history, [])
 
 
+class OnlineQwenClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        config = SimpleNamespace(
+            online_api_base_url="https://example.test/v1",
+            online_api_key="test-key",
+            online_api_key_env="",
+            online_config_db=None,
+            online_model="qwen3.8-flash",
+            online_timeout_seconds=30.0,
+            ollama_system_prompt="直接回答",
+            conversation_history_turns=2,
+        )
+        self.client = OnlineQwenClient(config)
+
+    def test_online_chat_streams_without_thinking(self) -> None:
+        spoken: list[str] = []
+        self.client._stream_request = Mock(
+            return_value=[
+                {"choices": [{"delta": {"reasoning_content": "不应播报"}}]},
+                {"choices": [{"delta": {"content": "第一句。"}}]},
+                {"choices": [{"delta": {"content": "第二句"}}]},
+            ]
+        )
+        answer = self.client.ask("测试问题", spoken.append)
+        path, payload = self.client._stream_request.call_args.args
+        self.assertEqual(path, "/chat/completions")
+        self.assertEqual(payload["model"], "qwen3.8-flash")
+        self.assertIs(payload["enable_thinking"], False)
+        self.assertIs(payload["stream"], True)
+        self.assertEqual(answer, "第一句。第二句")
+        self.assertEqual(spoken, ["第一句。", "第二句"])
+
+    def test_online_vision_uses_data_url(self) -> None:
+        self.client._stream_request = Mock(
+            return_value=[{"choices": [{"delta": {"content": "看到了。"}}]}]
+        )
+        self.client.ask_vision("看到了什么", b"jpeg")
+        payload = self.client._stream_request.call_args.args[1]
+        user_content = payload["messages"][-1]["content"]
+        self.assertEqual(user_content[0]["type"], "text")
+        self.assertEqual(user_content[1]["type"], "image_url")
+        self.assertEqual(
+            user_content[1]["image_url"]["url"], "data:image/jpeg;base64,anBlZw=="
+        )
+
+
+class ModelRouterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.router = ModelRouter.__new__(ModelRouter)
+        self.router.config = SimpleNamespace(
+            online_model="qwen3.8-flash",
+            ollama_model="qwen3.5:4b",
+        )
+        self.router._lock = threading.RLock()
+        self.router._provider = "online"
+        self.router.online = Mock()
+        self.router.local = Mock()
+        self.router._persist_provider = Mock()
+
+    def test_switches_to_ready_local_model_and_persists_choice(self) -> None:
+        self.router.local.check.return_value = (True, "qwen3.5:4b")
+        info = self.router.switch("ollama")
+        self.assertEqual(info["provider"], "ollama")
+        self.assertEqual(info["model"], "qwen3.5:4b")
+        self.router.online.end_conversation.assert_called_once()
+        self.router.local.end_conversation.assert_called_once()
+        self.router._persist_provider.assert_called_once_with("ollama")
+
+    def test_rejects_unavailable_model_without_switching(self) -> None:
+        self.router.local.check.return_value = (False, "连接失败")
+        with self.assertRaisesRegex(RuntimeError, "连接失败"):
+            self.router.switch("ollama")
+        self.assertEqual(self.router.info()["provider"], "online")
+        self.router._persist_provider.assert_not_called()
+
+
 class OnlineSearchToolsTests(unittest.TestCase):
     def setUp(self) -> None:
         config = SimpleNamespace(
             internet_tools_enabled=True,
             internet_timeout_seconds=10.0,
             internet_retry_count=2,
-            weather_default_location="Los Angeles",
+            weather_default_location="成都",
         )
         self.tools = OnlineSearchTools(config)
-        self.location = {
-            "name": "洛杉矶",
-            "admin1": "加利福尼亚州",
-            "latitude": 34.05,
-            "longitude": -118.24,
-        }
         self.forecast = {
-            "current": {
-                "temperature_2m": 22.4,
-                "apparent_temperature": 21.6,
-                "weather_code": 1,
-                "wind_speed_10m": 8.2,
-            },
-            "daily": {
-                "weather_code": [1, 2, 61],
-                "temperature_2m_max": [26.2, 25.1, 21.3],
-                "temperature_2m_min": [16.1, 15.8, 14.2],
-                "precipitation_probability_max": [5, 15, 70],
-            },
+            "province": "四川省",
+            "city": "成都市",
+            "weather": "阴",
+            "temperature": 19,
+            "feels_like": 22,
+            "temp_max": 23,
+            "temp_min": 17,
+            "humidity": 88,
+            "wind_direction": "东北风",
+            "wind_power": "1级",
+            "aqi_category": "优",
+            "forecast": [
+                {
+                    "temp_max": 23,
+                    "temp_min": 17,
+                    "weather_day": "阵雨",
+                    "weather_night": "阵雨",
+                    "pop": 60,
+                },
+                {
+                    "temp_max": 24,
+                    "temp_min": 18,
+                    "weather_day": "多云",
+                    "weather_night": "阵雨",
+                    "pop": 30,
+                },
+            ],
         }
 
     def test_current_weather_uses_online_results(self) -> None:
-        self.tools._get_json = Mock(
-            side_effect=[{"results": [self.location]}, self.forecast]
-        )
+        self.tools._get_json = Mock(return_value=self.forecast)
         answer = self.tools.search_weather("查询天气预报")
-        self.assertIn("洛杉矶，加利福尼亚州", answer)
-        self.assertIn("当前22度", answer)
-        self.assertIn("降雨概率5%", answer)
-        geocoding_call = self.tools._get_json.call_args_list[0]
-        self.assertEqual(geocoding_call.args[1]["name"], "Los Angeles")
+        self.assertIn("成都市，四川省", answer)
+        self.assertIn("当前19度", answer)
+        self.assertIn("湿度88%", answer)
+        self.assertIn("空气质量优", answer)
+        weather_call = self.tools._get_json.call_args
+        self.assertEqual(weather_call.args[0], self.tools.WEATHER_URL)
+        self.assertEqual(weather_call.args[1]["city"], "成都")
 
     def test_disabled_weather_does_not_make_a_network_request(self) -> None:
         self.tools.config.internet_tools_enabled = False
@@ -332,49 +419,44 @@ class OnlineSearchToolsTests(unittest.TestCase):
         self.tools._get_json.assert_not_called()
 
     def test_three_day_forecast(self) -> None:
-        self.tools._get_json = Mock(
-            side_effect=[{"results": [self.location]}, self.forecast]
-        )
-        answer = self.tools.search_weather("洛杉矶未来三天天气")
-        self.assertIn("今天晴间多云", answer)
-        self.assertIn("明天多云", answer)
-        self.assertIn("后天有小雨", answer)
+        self.tools._get_json = Mock(return_value=self.forecast)
+        answer = self.tools.search_weather("成都未来三天天气")
+        self.assertIn("今天阴", answer)
+        self.assertIn("明天阵雨", answer)
+        self.assertIn("后天多云转阵雨", answer)
 
     def test_unknown_location_is_reported(self) -> None:
-        self.tools._get_json = Mock(return_value={"results": []})
-        with self.assertRaisesRegex(RuntimeError, "没有找到地点"):
+        self.tools._get_json = Mock(return_value={"message": "城市不存在"})
+        with self.assertRaisesRegex(RuntimeError, "城市不存在"):
             self.tools.search_weather("火星天气")
 
-    def test_full_chinese_address_produces_city_fallback(self) -> None:
-        candidates = self.tools._location_candidates("中华人民共和国四川省成都市")
-        self.assertEqual(candidates[0], "中华人民共和国四川省成都市")
-        self.assertIn("成都", candidates)
-
-    def test_known_home_city_skips_geocoding_request(self) -> None:
+    def test_domestic_api_requires_only_one_request(self) -> None:
         self.tools._get_json = Mock(return_value=self.forecast)
         answer = self.tools.search_weather("成都天气")
-        self.assertIn("成都，四川", answer)
+        self.assertIn("成都市，四川省", answer)
         self.assertEqual(self.tools._get_json.call_count, 1)
-        self.assertEqual(
-            self.tools._get_json.call_args.args[0], self.tools.FORECAST_URL
-        )
+        self.assertEqual(self.tools._get_json.call_args.args[0], self.tools.WEATHER_URL)
 
     def test_weather_follow_up_reuses_previous_location(self) -> None:
-        self.tools._get_json = Mock(
-            side_effect=[
-                {"results": [self.location]},
-                self.forecast,
-                self.forecast,
-            ]
-        )
-        self.tools.search_weather("洛杉矶天气")
+        self.tools._get_json = Mock(return_value=self.forecast)
+        self.tools.search_weather("成都天气")
         answer = self.tools.search_weather("明天呢")
-        self.assertIn("明天多云", answer)
-        self.assertEqual(self.tools._get_json.call_count, 3)
-        self.assertEqual(self.tools.last_weather_location, "洛杉矶")
+        self.assertIn("明天阵雨", answer)
+        self.assertEqual(self.tools._get_json.call_count, 1)
+        self.assertEqual(self.tools.last_weather_location, "成都市")
 
         self.tools.start_conversation()
         self.assertEqual(self.tools.last_weather_location, "")
+
+    def test_recent_weather_is_used_when_domestic_api_briefly_fails(self) -> None:
+        self.tools._get_json = Mock(return_value=self.forecast)
+        self.tools.search_weather("成都天气")
+        cached_at = self.tools._forecast_cache["成都"][0]
+        self.tools._get_json = Mock(side_effect=RuntimeError("temporary"))
+        with patch("voice_assistant.time.monotonic", return_value=cached_at + 301):
+            answer = self.tools.search_weather("成都明天天气")
+        self.assertIn("明天阵雨", answer)
+        self.assertIn("最近一次成功查询", answer)
 
     def test_network_request_retries_once_then_succeeds(self) -> None:
         response = MagicMock()

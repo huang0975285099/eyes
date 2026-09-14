@@ -107,6 +107,10 @@
       min-height: 78px;
       overflow-wrap: anywhere;
     }
+    .model-row { display: flex; gap: 8px; margin-top: 9px; }
+    .model-row button { white-space: nowrap; }
+    .model-message { margin: 7px 0 0; min-height: 20px; color: #8fa69f; font-size: 12px; }
+    .model-message.error { color: #e6aaa3; }
     .snapshot-panel[hidden] { display: none; }
     .snapshot-image {
       display: block;
@@ -157,7 +161,7 @@
         <div class="orb" aria-hidden="true"></div>
         <div>
           <h1>老叶视觉助手</h1>
-          <p class="subtitle">摄像头画面仅在本机处理</p>
+          <p class="subtitle">模型可随时切换</p>
         </div>
       </div>
       <div id="livePill" class="live-pill"><span class="dot"></span><span id="cameraState">正在连接</span></div>
@@ -167,7 +171,7 @@
       <div id="cameraCard" class="camera-card">
         <div class="video-wrap">
           <video id="video" autoplay muted playsinline></video>
-          <div id="empty" class="empty">请允许浏览器访问摄像头<br>画面不会离开这台电脑</div>
+          <div id="empty" class="empty">请允许浏览器访问摄像头<br>仅在视觉提问时提交同步快照</div>
         </div>
         <div class="controls">
           <select id="cameraSelect" aria-label="选择摄像头"><option>正在查找摄像头…</option></select>
@@ -184,13 +188,21 @@
           <div class="label">最近回答</div>
           <p id="lastAnswer" class="answer">唤醒后问我：“你看到了什么？”</p>
         </div>
+        <div>
+          <div class="label">当前模型</div>
+          <div class="model-row">
+            <select id="modelSelect" aria-label="选择回答模型"></select>
+            <button id="switchModelButton" type="button">切换</button>
+          </div>
+          <p id="modelMessage" class="model-message"></p>
+        </div>
         <div id="snapshotPanel" class="snapshot-panel" hidden>
           <div class="label">本次分析快照</div>
           <img id="snapshotImage" class="snapshot-image" alt="本次视觉回答所分析的摄像头快照">
         </div>
         <div class="hint">
           <strong>使用方法</strong>
-          首次说“老叶老叶”即可连续交流；可以查询天气，播报时说“停一下”可打断，空闲30秒后需再次唤醒。
+          首次说“老叶老叶”即可连续交流；支持天气查询，播报时说“停一下”可打断，空闲30秒后需再次唤醒。
           <button id="shutdownButton" class="shutdown-button" type="button">关闭老叶助手</button>
         </div>
       </aside>
@@ -206,6 +218,9 @@
     const cameraState = document.querySelector('#cameraState');
     const assistantState = document.querySelector('#assistantState');
     const lastAnswer = document.querySelector('#lastAnswer');
+    const modelSelect = document.querySelector('#modelSelect');
+    const switchModelButton = document.querySelector('#switchModelButton');
+    const modelMessage = document.querySelector('#modelMessage');
     const snapshotPanel = document.querySelector('#snapshotPanel');
     const snapshotImage = document.querySelector('#snapshotImage');
     const shutdownButton = document.querySelector('#shutdownButton');
@@ -344,6 +359,29 @@
 
     connectButton.addEventListener('click', () => connectCamera(cameraSelect.value));
     cameraSelect.addEventListener('change', () => connectCamera(cameraSelect.value));
+    switchModelButton.addEventListener('click', async () => {
+      switchModelButton.disabled = true;
+      modelSelect.disabled = true;
+      modelMessage.classList.remove('error');
+      modelMessage.textContent = '正在检查并切换模型…';
+      try {
+        const response = await fetch('/api/model-provider', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: modelSelect.value }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || '切换失败');
+        modelSelect.value = result.model.provider;
+        modelMessage.textContent = `已切换：${result.model.label}`;
+      } catch (error) {
+        modelMessage.classList.add('error');
+        modelMessage.textContent = error.message || '切换失败';
+      } finally {
+        switchModelButton.disabled = false;
+        modelSelect.disabled = false;
+      }
+    });
     shutdownButton.addEventListener('click', async () => {
       if (!confirm('确定要关闭老叶语音助手吗？')) return;
       shutdownButton.disabled = true;
@@ -366,6 +404,17 @@
         const response = await fetch('/api/config');
         const config = await response.json();
         preferredKeywords = config.camera_name_keywords || preferredKeywords;
+        modelSelect.replaceChildren();
+        (config.model_options || []).forEach((item) => {
+          const option = document.createElement('option');
+          option.value = item.provider;
+          option.textContent = item.label;
+          modelSelect.append(option);
+        });
+        if (config.model) {
+          modelSelect.value = config.model.provider;
+          modelMessage.textContent = `正在使用：${config.model.label}`;
+        }
       } catch (_) {}
       if (!navigator.mediaDevices?.getUserMedia) {
         setCameraStatus('浏览器不支持摄像头', false);

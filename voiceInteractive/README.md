@@ -5,23 +5,23 @@
 1. 从 `麦克风 (Deli-1080P-Camera-Audio)` 持续监听。
 2. 听到“老叶老叶”后回答“我在”。
 3. 听到“现在几点了”后读取电脑当前时间。
-4. 其他问题交给本机 Ollama 模型回答。
+4. 其他问题默认交给在线 `qwen3.8-flash` 回答，也可切换回本机 Ollama。
 5. 从 `Speakers (Deli-1080P-Camera Audio)` 播报中文答案。
 
 启动时还会自动打开 `http://localhost:8765/` 摄像头页面。浏览器取得授权后，会显示
-当前画面。问“你看到了什么”时，程序会通知网页立即拍摄一张同步快照，只把该快照交给
-本机 Ollama 视觉模型分析，并在网页显示同一张“本次分析快照”供人对照。画面不会发送到
-外部服务器。
+当前画面。问“你看到了什么”时，程序会通知网页立即拍摄一张同步快照，把该快照交给
+当前选定的模型分析，并在网页显示同一张“本次分析快照”供人对照。在线模式会把快照发送
+到在线模型服务；切换为 Ollama 模式后才会完全在本机分析。
 
 语音识别使用 Vosk 小型中文模型，模型下载完成后可离线识别。中文语音合成使用
 Microsoft Edge 在线语音服务，因此回答首次生成时需要联网。
 
-普通问答和视觉描述都使用流式输出。模型生成出完整句子后会立即进入语音播放队列，
-后续文字会继续在后台生成，不必等整段回答完成后才开始播报。
+普通问答和视觉描述都使用流式输出。模型生成出完整句子后会立即进入语音播放队列；播放
+当前句子时，下一句会在后台预合成，以减少句子之间的停顿。
 
 老叶播报回答时，可以说“老叶老叶”“停一下”“别说了”“停止回答”或“停止播报”立即
-停止当前音频和剩余待播句子。打断后仍处于当前连续对话中，可以直接提出新问题；当前答案
-会在后台生成完成并保留在上下文中。
+停止当前音频、剩余待播句子和本次模型生成。打断后仍处于当前连续对话中，可以直接提出
+新问题；被打断的不完整答案不会写入上下文。
 
 ## 首次安装
 
@@ -43,10 +43,8 @@ cd D:\project\eyes\voiceInteractive
 也可以直接双击 `启动小布.cmd`。这是从资源管理器启动时的推荐入口，窗口会保留启动结果，
 不会一闪而过。`logs/last-start.log` 会记录最近一次启动是否成功。
 
-`run.ps1` 会自动检查运行环境：如果 Python 虚拟环境不存在，会先执行首次安装；如果本机
-Ollama 服务没有运行，会在后台执行 `ollama serve` 并等待接口就绪。脚本还会检查
-`config.json` 配置的模型是否已经安装。模型缺失时不会自动下载数 GB 数据，而会显示对应的
-`ollama pull 模型名` 命令。
+`run.ps1` 会自动检查运行环境。在线模式直接连接配置的 Qwen 服务，不启动 Ollama；切换到
+本地模式后，脚本才会启动 Ollama 并检查本地模型是否已经安装。
 
 看到“已启动”后依次说：
 
@@ -81,11 +79,12 @@ Ollama 服务没有运行，会在后台执行 `ollama serve` 并等待接口就
 
 > 洛杉矶未来三天天气
 
-没有说城市时使用 `weather_default_location` 配置的默认城市。天气工具先查询城市经纬度，
-再取得实时天气和未来三天预报；不需要 API 密钥。数据来源：
-[Open-Meteo](https://open-meteo.com/)。可以用 `internet_tools_enabled` 关闭联网工具，
+没有说城市时使用 `weather_default_location` 配置的默认城市。天气工具通过国内 UAPI 接口
+取得实时天气、空气质量和未来天气预报；不需要额外 API 密钥。数据来源：
+[UAPI 天气接口](https://uapis.cn/docs/api-reference/get-misc-weather)。可以用 `internet_tools_enabled` 关闭联网工具，
 用 `internet_timeout_seconds` 调整单次请求超时，用 `internet_retry_count` 调整网络失败后的
-重试次数。成功解析的城市坐标会在进程内缓存，后续查询和“明天呢”之类的追问不再重复定位。
+重试次数。成功结果会缓存五分钟；接口短暂异常时，可在半小时内回退到最近一次成功数据。
+“明天呢”之类的追问会沿用上一条天气问题中的城市。
 
 首次打开页面时，需要点击浏览器的“允许”按钮授予摄像头权限。如果自动选择的摄像头不对，
 可以在画面下方的设备列表中手动选择。
@@ -106,18 +105,30 @@ Ollama 服务没有运行，会在后台执行 `ollama serve` 并等待接口就
 .\run.ps1 --test-speaker
 ```
 
-设备名、唤醒词、连续对话等待时间、上下文轮数、TTS 声音和 Ollama 设置均可在
+设备名、唤醒词、连续对话等待时间、上下文轮数、TTS 声音和模型设置均可在
 `config.json` 中修改。`command_timeout_seconds` 控制会话空闲超时，
-`conversation_history_turns` 控制当前会话最多保留多少轮问答。程序启动时会预热 Ollama 模型，
-并通过 `ollama_keep_alive` 控制模型驻留时间，以减少首次及间隔提问的等待时间。
+`conversation_history_turns` 控制当前会话最多保留多少轮问答。
 默认语音为 `zh-CN-YunyangNeural`，使用偏沉稳的成年男声并略微降低语速。
 程序优先选择同名端点的 Windows WASAPI 设备；也可以把设备名改成 `--list-devices`
 显示的数字编号。
 
-当前 Ollama 默认配置为：
+当前默认使用在线模型。API 密钥优先读取 `QWEN_API_KEY` 环境变量；未设置时，从
+`online_config_db` 指向的 qwenchat 数据库读取现有连接：
 
 ```json
 {
+  "llm_provider": "online",
+  "online_model": "qwen3.8-flash",
+  "online_api_key_env": "QWEN_API_KEY",
+  "online_config_db": "D:/project/qwenchat/data/webui.db"
+}
+```
+
+需要切回本机模型时，只修改 `llm_provider`：
+
+```json
+{
+  "llm_provider": "ollama",
   "ollama_enabled": true,
   "ollama_url": "http://127.0.0.1:11434",
   "ollama_model": "qwen3.5:4b"
@@ -156,8 +167,8 @@ Ollama 服务没有运行，会在后台执行 `ollama serve` 并等待接口就
 
 启动和关闭只由以下三层负责，后续增加联网搜索、长期记忆等功能时不再改动这一层：
 
-1. `run.ps1`：准备 Ollama 和环境，并启动唯一后台任务。
-2. `voice_assistant.py`：持有麦克风、摄像头帧、Ollama 会话和关闭事件。
+1. `run.ps1`：准备所选模型和环境，并启动唯一后台任务。
+2. `voice_assistant.py`：持有麦克风、摄像头帧、模型会话和关闭事件。
 3. `stop.ps1` / 网页关闭按钮：通过 `/api/shutdown` 通知后台安全退出。
 
 联网搜索和记忆将作为 Python 后台内部的独立能力接入，不再另外启动一组需要单独关闭的进程。

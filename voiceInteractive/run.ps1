@@ -149,7 +149,12 @@ try {
         return
     }
 
-    & (Join-Path $ProjectDir 'ensure-ollama.ps1')
+    $RuntimeConfig = Get-Content -LiteralPath (Join-Path $ProjectDir 'config.json') -Raw | ConvertFrom-Json
+    if ($RuntimeConfig.llm_provider -in @('online', 'qwen', 'openai')) {
+        Write-Host "在线模型：$($RuntimeConfig.online_model)" -ForegroundColor Green
+    } else {
+        & (Join-Path $ProjectDir 'ensure-ollama.ps1')
+    }
 
     Write-Host '老叶语音助手：正在后台启动……' -ForegroundColor Yellow
     $PwshCommand = Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue
