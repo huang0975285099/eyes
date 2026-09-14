@@ -1,5 +1,7 @@
 from datetime import datetime
+from pathlib import Path
 import queue
+from tempfile import TemporaryDirectory
 import threading
 import time
 from types import SimpleNamespace
@@ -12,12 +14,16 @@ from voice_assistant import (
     chinese_number,
     CameraFrameStore,
     contains_wake_phrase,
+    DesktopTools,
     format_time_zh,
     is_end_conversation_command,
+    is_desktop_command,
+    is_desktop_follow_up,
     is_exit_command,
     interruption_action,
     is_stop_speaking_command,
     is_time_command,
+    is_rain_question,
     is_weather_command,
     is_weather_follow_up,
     is_vision_command,
@@ -30,6 +36,7 @@ from voice_assistant import (
     parse_weather_query,
     resample_pcm,
     take_speech_segments,
+    strip_code_fence,
     VoiceAssistant,
 )
 
@@ -48,9 +55,20 @@ class TextTests(unittest.TestCase):
         self.assertTrue(is_time_command("几点？"))
         self.assertFalse(is_time_command("今天天气怎么样"))
 
+    def test_desktop_command_detection(self) -> None:
+        self.assertTrue(is_desktop_command("打开计算器"))
+        self.assertTrue(is_desktop_command("打开记事本，然后写几行代码"))
+        self.assertFalse(is_desktop_command("解释一下计算器的原理"))
+        self.assertTrue(is_desktop_follow_up("保存到桌面"))
+        self.assertTrue(is_desktop_follow_up("打开运行"))
+        self.assertEqual(strip_code_fence("```python\nprint('ok')\n```"), "print('ok')")
+
     def test_weather_command_and_query(self) -> None:
         self.assertTrue(is_weather_command("帮我查询天气预报"))
         self.assertTrue(is_weather_command("明天会不会下雨"))
+        self.assertTrue(is_weather_command("今天要带伞吗"))
+        self.assertTrue(is_rain_question("今天会不会下雨"))
+        self.assertFalse(is_rain_question("今天多少度"))
         self.assertFalse(is_weather_command("给我讲一个笑话"))
         self.assertTrue(is_weather_follow_up("明天呢"))
         self.assertFalse(is_weather_follow_up("明天开会"))
@@ -65,6 +83,14 @@ class TextTests(unittest.TestCase):
         self.assertEqual(
             parse_weather_query("给我查一下天气预报", "Los Angeles"),
             ("Los Angeles", [0]),
+        )
+        self.assertEqual(
+            parse_weather_query("查 询 成 都 天 气", "北京"),
+            ("成都", [0]),
+        )
+        self.assertEqual(
+            parse_weather_query("查 询 天 气 预 报", "成都"),
+            ("成都", [0]),
         )
 
     def test_vision_command(self) -> None:
@@ -317,6 +343,18 @@ class OnlineQwenClientTests(unittest.TestCase):
         self.assertEqual(answer, "第一句。第二句")
         self.assertEqual(spoken, ["第一句。", "第二句"])
 
+    def test_online_qwen_request_uses_direct_opener(self) -> None:
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"data": []}'
+        self.client._opener = Mock()
+        self.client._opener.open.return_value = response
+        with patch("voice_assistant.urllib.request.urlopen") as urlopen:
+            result = self.client._request("/models")
+        self.assertEqual(result, {"data": []})
+        self.client._opener.open.assert_called_once()
+        urlopen.assert_not_called()
+
     def test_online_vision_uses_data_url(self) -> None:
         self.client._stream_request = Mock(
             return_value=[{"choices": [{"delta": {"content": "看到了。"}}]}]
@@ -361,6 +399,87 @@ class ModelRouterTests(unittest.TestCase):
         self.router._persist_provider.assert_not_called()
 
 
+class DesktopToolsTests(unittest.TestCase):
+    def test_opens_allowlisted_calculator(self) -> None:
+        tools = DesktopTools()
+        with patch("voice_assistant.subprocess.Popen") as popen:
+            answer = tools.execute("请打开计算器")
+        popen.assert_called_once_with(["calc.exe"])
+        self.assertEqual(answer, "计算器已打开。")
+
+    def test_generates_code_and_opens_it_in_notepad(self) -> None:
+        model = Mock()
+        model.generate_code.return_value = "```python\nprint('hello')\n```"
+        with TemporaryDirectory() as directory:
+            tools = DesktopTools(model, Path(directory))
+            with patch("voice_assistant.subprocess.Popen") as popen:
+                answer = tools.execute("打开记事本，然后写几行代码")
+            opened_path = Path(popen.call_args.args[0][1])
+            self.assertEqual(opened_path.suffix, ".txt")
+            self.assertEqual(tools.current_code_suffix, ".py")
+            self.assertEqual(opened_path.read_text(encoding="utf-8"), "print('hello')")
+        model.generate_code.assert_called_once_with(
+            "使用Python写一个简短的问候程序，并打印当前时间"
+        )
+        self.assertIn("代码已经写好了", answer)
+
+    def test_writes_dictated_text_without_calling_model(self) -> None:
+        model = Mock()
+        with TemporaryDirectory() as directory:
+            tools = DesktopTools(model, Path(directory))
+            with patch("voice_assistant.subprocess.Popen") as popen:
+                answer = tools.execute("打开记事本，写入今天下午三点开会")
+            opened_path = Path(popen.call_args.args[0][1])
+            self.assertEqual(
+                opened_path.read_text(encoding="utf-8"), "今天下午三点开会"
+            )
+        model.generate_code.assert_not_called()
+        self.assertIn("内容已经写好了", answer)
+
+    def test_sequential_notepad_save_and_run_workflow(self) -> None:
+        model = Mock()
+        model.generate_code.return_value = "print(sum(range(1, 101)))"
+        with TemporaryDirectory() as notes_directory, TemporaryDirectory() as desktop:
+            tools = DesktopTools(model, Path(notes_directory), Path(desktop))
+            with patch("voice_assistant.subprocess.Popen") as popen:
+                self.assertEqual(tools.execute("打开记事本"), "记事本已打开。")
+                draft_path = tools.current_document
+                self.assertIsNotNone(draft_path)
+
+                answer = tools.execute("在记事本写代码")
+                self.assertIn("代码已经写好了", answer)
+                self.assertEqual(
+                    draft_path.read_text(encoding="utf-8"),
+                    "print(sum(range(1, 101)))",
+                )
+
+                answer = tools.execute("保存到桌面")
+                saved_path = tools.current_document
+                self.assertIn("已保存到桌面", answer)
+                self.assertEqual(saved_path.parent, Path(desktop))
+                self.assertEqual(saved_path.suffix, ".py")
+
+                answer = tools.execute("打开运行")
+                self.assertEqual(answer, "代码已在新窗口运行。")
+                run_command = popen.call_args.args[0]
+                self.assertEqual(run_command[:2], ["cmd.exe", "/k"])
+                self.assertIn(str(saved_path), run_command[2])
+        model.generate_code.assert_called_once_with(
+            "使用Python写一个简短的问候程序，并打印当前时间"
+        )
+
+    def test_blocks_generated_python_with_system_access(self) -> None:
+        with TemporaryDirectory() as directory:
+            tools = DesktopTools(notes_dir=Path(directory))
+            tools.current_document = Path(directory) / "unsafe.txt"
+            tools.current_document.write_text(
+                "import os\nos.system('whoami')", encoding="utf-8"
+            )
+            tools.current_code_suffix = ".py"
+            with self.assertRaisesRegex(RuntimeError, "已阻止运行"):
+                tools.execute("运行代码")
+
+
 class OnlineSearchToolsTests(unittest.TestCase):
     def setUp(self) -> None:
         config = SimpleNamespace(
@@ -382,8 +501,35 @@ class OnlineSearchToolsTests(unittest.TestCase):
             "wind_direction": "东北风",
             "wind_power": "1级",
             "aqi_category": "优",
+            "hourly_forecast": [
+                {
+                    "time": "2026-09-14 14:00:00",
+                    "weather": "阴",
+                    "precip": 0,
+                    "pop": 0,
+                },
+                {
+                    "time": "2026-09-14 15:00:00",
+                    "weather": "阵雨",
+                    "precip": 1,
+                    "pop": 80,
+                },
+                {
+                    "time": "2026-09-14 18:00:00",
+                    "weather": "阵雨",
+                    "precip": 0.5,
+                    "pop": 90,
+                },
+                {
+                    "time": "2026-09-15 00:00:00",
+                    "weather": "多云",
+                    "precip": 0,
+                    "pop": 0,
+                },
+            ],
             "forecast": [
                 {
+                    "date": "2026-09-14",
                     "temp_max": 23,
                     "temp_min": 17,
                     "weather_day": "阵雨",
@@ -391,11 +537,20 @@ class OnlineSearchToolsTests(unittest.TestCase):
                     "pop": 60,
                 },
                 {
+                    "date": "2026-09-15",
                     "temp_max": 24,
                     "temp_min": 18,
                     "weather_day": "多云",
                     "weather_night": "阵雨",
                     "pop": 30,
+                },
+                {
+                    "date": "2026-09-16",
+                    "temp_max": 25,
+                    "temp_min": 18,
+                    "weather_day": "晴",
+                    "weather_night": "晴",
+                    "pop": 0,
                 },
             ],
         }
@@ -410,6 +565,33 @@ class OnlineSearchToolsTests(unittest.TestCase):
         weather_call = self.tools._get_json.call_args
         self.assertEqual(weather_call.args[0], self.tools.WEATHER_URL)
         self.assertEqual(weather_call.args[1]["city"], "成都")
+        self.assertEqual(weather_call.args[1]["hourly"], "true")
+
+    def test_rain_question_answers_probability_and_time_window(self) -> None:
+        self.tools._get_json = Mock(return_value=self.forecast)
+        answer = self.tools.search_weather("今天会不会下雨")
+        self.assertIn("今天会下雨", answer)
+        self.assertIn("15点到18点", answer)
+        self.assertIn("最高降雨概率90%", answer)
+        self.assertIn("建议带伞", answer)
+        self.assertNotIn("当前19度", answer)
+
+    def test_no_rain_question_gives_direct_answer(self) -> None:
+        dry_forecast = dict(self.forecast)
+        dry_forecast["forecast"] = [
+            {
+                "date": "2026-09-14",
+                "weather_day": "晴",
+                "weather_night": "多云",
+                "precip": 0,
+                "pop": 10,
+            }
+        ]
+        dry_forecast["hourly_forecast"] = []
+        self.tools._get_json = Mock(return_value=dry_forecast)
+        answer = self.tools.search_weather("今天下雨吗")
+        self.assertIn("今天大概率不会下雨", answer)
+        self.assertIn("最高降雨概率10%", answer)
 
     def test_disabled_weather_does_not_make_a_network_request(self) -> None:
         self.tools.config.internet_tools_enabled = False
@@ -422,8 +604,8 @@ class OnlineSearchToolsTests(unittest.TestCase):
         self.tools._get_json = Mock(return_value=self.forecast)
         answer = self.tools.search_weather("成都未来三天天气")
         self.assertIn("今天阴", answer)
-        self.assertIn("明天阵雨", answer)
-        self.assertIn("后天多云转阵雨", answer)
+        self.assertIn("明天多云转阵雨", answer)
+        self.assertIn("后天晴", answer)
 
     def test_unknown_location_is_reported(self) -> None:
         self.tools._get_json = Mock(return_value={"message": "城市不存在"})
@@ -441,7 +623,7 @@ class OnlineSearchToolsTests(unittest.TestCase):
         self.tools._get_json = Mock(return_value=self.forecast)
         self.tools.search_weather("成都天气")
         answer = self.tools.search_weather("明天呢")
-        self.assertIn("明天阵雨", answer)
+        self.assertIn("明天多云转阵雨", answer)
         self.assertEqual(self.tools._get_json.call_count, 1)
         self.assertEqual(self.tools.last_weather_location, "成都市")
 
@@ -455,7 +637,7 @@ class OnlineSearchToolsTests(unittest.TestCase):
         self.tools._get_json = Mock(side_effect=RuntimeError("temporary"))
         with patch("voice_assistant.time.monotonic", return_value=cached_at + 301):
             answer = self.tools.search_weather("成都明天天气")
-        self.assertIn("明天阵雨", answer)
+        self.assertIn("明天多云转阵雨", answer)
         self.assertIn("最近一次成功查询", answer)
 
     def test_network_request_retries_once_then_succeeds(self) -> None:
@@ -473,6 +655,21 @@ class OnlineSearchToolsTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once()
+
+    def test_domestic_weather_request_bypasses_proxy(self) -> None:
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"city": "Chengdu"}'
+        opener = Mock()
+        opener.open.return_value = response
+        with (
+            patch("voice_assistant.urllib.request.build_opener", return_value=opener),
+            patch("voice_assistant.urllib.request.urlopen") as urlopen,
+        ):
+            result = self.tools._get_json(self.tools.WEATHER_URL, {"city": "成都"})
+        self.assertEqual(result, {"city": "Chengdu"})
+        opener.open.assert_called_once()
+        urlopen.assert_not_called()
 
 
 class StreamingSpeechTests(unittest.TestCase):

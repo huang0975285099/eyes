@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import base64
 import ctypes
@@ -14,9 +15,12 @@ import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from urllib.parse import urlencode
@@ -307,11 +311,50 @@ def is_weather_command(text: str) -> bool:
             "多少度",
             "冷不冷",
             "热不热",
+            "下雨",
+            "降雨",
+            "带伞",
             "会下雨",
             "会不会下雨",
             "天气预报",
         )
     )
+
+
+def is_rain_question(text: str) -> bool:
+    normalized = normalize_text(text)
+    return any(phrase in normalized for phrase in ("下雨", "降雨", "有雨", "带伞"))
+
+
+def is_desktop_command(text: str) -> bool:
+    normalized = normalize_text(text)
+    application = any(name in normalized for name in ("计算器", "记事本"))
+    action = any(
+        verb in normalized for verb in ("打开", "启动", "运行", "写入", "输入", "写")
+    )
+    return application and action
+
+
+def is_desktop_follow_up(text: str) -> bool:
+    normalized = normalize_text(text)
+    return (
+        "保存到桌面" in normalized
+        or "存到桌面" in normalized
+        or "另存到桌面" in normalized
+        or "运行代码" in normalized
+        or "运行程序" in normalized
+        or normalized in {"运行", "打开运行", "执行", "执行代码"}
+        or (
+            "代码" in normalized
+            and any(verb in normalized for verb in ("写", "生成", "输入"))
+        )
+    )
+
+
+def strip_code_fence(text: str) -> str:
+    cleaned = text.strip()
+    match = re.fullmatch(r"```[^\n]*\n([\s\S]*?)\n?```", cleaned)
+    return match.group(1).strip() if match else cleaned
 
 
 def is_weather_follow_up(text: str) -> bool:
@@ -325,6 +368,9 @@ def is_weather_follow_up(text: str) -> bool:
         "三天",
         "会下雨",
         "会不会下雨",
+        "下雨吗",
+        "有雨吗",
+        "要带伞吗",
         "多少度",
         "冷不冷",
         "热不热",
@@ -342,7 +388,9 @@ def parse_weather_query(text: str, default_location: str) -> tuple[str, list[int
     else:
         day_indexes = [0]
 
-    location = text
+    # Vosk commonly inserts spaces between Chinese words or even characters.
+    # Use normalized text for extraction so "查 询 成 都 天 气" becomes "成都".
+    location = normalized
     removable = (
         "帮我",
         "给我",
@@ -378,6 +426,12 @@ def parse_weather_query(text: str, default_location: str) -> tuple[str, list[int
         "会不会下雨",
         "会下雨吗",
         "下雨吗",
+        "降雨",
+        "有雨吗",
+        "有雨",
+        "要不要带伞",
+        "要带伞吗",
+        "带伞",
         "怎么样",
         "如何",
         "情况",
@@ -734,15 +788,26 @@ class OnlineSearchTools:
         last_error: Exception | None = None
         for attempt in range(self.config.internet_retry_count + 1):
             try:
-                with urllib.request.urlopen(
-                    request, timeout=self.config.internet_timeout_seconds
-                ) as response:
+                if url == self.WEATHER_URL:
+                    # This API is hosted in China and is reachable directly.
+                    # Bypassing a desktop proxy avoids scheduled-task differences.
+                    opener = urllib.request.build_opener(
+                        urllib.request.ProxyHandler({})
+                    )
+                    response_context = opener.open(
+                        request, timeout=self.config.internet_timeout_seconds
+                    )
+                else:
+                    response_context = urllib.request.urlopen(
+                        request, timeout=self.config.internet_timeout_seconds
+                    )
+                with response_context as response:
                     return json.loads(response.read().decode("utf-8"))
             except Exception as error:
                 last_error = error
                 if attempt < self.config.internet_retry_count:
                     time.sleep(0.4 * (attempt + 1))
-        raise RuntimeError(f"联网请求失败：{last_error}") from last_error
+        raise RuntimeError(f"请求失败：{last_error}") from last_error
 
     @staticmethod
     def _number(value) -> int:
@@ -761,6 +826,7 @@ class OnlineSearchTools:
                     "city": location,
                     "forecast": "true",
                     "extended": "true",
+                    "hourly": "true",
                     "lang": "zh",
                 },
             )
@@ -777,7 +843,7 @@ class OnlineSearchTools:
 
     def search_weather(self, question: str) -> str:
         if not self.config.internet_tools_enabled:
-            raise RuntimeError("联网工具已在配置中关闭")
+            raise RuntimeError("工具已在配置中关闭")
         location_query, day_indexes = parse_weather_query(
             question,
             self.last_weather_location or self.config.weather_default_location,
@@ -794,7 +860,16 @@ class OnlineSearchTools:
         future_days = forecast.get("forecast", [])
         day_names = ("今天", "明天", "后天")
         descriptions: list[str] = []
+        rain_question = is_rain_question(question)
         for day_index in day_indexes:
+            daily = None
+            if day_index < len(future_days):
+                daily = future_days[day_index]
+            if rain_question:
+                descriptions.append(
+                    self._describe_rain(forecast, daily, day_index, day_names[day_index])
+                )
+                continue
             if day_index == 0:
                 try:
                     condition = str(forecast["weather"])
@@ -818,7 +893,8 @@ class OnlineSearchTools:
                 )
             else:
                 try:
-                    daily = future_days[day_index - 1]
+                    if daily is None:
+                        raise IndexError
                     high = self._number(daily["temp_max"])
                     low = self._number(daily["temp_min"])
                     rain_probability = self._number(daily["pop"])
@@ -844,6 +920,292 @@ class OnlineSearchTools:
         if used_stale_cache:
             answer += "天气服务刚刚连接不稳，这是最近一次成功查询的数据。"
         return answer
+
+    @staticmethod
+    def _contains_rain(value) -> bool:
+        return "雨" in str(value)
+
+    def _describe_rain(
+        self, forecast: dict, daily: dict | None, day_index: int, day_name: str
+    ) -> str:
+        daily = daily or {}
+        probabilities: list[int] = []
+        try:
+            probabilities.append(self._number(daily.get("pop", 0)))
+        except (TypeError, ValueError):
+            pass
+
+        conditions = [
+            str(daily.get("weather_day", "")),
+            str(daily.get("weather_night", "")),
+        ]
+        try:
+            precipitation = float(daily.get("precip", 0) or 0)
+        except (TypeError, ValueError):
+            precipitation = 0.0
+
+        rain_hours: list[tuple[int, str]] = []
+        if day_index == 0:
+            target_date = str(daily.get("date", ""))
+            for hour in forecast.get("hourly_forecast", []) or []:
+                time_text = str(hour.get("time", ""))
+                if target_date and not time_text.startswith(target_date):
+                    continue
+                try:
+                    probability = self._number(hour.get("pop", 0) or 0)
+                except (TypeError, ValueError):
+                    probability = 0
+                probabilities.append(probability)
+                try:
+                    hourly_precipitation = float(hour.get("precip", 0) or 0)
+                except (TypeError, ValueError):
+                    hourly_precipitation = 0.0
+                condition = str(hour.get("weather", ""))
+                if (
+                    probability >= 30
+                    or hourly_precipitation > 0
+                    or self._contains_rain(condition)
+                ):
+                    match = re.search(r"\s(\d{1,2}):", time_text)
+                    if match:
+                        rain_hours.append((int(match.group(1)), condition))
+
+        max_probability = max(probabilities, default=0)
+        has_rain = (
+            bool(rain_hours)
+            or precipitation > 0
+            or any(self._contains_rain(condition) for condition in conditions)
+            or max_probability >= 30
+        )
+        if not has_rain:
+            probability_text = (
+                f"，最高降雨概率{max_probability}%" if probabilities else ""
+            )
+            return f"{day_name}大概率不会下雨{probability_text}，通常不用带伞"
+
+        time_text = ""
+        if rain_hours:
+            first_hour = rain_hours[0][0]
+            last_hour = rain_hours[-1][0]
+            period = (
+                f"{first_hour}点前后"
+                if first_hour == last_hour
+                else f"{first_hour}点到{last_hour}点"
+            )
+            hourly_conditions = [item[1] for item in rain_hours if item[1]]
+            rain_type = next(
+                (item for item in hourly_conditions if self._contains_rain(item)), "降雨"
+            )
+            time_text = f"，预计{period}有{rain_type}"
+        elif conditions[0] and conditions[1]:
+            if conditions[0] == conditions[1]:
+                time_text = f"，预计有{conditions[0]}"
+            else:
+                time_text = f"，白天{conditions[0]}、夜间{conditions[1]}"
+
+        probability_text = (
+            f"，最高降雨概率{max_probability}%" if probabilities else ""
+        )
+        return f"{day_name}会下雨{time_text}{probability_text}，建议带伞"
+
+
+class DesktopTools:
+    """Small, explicit allowlist of local desktop actions."""
+
+    BLOCKED_PYTHON_MODULES = {
+        "ctypes",
+        "os",
+        "pathlib",
+        "shutil",
+        "socket",
+        "subprocess",
+        "winreg",
+    }
+    BLOCKED_PYTHON_CALLS = {"compile", "eval", "exec", "open", "__import__"}
+
+    def __init__(
+        self,
+        model_router=None,
+        notes_dir: Path | None = None,
+        desktop_dir: Path | None = None,
+    ) -> None:
+        self.model_router = model_router
+        self.notes_dir = notes_dir or Path(tempfile.gettempdir()) / "LaoyeVoiceAssistant"
+        self.desktop_dir = desktop_dir
+        self.current_document: Path | None = None
+        self.current_code_suffix = ""
+
+    @property
+    def context_active(self) -> bool:
+        return self.current_document is not None
+
+    def start_conversation(self) -> None:
+        self.current_document = None
+        self.current_code_suffix = ""
+
+    @staticmethod
+    def _wants_code(text: str) -> bool:
+        normalized = normalize_text(text)
+        return "代码" in normalized and any(
+            verb in normalized for verb in ("写", "生成", "输入")
+        )
+
+    @staticmethod
+    def _literal_text(text: str) -> str:
+        for pattern in (r"写\s*入", r"输\s*入", r"写\s*上", r"记\s*下"):
+            match = re.search(pattern, text)
+            if match:
+                return text[match.end() :].strip(" ，。！？,.!?、：:；;")
+        normalized = normalize_text(text)
+        if "写" in normalized and "代码" not in normalized:
+            return normalized.split("写", 1)[1].strip()
+        return ""
+
+    @staticmethod
+    def _code_suffix(text: str) -> str:
+        normalized = normalize_text(text).casefold()
+        if "sql" in normalized or "数据库" in normalized:
+            return ".sql"
+        if "javascript" in normalized or "js代码" in normalized:
+            return ".js"
+        if "java代码" in normalized:
+            return ".java"
+        return ".py"
+
+    @staticmethod
+    def _code_request(text: str) -> str:
+        request = re.sub(
+            r"请?\s*(?:打开|启动|运行)?\s*(?:在\s*)?记\s*事\s*本(?:里|中)?"
+            r"[\s，,、。；;]*(?:然后)?",
+            "",
+            text,
+            count=1,
+        ).strip(" ，。！？,.!?、：:；;")
+        generic_requests = {
+            "写代码",
+            "写几行代码",
+            "写一段代码",
+            "生成代码",
+            "输入代码",
+        }
+        if normalize_text(request) in generic_requests or not request:
+            return "使用Python写一个简短的问候程序，并打印当前时间"
+        return request
+
+    def _new_document(self, text: str = "") -> Path:
+        self.notes_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        note_path = self.notes_dir / f"laoye_note_{timestamp}.txt"
+        note_path.write_text(text, encoding="utf-8")
+        self.current_document = note_path
+        self.current_code_suffix = ""
+        return note_path
+
+    @staticmethod
+    def _open_notepad(note_path: Path) -> None:
+        subprocess.Popen(["notepad.exe", str(note_path)])
+
+    def _write_current(self, text: str, code_suffix: str = "") -> Path:
+        note_path = self.current_document or self._new_document()
+        note_path.write_text(text, encoding="utf-8")
+        if code_suffix:
+            self.current_code_suffix = code_suffix
+        self._open_notepad(note_path)
+        return note_path
+
+    def _desktop_directory(self) -> Path:
+        if self.desktop_dir is not None:
+            return self.desktop_dir
+        buffer = ctypes.create_unicode_buffer(260)
+        result = ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buffer)
+        if result != 0 or not buffer.value:
+            raise RuntimeError("无法找到桌面目录")
+        return Path(buffer.value)
+
+    def _save_to_desktop(self) -> str:
+        if self.current_document is None or not self.current_document.exists():
+            raise RuntimeError("当前没有可保存的记事本内容")
+        desktop = self._desktop_directory()
+        desktop.mkdir(parents=True, exist_ok=True)
+        suffix = self.current_code_suffix or self.current_document.suffix or ".txt"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        destination = desktop / f"老叶代码_{timestamp}{suffix}"
+        counter = 2
+        while destination.exists():
+            destination = desktop / f"老叶代码_{timestamp}_{counter}{suffix}"
+            counter += 1
+        shutil.copy2(self.current_document, destination)
+        self.current_document = destination
+        self._open_notepad(destination)
+        return f"已保存到桌面，文件名是{destination.name}。"
+
+    @classmethod
+    def _validate_python_for_run(cls, code: str) -> None:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as error:
+            raise RuntimeError(f"Python代码存在语法错误：{error.msg}") from error
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                modules = (
+                    [alias.name.split(".", 1)[0] for alias in node.names]
+                    if isinstance(node, ast.Import)
+                    else [str(node.module or "").split(".", 1)[0]]
+                )
+                if any(module in cls.BLOCKED_PYTHON_MODULES for module in modules):
+                    raise RuntimeError("代码包含文件、网络或系统操作，已阻止运行")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in cls.BLOCKED_PYTHON_CALLS:
+                    raise RuntimeError("代码包含动态执行或文件操作，已阻止运行")
+
+    def _run_current(self) -> str:
+        if self.current_document is None or not self.current_document.exists():
+            raise RuntimeError("当前没有可以运行的代码")
+        suffix = self.current_code_suffix or self.current_document.suffix.casefold()
+        if suffix != ".py":
+            raise RuntimeError("目前只支持直接运行Python代码")
+        code = self.current_document.read_text(encoding="utf-8")
+        self._validate_python_for_run(code)
+        command = f'"{sys.executable}" "{self.current_document}"'
+        subprocess.Popen(["cmd.exe", "/k", command])
+        return "代码已在新窗口运行。"
+
+    def execute(self, command: str) -> str:
+        normalized = normalize_text(command)
+        if any(
+            phrase in normalized for phrase in ("保存到桌面", "存到桌面", "另存到桌面")
+        ):
+            return self._save_to_desktop()
+        if (
+            "运行代码" in normalized
+            or "运行程序" in normalized
+            or normalized in {"运行", "打开运行", "执行", "执行代码"}
+        ):
+            return self._run_current()
+        if "计算器" in normalized:
+            subprocess.Popen(["calc.exe"])
+            return "计算器已打开。"
+
+        if self._wants_code(command):
+            if self.model_router is None:
+                raise RuntimeError("代码生成模型未连接")
+            code_request = self._code_request(command)
+            generated = strip_code_fence(self.model_router.generate_code(code_request))
+            if not generated:
+                raise RuntimeError("没有生成可写入的代码")
+            self._write_current(generated, self._code_suffix(command))
+            return "记事本已打开，代码已经写好了。"
+
+        literal_text = self._literal_text(command)
+        if literal_text:
+            self._write_current(literal_text)
+            return "记事本已打开，内容已经写好了。"
+
+        if "记事本" in normalized:
+            note_path = self._new_document()
+            self._open_notepad(note_path)
+            return "记事本已打开。"
+        raise ValueError("不支持的电脑操作")
 
 
 class OllamaClient:
@@ -983,6 +1345,20 @@ class OllamaClient:
             self.remember(question, answer)
         return answer
 
+    def generate_code(self, request: str) -> str:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是代码生成器。只输出简短、可运行的纯代码，不要Markdown代码块，"
+                    "不要解释。用户没有指定语言时使用Python。不要生成用于打开应用、"
+                    "执行Shell命令或控制电脑的代码，除非编程需求明确要求这些功能。"
+                ),
+            },
+            {"role": "user", "content": request},
+        ]
+        return self._chat(messages, 0.2, 400)
+
     def ask_vision(
         self,
         question: str,
@@ -1013,6 +1389,7 @@ class OnlineQwenClient:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.history: list[dict[str, str]] = []
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.base_url = config.online_api_base_url
         self.api_key = config.online_api_key
         self._connection_error = ""
@@ -1078,7 +1455,7 @@ class OnlineQwenClient:
                 "Content-Type": "application/json; charset=utf-8",
             },
         )
-        with urllib.request.urlopen(
+        with self._opener.open(
             request, timeout=self.config.online_timeout_seconds
         ) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -1094,7 +1471,7 @@ class OnlineQwenClient:
                 "Accept": "text/event-stream",
             },
         )
-        with urllib.request.urlopen(
+        with self._opener.open(
             request, timeout=self.config.online_timeout_seconds
         ) as response:
             for raw_line in response:
@@ -1196,6 +1573,20 @@ class OnlineQwenClient:
             self.remember(question, answer)
         return answer
 
+    def generate_code(self, request: str) -> str:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是代码生成器。只输出简短、可运行的纯代码，不要Markdown代码块，"
+                    "不要解释。用户没有指定语言时使用Python。不要生成用于打开应用、"
+                    "执行Shell命令或控制电脑的代码，除非编程需求明确要求这些功能。"
+                ),
+            },
+            {"role": "user", "content": request},
+        ]
+        return self._chat(messages, 0.2, 400)
+
     def ask_vision(
         self,
         question: str,
@@ -1289,6 +1680,9 @@ class ModelRouter:
         cancel_event: threading.Event | None = None,
     ) -> str:
         return self._client().ask(question, on_segment, cancel_event)
+
+    def generate_code(self, request: str) -> str:
+        return self._client().generate_code(request)
 
     def ask_vision(
         self,
@@ -1658,6 +2052,7 @@ class VoiceAssistant:
         self.speaker = speaker
         self.ollama = ollama
         self.online_tools = online_tools
+        self.desktop_tools = DesktopTools(ollama)
         self.dashboard = dashboard
         self.audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=80)
         self.interrupt_audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=40)
@@ -1903,6 +2298,7 @@ class VoiceAssistant:
         last_partial = ""
         vision_context_active = False
         weather_context_active = False
+        desktop_context_active = False
 
         print("\n已启动。请说：老叶老叶")
         print("听到“我在”后开始提问（按 Ctrl+C 退出）\n")
@@ -1924,8 +2320,10 @@ class VoiceAssistant:
                     print("[会话结束] 一段时间没有继续提问，重新等待唤醒。")
                     self.ollama.end_conversation()
                     self.online_tools.start_conversation()
+                    self.desktop_tools.start_conversation()
                     vision_context_active = False
                     weather_context_active = False
+                    desktop_context_active = False
                     state = "waiting"
                     wake_recognizer.Reset()
                     command_recognizer.Reset()
@@ -1964,8 +2362,10 @@ class VoiceAssistant:
                     print("[回答] 我在")
                     self.ollama.start_conversation()
                     self.online_tools.start_conversation()
+                    self.desktop_tools.start_conversation()
                     vision_context_active = False
                     weather_context_active = False
+                    desktop_context_active = False
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status("我在，请开始提问", "我在")
                     try:
@@ -1979,7 +2379,57 @@ class VoiceAssistant:
                     last_partial = ""
                     continue
 
-                if state == "command" and is_time_command(text):
+                if (
+                    state == "command"
+                    and is_final
+                    and (
+                        is_desktop_command(text)
+                        or (
+                            desktop_context_active
+                            and is_desktop_follow_up(text)
+                        )
+                    )
+                ):
+                    vision_context_active = False
+                    weather_context_active = False
+                    print(f"[电脑操作] {text}")
+                    if self.dashboard:
+                        self.dashboard.store.set_assistant_status("正在执行电脑操作")
+                    try:
+                        response = self.desktop_tools.execute(text)
+                        action_succeeded = True
+                        desktop_context_active = self.desktop_tools.context_active
+                    except Exception as error:
+                        print(f"[电脑操作失败] {error}", file=sys.stderr)
+                        reason = str(error).strip().rstrip("。")
+                        response = f"电脑操作没有成功，{reason or '请稍后再试'}。"
+                        action_succeeded = False
+                    self.ollama.remember(text, response)
+                    print(f"[电脑操作回答] {response}")
+                    if self.dashboard:
+                        self.dashboard.store.set_assistant_status(
+                            "电脑操作完成" if action_succeeded else "电脑操作失败",
+                            response,
+                        )
+                    try:
+                        interrupt_action = self._play_interruptible(
+                            self.speaker.say, response, self.playback_cancel
+                        )
+                    except Exception as error:
+                        print(f"[语音合成失败] {error}", file=sys.stderr)
+                        self._play(self.speaker.chime, False)
+                        interrupt_action = None
+                    state = "command"
+                    command_deadline = (
+                        time.monotonic() + self.config.command_timeout_seconds
+                    )
+                    command_recognizer.Reset()
+                    last_partial = ""
+                    if self.dashboard:
+                        self.dashboard.store.set_assistant_status(
+                            self._continuation_status(interrupt_action), response
+                        )
+                elif state == "command" and is_time_command(text):
                     vision_context_active = False
                     weather_context_active = False
                     response = format_time_zh(datetime.now().astimezone())
@@ -2017,18 +2467,21 @@ class VoiceAssistant:
                     )
                 ):
                     vision_context_active = False
-                    print(f"[联网天气查询] {text}")
+                    print(f"[天气查询] {text}")
                     if self.dashboard:
-                        self.dashboard.store.set_assistant_status("正在联网查询天气")
+                        self.dashboard.store.set_assistant_status("正在查询天气")
                     try:
                         answer = self.online_tools.search_weather(text)
                         weather_context_active = True
                         weather_succeeded = True
                     except Exception as error:
-                        print(f"[联网天气查询失败] {error}", file=sys.stderr)
+                        print(f"[天气查询失败] {error}", file=sys.stderr)
                         if "配置中关闭" in str(error):
                             answer = "天气查询功能暂时关闭。"
-                        elif "没有找到地点" in str(error):
+                        elif any(
+                            phrase in str(error)
+                            for phrase in ("没有找到地点", "城市不存在", "未找到")
+                        ):
                             answer = "没有找到这个城市，请重新说城市名，比如成都天气。"
                         else:
                             answer = "天气服务暂时连接失败，请稍后再试。"
@@ -2062,9 +2515,11 @@ class VoiceAssistant:
                 elif state == "command" and is_final and is_exit_command(text):
                     self.ollama.end_conversation()
                     self.online_tools.start_conversation()
+                    self.desktop_tools.start_conversation()
                     self._barge_in_stop.set()
                     vision_context_active = False
                     weather_context_active = False
+                    desktop_context_active = False
                     print("再见。")
                     try:
                         self._play(self.speaker.say, "再见。")
@@ -2080,8 +2535,10 @@ class VoiceAssistant:
                     print(f"[会话结束] {answer}")
                     self.ollama.end_conversation()
                     self.online_tools.start_conversation()
+                    self.desktop_tools.start_conversation()
                     vision_context_active = False
                     weather_context_active = False
+                    desktop_context_active = False
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status(
                             "等待“老叶老叶”唤醒", answer
