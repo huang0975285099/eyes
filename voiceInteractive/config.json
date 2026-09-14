@@ -10,7 +10,7 @@
   "tts_voice": "zh-CN-YunyangNeural",
   "tts_rate": "+25%",
   "tts_volume": "+0%",
-  "llm_provider": "online",
+  "llm_provider": "ollama",
   "online_api_base_url": "https://ws-bmmb54df8myndcj1.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
   "online_api_key": "",
   "online_api_key_env": "QWEN_API_KEY",
