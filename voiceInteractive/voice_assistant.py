@@ -54,6 +54,7 @@ class Config:
     tts_voice: str
     tts_rate: str
     tts_volume: str
+    tts_proxy: str
     llm_provider: str
     online_api_base_url: str
     online_api_key: str
@@ -70,7 +71,9 @@ class Config:
     internet_tools_enabled: bool
     internet_timeout_seconds: float
     internet_retry_count: int
+    network_proxy: str
     weather_default_location: str
+    code_run_timeout_seconds: float
     web_enabled: bool
     web_host: str
     web_port: int
@@ -111,6 +114,7 @@ def load_config(path: Path) -> Config:
         tts_voice=raw.get("tts_voice", "zh-CN-YunyangNeural"),
         tts_rate=raw.get("tts_rate", "+0%"),
         tts_volume=raw.get("tts_volume", "+0%"),
+        tts_proxy=str(raw.get("tts_proxy", "")).strip(),
         llm_provider=str(raw.get("llm_provider", "ollama")).strip().casefold(),
         online_api_base_url=str(raw.get("online_api_base_url", "")).rstrip("/"),
         online_api_key=str(raw.get("online_api_key", "")).strip(),
@@ -134,9 +138,13 @@ def load_config(path: Path) -> Config:
             1.0, float(raw.get("internet_timeout_seconds", 10.0))
         ),
         internet_retry_count=max(0, int(raw.get("internet_retry_count", 2))),
+        network_proxy=str(raw.get("network_proxy", "")).strip(),
         weather_default_location=str(
             raw.get("weather_default_location", "Los Angeles")
         ).strip(),
+        code_run_timeout_seconds=max(
+            1.0, float(raw.get("code_run_timeout_seconds", 10.0))
+        ),
         web_enabled=bool(raw.get("web_enabled", True)),
         web_host=str(raw.get("web_host", "127.0.0.1")),
         web_port=int(raw.get("web_port", 8765)),
@@ -153,6 +161,12 @@ def load_config(path: Path) -> Config:
         model_path=model_path,
         model_url=raw.get("model_url", DEFAULT_MODEL_URL),
     )
+
+
+def build_proxy_opener(proxy_url: str):
+    normalized = str(proxy_url).strip()
+    proxy_mapping = {"http": normalized, "https": normalized} if normalized else {}
+    return urllib.request.build_opener(urllib.request.ProxyHandler(proxy_mapping))
 
 
 def configure_windows_console() -> None:
@@ -703,6 +717,7 @@ class Speaker:
             self.config.tts_voice,
             rate=self.config.tts_rate,
             volume=self.config.tts_volume,
+            proxy=self.config.tts_proxy or None,
         )
         chunks: list[bytes] = []
         async for chunk in communicate.stream():
@@ -773,6 +788,7 @@ class OnlineSearchTools:
         self.config = config
         self.last_weather_location = ""
         self._forecast_cache: dict[str, tuple[float, dict]] = {}
+        self._opener = build_proxy_opener(getattr(config, "network_proxy", ""))
 
     def start_conversation(self) -> None:
         self.last_weather_location = ""
@@ -788,20 +804,9 @@ class OnlineSearchTools:
         last_error: Exception | None = None
         for attempt in range(self.config.internet_retry_count + 1):
             try:
-                if url == self.WEATHER_URL:
-                    # This API is hosted in China and is reachable directly.
-                    # Bypassing a desktop proxy avoids scheduled-task differences.
-                    opener = urllib.request.build_opener(
-                        urllib.request.ProxyHandler({})
-                    )
-                    response_context = opener.open(
-                        request, timeout=self.config.internet_timeout_seconds
-                    )
-                else:
-                    response_context = urllib.request.urlopen(
-                        request, timeout=self.config.internet_timeout_seconds
-                    )
-                with response_context as response:
+                with self._opener.open(
+                    request, timeout=self.config.internet_timeout_seconds
+                ) as response:
                     return json.loads(response.read().decode("utf-8"))
             except Exception as error:
                 last_error = error
@@ -1028,12 +1033,18 @@ class DesktopTools:
         model_router=None,
         notes_dir: Path | None = None,
         desktop_dir: Path | None = None,
+        run_timeout_seconds: float = 10.0,
     ) -> None:
         self.model_router = model_router
         self.notes_dir = notes_dir or Path(tempfile.gettempdir()) / "LaoyeVoiceAssistant"
         self.desktop_dir = desktop_dir
+        self.run_timeout_seconds = max(1.0, float(run_timeout_seconds))
         self.current_document: Path | None = None
         self.current_code_suffix = ""
+        self.current_code_request = ""
+        self.last_run_error = ""
+        self.pending_fix_confirmation = False
+        self.pending_run_confirmation = False
 
     @property
     def context_active(self) -> bool:
@@ -1042,6 +1053,30 @@ class DesktopTools:
     def start_conversation(self) -> None:
         self.current_document = None
         self.current_code_suffix = ""
+        self.current_code_request = ""
+        self.last_run_error = ""
+        self.pending_fix_confirmation = False
+        self.pending_run_confirmation = False
+
+    def can_handle_follow_up(self, text: str) -> bool:
+        normalized = normalize_text(text)
+        confirmation = normalized in {
+            "好",
+            "好的",
+            "可以",
+            "确认",
+            "是",
+            "是的",
+            "修改吧",
+            "确认修改",
+            "运行吧",
+            "确认运行",
+        }
+        cancellation = normalized in {"不用", "不要", "取消", "不用了", "先不修改"}
+        return is_desktop_follow_up(text) or (
+            (self.pending_fix_confirmation or self.pending_run_confirmation)
+            and (confirmation or cancellation)
+        )
 
     @staticmethod
     def _wants_code(text: str) -> bool:
@@ -1099,6 +1134,10 @@ class DesktopTools:
         note_path.write_text(text, encoding="utf-8")
         self.current_document = note_path
         self.current_code_suffix = ""
+        self.current_code_request = ""
+        self.last_run_error = ""
+        self.pending_fix_confirmation = False
+        self.pending_run_confirmation = False
         return note_path
 
     @staticmethod
@@ -1110,6 +1149,9 @@ class DesktopTools:
         note_path.write_text(text, encoding="utf-8")
         if code_suffix:
             self.current_code_suffix = code_suffix
+        self.last_run_error = ""
+        self.pending_fix_confirmation = False
+        self.pending_run_confirmation = False
         self._open_notepad(note_path)
         return note_path
 
@@ -1122,17 +1164,35 @@ class DesktopTools:
             raise RuntimeError("无法找到桌面目录")
         return Path(buffer.value)
 
-    def _save_to_desktop(self) -> str:
+    def _requested_filename(self, command: str, suffix: str) -> str:
+        match = re.search(
+            r"(?:文件\s*名(?:叫|为|是)?|命名为)\s*([^，。！？,.!?、；;]+)",
+            command,
+        )
+        if not match:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            return f"老叶代码_{timestamp}{suffix}"
+        filename = match.group(1).strip().replace("点py", ".py").replace("点txt", ".txt")
+        filename = re.sub(r'[<>:"/\\|?*]', "_", Path(filename).name).rstrip(". ")
+        if not filename:
+            raise RuntimeError("没有识别到有效文件名")
+        if not Path(filename).suffix:
+            filename += suffix
+        return filename
+
+    def _save_to_desktop(self, command: str) -> str:
         if self.current_document is None or not self.current_document.exists():
             raise RuntimeError("当前没有可保存的记事本内容")
         desktop = self._desktop_directory()
         desktop.mkdir(parents=True, exist_ok=True)
         suffix = self.current_code_suffix or self.current_document.suffix or ".txt"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        destination = desktop / f"老叶代码_{timestamp}{suffix}"
+        requested_name = self._requested_filename(command, suffix)
+        destination = desktop / requested_name
+        stem = destination.stem
+        destination_suffix = destination.suffix
         counter = 2
         while destination.exists():
-            destination = desktop / f"老叶代码_{timestamp}_{counter}{suffix}"
+            destination = desktop / f"{stem}_{counter}{destination_suffix}"
             counter += 1
         shutil.copy2(self.current_document, destination)
         self.current_document = destination
@@ -1158,6 +1218,11 @@ class DesktopTools:
                 if node.func.id in cls.BLOCKED_PYTHON_CALLS:
                     raise RuntimeError("代码包含动态执行或文件操作，已阻止运行")
 
+    @staticmethod
+    def _short_output(value: str, limit: int = 240) -> str:
+        cleaned = re.sub(r"\s+", " ", value).strip()
+        return cleaned if len(cleaned) <= limit else cleaned[:limit].rstrip() + "，后面省略"
+
     def _run_current(self) -> str:
         if self.current_document is None or not self.current_document.exists():
             raise RuntimeError("当前没有可以运行的代码")
@@ -1166,16 +1231,90 @@ class DesktopTools:
             raise RuntimeError("目前只支持直接运行Python代码")
         code = self.current_document.read_text(encoding="utf-8")
         self._validate_python_for_run(code)
-        command = f'"{sys.executable}" "{self.current_document}"'
-        subprocess.Popen(["cmd.exe", "/k", command])
-        return "代码已在新窗口运行。"
+        environment = {
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+        }
+        try:
+            result = subprocess.run(
+                [sys.executable, "-I", str(self.current_document)],
+                cwd=str(self.current_document.parent),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.run_timeout_seconds,
+                env=environment,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except subprocess.TimeoutExpired:
+            self.last_run_error = f"运行超过{self.run_timeout_seconds:g}秒，已停止"
+            self.pending_fix_confirmation = True
+            self.pending_run_confirmation = False
+            return f"代码运行超时，已停止。要我分析并修改吗？"
+
+        output = self._short_output(result.stdout)
+        error_output = self._short_output(result.stderr)
+        if result.returncode == 0:
+            self.last_run_error = ""
+            self.pending_fix_confirmation = False
+            self.pending_run_confirmation = False
+            return f"代码运行成功，输出是：{output or '没有输出'}。"
+
+        self.last_run_error = error_output or output or f"退出代码{result.returncode}"
+        self.pending_fix_confirmation = True
+        self.pending_run_confirmation = False
+        return f"代码运行失败：{self.last_run_error}。要我分析并修改吗？"
+
+    def _fix_current(self) -> str:
+        if self.model_router is None:
+            raise RuntimeError("代码生成模型未连接")
+        if self.current_document is None or not self.current_document.exists():
+            raise RuntimeError("当前没有可以修改的代码")
+        current_code = self.current_document.read_text(encoding="utf-8")
+        fixed_code = strip_code_fence(
+            self.model_router.fix_code(
+                self.current_code_request,
+                current_code,
+                self.last_run_error,
+            )
+        )
+        if not fixed_code:
+            raise RuntimeError("模型没有返回修复后的代码")
+        self._write_current(fixed_code, self.current_code_suffix or ".py")
+        self.pending_run_confirmation = True
+        return "代码已经修改并写回记事本。要重新运行吗？"
 
     def execute(self, command: str) -> str:
         normalized = normalize_text(command)
+        confirmations = {
+            "好",
+            "好的",
+            "可以",
+            "确认",
+            "是",
+            "是的",
+            "修改吧",
+            "确认修改",
+            "运行吧",
+            "确认运行",
+        }
+        cancellations = {"不用", "不要", "取消", "不用了", "先不修改"}
+        if normalized in cancellations and (
+            self.pending_fix_confirmation or self.pending_run_confirmation
+        ):
+            self.pending_fix_confirmation = False
+            self.pending_run_confirmation = False
+            return "好的，已取消。"
+        if self.pending_fix_confirmation and normalized in confirmations:
+            return self._fix_current()
+        if self.pending_run_confirmation and normalized in confirmations:
+            self.pending_run_confirmation = False
+            return self._run_current()
         if any(
             phrase in normalized for phrase in ("保存到桌面", "存到桌面", "另存到桌面")
         ):
-            return self._save_to_desktop()
+            return self._save_to_desktop(command)
         if (
             "运行代码" in normalized
             or "运行程序" in normalized
@@ -1193,7 +1332,9 @@ class DesktopTools:
             generated = strip_code_fence(self.model_router.generate_code(code_request))
             if not generated:
                 raise RuntimeError("没有生成可写入的代码")
+            self.current_code_request = code_request
             self._write_current(generated, self._code_suffix(command))
+            self.current_code_request = code_request
             return "记事本已打开，代码已经写好了。"
 
         literal_text = self._literal_text(command)
@@ -1359,6 +1500,22 @@ class OllamaClient:
         ]
         return self._chat(messages, 0.2, 400)
 
+    def fix_code(self, request: str, code: str, error: str) -> str:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是代码修复器。只输出修复后的完整纯代码，不要Markdown代码块，"
+                    "不要解释。不要添加文件、网络、Shell或电脑控制操作。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"原始需求：{request}\n当前代码：\n{code}\n运行错误：\n{error}",
+            },
+        ]
+        return self._chat(messages, 0.1, 600)
+
     def ask_vision(
         self,
         question: str,
@@ -1389,7 +1546,7 @@ class OnlineQwenClient:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.history: list[dict[str, str]] = []
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self._opener = build_proxy_opener(getattr(config, "network_proxy", ""))
         self.base_url = config.online_api_base_url
         self.api_key = config.online_api_key
         self._connection_error = ""
@@ -1587,6 +1744,22 @@ class OnlineQwenClient:
         ]
         return self._chat(messages, 0.2, 400)
 
+    def fix_code(self, request: str, code: str, error: str) -> str:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是代码修复器。只输出修复后的完整纯代码，不要Markdown代码块，"
+                    "不要解释。不要添加文件、网络、Shell或电脑控制操作。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"原始需求：{request}\n当前代码：\n{code}\n运行错误：\n{error}",
+            },
+        ]
+        return self._chat(messages, 0.1, 600)
+
     def ask_vision(
         self,
         question: str,
@@ -1683,6 +1856,9 @@ class ModelRouter:
 
     def generate_code(self, request: str) -> str:
         return self._client().generate_code(request)
+
+    def fix_code(self, request: str, code: str, error: str) -> str:
+        return self._client().fix_code(request, code, error)
 
     def ask_vision(
         self,
@@ -2052,7 +2228,9 @@ class VoiceAssistant:
         self.speaker = speaker
         self.ollama = ollama
         self.online_tools = online_tools
-        self.desktop_tools = DesktopTools(ollama)
+        self.desktop_tools = DesktopTools(
+            ollama, run_timeout_seconds=config.code_run_timeout_seconds
+        )
         self.dashboard = dashboard
         self.audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=80)
         self.interrupt_audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=40)
@@ -2386,7 +2564,7 @@ class VoiceAssistant:
                         is_desktop_command(text)
                         or (
                             desktop_context_active
-                            and is_desktop_follow_up(text)
+                            and self.desktop_tools.can_handle_follow_up(text)
                         )
                     )
                 ):

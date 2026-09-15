@@ -1,6 +1,8 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path
 import queue
+import sys
 from tempfile import TemporaryDirectory
 import threading
 import time
@@ -11,6 +13,7 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 
 from voice_assistant import (
+    build_proxy_opener,
     chinese_number,
     CameraFrameStore,
     contains_wake_phrase,
@@ -35,6 +38,7 @@ from voice_assistant import (
     OnlineSearchTools,
     parse_weather_query,
     resample_pcm,
+    Speaker,
     take_speech_segments,
     strip_code_fence,
     VoiceAssistant,
@@ -175,6 +179,50 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(result.shape, (6, 1))
         self.assertEqual(int(result[0, 0]), 0)
         self.assertEqual(int(result[-1, 0]), 200)
+
+
+class SpeakerTests(unittest.TestCase):
+    def test_synthesis_uses_configured_proxy(self) -> None:
+        class FakeCommunicate:
+            async def stream(self):
+                yield {"type": "audio", "data": b"audio"}
+
+        config = SimpleNamespace(
+            tts_voice="zh-CN-YunyangNeural",
+            tts_rate="+25%",
+            tts_volume="+0%",
+            tts_proxy="http://127.0.0.1:52351",
+        )
+        speaker = Speaker(SimpleNamespace(), config)
+        with patch(
+            "voice_assistant.edge_tts.Communicate", return_value=FakeCommunicate()
+        ) as communicate:
+            audio = asyncio.run(speaker._synthesize("代理测试"))
+        self.assertEqual(audio, b"audio")
+        communicate.assert_called_once_with(
+            "代理测试",
+            "zh-CN-YunyangNeural",
+            rate="+25%",
+            volume="+0%",
+            proxy="http://127.0.0.1:52351",
+        )
+
+
+class ProxyTests(unittest.TestCase):
+    def test_proxy_opener_configures_http_and_https(self) -> None:
+        handler = Mock()
+        with (
+            patch("voice_assistant.urllib.request.ProxyHandler", return_value=handler) as factory,
+            patch("voice_assistant.urllib.request.build_opener") as build_opener,
+        ):
+            build_proxy_opener("http://127.0.0.1:52351")
+        factory.assert_called_once_with(
+            {
+                "http": "http://127.0.0.1:52351",
+                "https": "http://127.0.0.1:52351",
+            }
+        )
+        build_opener.assert_called_once_with(handler)
 
 
 class CameraFrameStoreTests(unittest.TestCase):
@@ -322,6 +370,7 @@ class OnlineQwenClientTests(unittest.TestCase):
             online_timeout_seconds=30.0,
             ollama_system_prompt="直接回答",
             conversation_history_turns=2,
+            network_proxy="http://127.0.0.1:52351",
         )
         self.client = OnlineQwenClient(config)
 
@@ -343,7 +392,7 @@ class OnlineQwenClientTests(unittest.TestCase):
         self.assertEqual(answer, "第一句。第二句")
         self.assertEqual(spoken, ["第一句。", "第二句"])
 
-    def test_online_qwen_request_uses_direct_opener(self) -> None:
+    def test_online_qwen_request_uses_configured_opener(self) -> None:
         response = MagicMock()
         response.__enter__.return_value = response
         response.read.return_value = b'{"data": []}'
@@ -441,7 +490,11 @@ class DesktopToolsTests(unittest.TestCase):
         model.generate_code.return_value = "print(sum(range(1, 101)))"
         with TemporaryDirectory() as notes_directory, TemporaryDirectory() as desktop:
             tools = DesktopTools(model, Path(notes_directory), Path(desktop))
-            with patch("voice_assistant.subprocess.Popen") as popen:
+            completed = SimpleNamespace(returncode=0, stdout="5050\n", stderr="")
+            with (
+                patch("voice_assistant.subprocess.Popen") as popen,
+                patch("voice_assistant.subprocess.run", return_value=completed) as run,
+            ):
                 self.assertEqual(tools.execute("打开记事本"), "记事本已打开。")
                 draft_path = tools.current_document
                 self.assertIsNotNone(draft_path)
@@ -453,17 +506,17 @@ class DesktopToolsTests(unittest.TestCase):
                     "print(sum(range(1, 101)))",
                 )
 
-                answer = tools.execute("保存到桌面")
+                answer = tools.execute("保存到桌面，文件名叫求和程序")
                 saved_path = tools.current_document
                 self.assertIn("已保存到桌面", answer)
                 self.assertEqual(saved_path.parent, Path(desktop))
-                self.assertEqual(saved_path.suffix, ".py")
+                self.assertEqual(saved_path.name, "求和程序.py")
 
                 answer = tools.execute("打开运行")
-                self.assertEqual(answer, "代码已在新窗口运行。")
-                run_command = popen.call_args.args[0]
-                self.assertEqual(run_command[:2], ["cmd.exe", "/k"])
-                self.assertIn(str(saved_path), run_command[2])
+                self.assertEqual(answer, "代码运行成功，输出是：5050。")
+                run_command = run.call_args.args[0]
+                self.assertEqual(run_command[:2], [sys.executable, "-I"])
+                self.assertEqual(run_command[2], str(saved_path))
         model.generate_code.assert_called_once_with(
             "使用Python写一个简短的问候程序，并打印当前时间"
         )
@@ -479,6 +532,39 @@ class DesktopToolsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "已阻止运行"):
                 tools.execute("运行代码")
 
+    def test_failed_run_can_be_fixed_then_rerun_after_confirmation(self) -> None:
+        model = Mock()
+        model.generate_code.return_value = "print(missing_name)"
+        model.fix_code.return_value = "print('fixed')"
+        failed = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="NameError: name 'missing_name' is not defined\n",
+        )
+        succeeded = SimpleNamespace(returncode=0, stdout="fixed\n", stderr="")
+        with TemporaryDirectory() as directory:
+            tools = DesktopTools(model, Path(directory), Path(directory))
+            with (
+                patch("voice_assistant.subprocess.Popen"),
+                patch(
+                    "voice_assistant.subprocess.run", side_effect=[failed, succeeded]
+                ) as run,
+            ):
+                tools.execute("在记事本写Python代码")
+                failed_answer = tools.execute("运行代码")
+                self.assertIn("代码运行失败", failed_answer)
+                self.assertIn("要我分析并修改吗", failed_answer)
+                self.assertTrue(tools.can_handle_follow_up("好的"))
+
+                fixed_answer = tools.execute("好的")
+                self.assertIn("代码已经修改", fixed_answer)
+                self.assertIn("要重新运行吗", fixed_answer)
+                model.fix_code.assert_called_once()
+
+                rerun_answer = tools.execute("确认运行")
+                self.assertEqual(rerun_answer, "代码运行成功，输出是：fixed。")
+                self.assertEqual(run.call_count, 2)
+
 
 class OnlineSearchToolsTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -486,6 +572,7 @@ class OnlineSearchToolsTests(unittest.TestCase):
             internet_tools_enabled=True,
             internet_timeout_seconds=10.0,
             internet_retry_count=2,
+            network_proxy="http://127.0.0.1:52351",
             weather_default_location="成都",
         )
         self.tools = OnlineSearchTools(config)
@@ -644,31 +731,24 @@ class OnlineSearchToolsTests(unittest.TestCase):
         response = MagicMock()
         response.__enter__.return_value = response
         response.read.return_value = b'{"ok": true}'
-        with (
-            patch(
-                "voice_assistant.urllib.request.urlopen",
-                side_effect=[OSError("temporary failure"), response],
-            ) as urlopen,
-            patch("voice_assistant.time.sleep") as sleep,
-        ):
+        self.tools._opener = Mock()
+        self.tools._opener.open.side_effect = [OSError("temporary failure"), response]
+        with patch("voice_assistant.time.sleep") as sleep:
             result = self.tools._get_json("https://example.test", {"q": "weather"})
         self.assertEqual(result, {"ok": True})
-        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(self.tools._opener.open.call_count, 2)
         sleep.assert_called_once()
 
-    def test_domestic_weather_request_bypasses_proxy(self) -> None:
+    def test_domestic_weather_request_uses_configured_opener(self) -> None:
         response = MagicMock()
         response.__enter__.return_value = response
         response.read.return_value = b'{"city": "Chengdu"}'
-        opener = Mock()
-        opener.open.return_value = response
-        with (
-            patch("voice_assistant.urllib.request.build_opener", return_value=opener),
-            patch("voice_assistant.urllib.request.urlopen") as urlopen,
-        ):
+        self.tools._opener = Mock()
+        self.tools._opener.open.return_value = response
+        with patch("voice_assistant.urllib.request.urlopen") as urlopen:
             result = self.tools._get_json(self.tools.WEATHER_URL, {"city": "成都"})
         self.assertEqual(result, {"city": "Chengdu"})
-        opener.open.assert_called_once()
+        self.tools._opener.open.assert_called_once()
         urlopen.assert_not_called()
 
 
