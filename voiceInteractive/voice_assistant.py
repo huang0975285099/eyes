@@ -51,6 +51,8 @@ class Config:
     wake_phrases: tuple[str, ...]
     command_timeout_seconds: float
     conversation_history_turns: int
+    asr_accent_enhancement_enabled: bool
+    asr_max_alternatives: int
     tts_voice: str
     tts_rate: str
     tts_volume: str
@@ -134,6 +136,12 @@ def load_config(path: Path) -> Config:
         command_timeout_seconds=float(raw.get("command_timeout_seconds", 8.0)),
         conversation_history_turns=max(
             1, int(raw.get("conversation_history_turns", 6))
+        ),
+        asr_accent_enhancement_enabled=bool(
+            raw.get("asr_accent_enhancement_enabled", True)
+        ),
+        asr_max_alternatives=max(
+            1, min(10, int(raw.get("asr_max_alternatives", 3)))
         ),
         tts_voice=raw.get("tts_voice", "zh-CN-YunyangNeural"),
         tts_rate=raw.get("tts_rate", "+0%"),
@@ -654,6 +662,54 @@ def is_vision_follow_up(text: str) -> bool:
     )
 
 
+def select_actionable_recognition(
+    alternatives: list[str], wake_phrases: tuple[str, ...], state: str
+) -> str:
+    if not alternatives:
+        return ""
+
+    def is_actionable(candidate: str) -> bool:
+        if state == "waiting":
+            return contains_wake_phrase(candidate, wake_phrases)
+        return any(
+            checker(candidate)
+            for checker in (
+                is_desktop_command,
+                is_time_command,
+                is_weather_command,
+                is_exit_command,
+                is_end_conversation_command,
+                is_vision_command,
+            )
+        )
+
+    if is_actionable(alternatives[0]):
+        return alternatives[0]
+    return next(
+        (candidate for candidate in alternatives[1:] if is_actionable(candidate)),
+        alternatives[0],
+    )
+
+
+def build_accent_aware_question(question: str, alternatives: list[str]) -> str:
+    unique_alternatives: list[str] = []
+    seen = {normalize_text(question)}
+    for alternative in alternatives:
+        normalized = normalize_text(alternative)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_alternatives.append(alternative.strip())
+    if not unique_alternatives:
+        return question
+    candidates = "；".join(unique_alternatives[:2])
+    return (
+        f"用户使用带四川口音的普通话。首选识别为：{question}。"
+        f"其他识别候选为：{candidates}。"
+        "请结合中文语义和对话上下文判断真实问题并直接回答，不要提及识别过程。"
+    )
+
+
 def chinese_number(value: int) -> str:
     digits = "零一二三四五六七八九"
     if value < 10:
@@ -737,6 +793,29 @@ def _result_text(payload: str, key: str) -> str:
         return str(json.loads(payload).get(key, ""))
     except json.JSONDecodeError:
         return ""
+
+
+def recognition_alternatives(payload: str) -> list[str]:
+    try:
+        result = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+    raw_alternatives = result.get("alternatives", [])
+    candidates: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw_alternatives, list):
+        for item in raw_alternatives:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text", "")).strip()
+            normalized = normalize_text(text)
+            if text and normalized not in seen:
+                seen.add(normalized)
+                candidates.append(text)
+    direct_text = str(result.get("text", "")).strip()
+    if direct_text and normalize_text(direct_text) not in seen:
+        candidates.insert(0, direct_text)
+    return candidates
 
 
 def resample_pcm(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
@@ -1566,11 +1645,15 @@ class OllamaClient:
         question: str,
         on_segment=None,
         cancel_event: threading.Event | None = None,
+        recognition_candidates: list[str] | None = None,
     ) -> str:
+        spoken_question = build_accent_aware_question(
+            question, recognition_candidates or []
+        )
         messages = [
             {"role": "system", "content": self.config.ollama_system_prompt},
             *self.history[-self._history_message_limit :],
-            {"role": "user", "content": question},
+            {"role": "user", "content": spoken_question},
         ]
         answer = self._chat(messages, 0.4, 160, on_segment, cancel_event)
         if cancel_event is None or not cancel_event.is_set():
@@ -1842,11 +1925,15 @@ class OnlineQwenClient:
         question: str,
         on_segment=None,
         cancel_event: threading.Event | None = None,
+        recognition_candidates: list[str] | None = None,
     ) -> str:
+        spoken_question = build_accent_aware_question(
+            question, recognition_candidates or []
+        )
         messages = [
             {"role": "system", "content": self.config.ollama_system_prompt},
             *self.history[-self._history_message_limit :],
-            {"role": "user", "content": question},
+            {"role": "user", "content": spoken_question},
         ]
         answer = self._chat(messages, 0.4, 160, on_segment, cancel_event)
         if cancel_event is None or not cancel_event.is_set():
@@ -2020,8 +2107,11 @@ class ModelRouter:
         question: str,
         on_segment=None,
         cancel_event: threading.Event | None = None,
+        recognition_candidates: list[str] | None = None,
     ) -> str:
-        return self._client().ask(question, on_segment, cancel_event)
+        return self._client().ask(
+            question, on_segment, cancel_event, recognition_candidates
+        )
 
     def generate_code(self, request: str) -> str:
         return self._client().generate_code(request)
@@ -3181,6 +3271,10 @@ class VoiceAssistant:
             self.model, sample_rate, list(self.config.wake_phrases)
         )
         command_recognizer = KaldiRecognizer(self.model, sample_rate)
+        if self.config.asr_accent_enhancement_enabled:
+            command_recognizer.SetMaxAlternatives(
+                self.config.asr_max_alternatives
+            )
         self._barge_in_stop.clear()
         barge_in_thread = threading.Thread(
             target=self._barge_in_loop,
@@ -3192,6 +3286,7 @@ class VoiceAssistant:
         state = "waiting"
         command_deadline = 0.0
         last_partial = ""
+        final_recognition_candidates: list[str] = []
         vision_context_active = False
         weather_context_active = False
         desktop_context_active = False
@@ -3264,8 +3359,33 @@ class VoiceAssistant:
                 recognizer = wake_recognizer if state == "waiting" else command_recognizer
                 is_final = recognizer.AcceptWaveform(data)
                 if is_final:
-                    text = _result_text(recognizer.Result(), "text")
+                    result_payload = recognizer.Result()
+                    final_recognition_candidates = recognition_alternatives(
+                        result_payload
+                    )
+                    text = select_actionable_recognition(
+                        final_recognition_candidates,
+                        self.config.wake_phrases,
+                        state,
+                    )
+                    if (
+                        final_recognition_candidates
+                        and text != final_recognition_candidates[0]
+                    ):
+                        print(
+                            "[口音纠错] "
+                            f"{final_recognition_candidates[0]} -> {text}"
+                        )
+                    if (
+                        self.config.asr_accent_enhancement_enabled
+                        and len(final_recognition_candidates) > 1
+                    ):
+                        print(
+                            "[识别候选] "
+                            + " / ".join(final_recognition_candidates)
+                        )
                 else:
+                    final_recognition_candidates = []
                     text = _result_text(recognizer.PartialResult(), "partial")
                     if text == last_partial:
                         continue
@@ -3550,7 +3670,14 @@ class VoiceAssistant:
                     try:
                         answer, interrupt_action = self._speak_streamed_answer(
                             lambda on_segment: self.ollama.ask(
-                                text, on_segment, self.playback_cancel
+                                text,
+                                on_segment,
+                                self.playback_cancel,
+                                (
+                                    final_recognition_candidates
+                                    if self.config.asr_accent_enhancement_enabled
+                                    else None
+                                ),
                             )
                         )
                         print(f"[模型回答] {answer}")

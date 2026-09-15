@@ -21,6 +21,9 @@
 语音识别使用 Vosk 小型中文模型，模型下载完成后可离线识别。中文语音合成使用
 Microsoft Edge 在线语音服务，因此回答首次生成时需要。
 合成音频只作为本次播放的临时缓存；播放完成、被打断或播放失败后会立即删除。
+唤醒后的交流默认启用四川口音普通话增强：Vosk保留多个声学识别候选，内置命令优先选择
+语义可执行的候选，普通问题由当前Qwen结合候选和多轮上下文判断真实含义。该功能不改变
+“老叶老叶”唤醒识别，也不会额外调用一次大模型。
 
 普通问答和视觉描述都使用流式输出。模型生成出完整句子后会立即进入语音播放队列；播放
 当前句子时，下一句会在后台预合成，以减少句子之间的停顿。
@@ -144,6 +147,8 @@ cd D:\project\eyes\voiceInteractive
 `config.json` 中修改。`command_timeout_seconds` 控制会话空闲超时，
 `conversation_history_turns` 控制当前会话最多保留多少轮问答。
 默认语音为 `zh-CN-YunyangNeural`，使用偏沉稳的成年男声并略微降低语速。
+`asr_accent_enhancement_enabled` 控制交流阶段的口音增强，`asr_max_alternatives` 控制
+Vosk保留的候选数量，默认3个。
 `tts_proxy` 控制 Edge 在线语音合成代理，`network_proxy` 控制在线 Qwen 和天气接口代理；
 当前两项均设置为 `http://127.0.0.1:52351`。
 `person_monitor_enabled` 设置动态人物监测的启动默认值，页面开关可在运行时启用或关闭；`person_alert_voice` 控制语音提醒；

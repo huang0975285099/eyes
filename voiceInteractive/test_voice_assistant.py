@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 
 from voice_assistant import (
+    build_accent_aware_question,
     build_proxy_opener,
     chinese_number,
     CameraFrameStore,
@@ -41,7 +42,9 @@ from voice_assistant import (
     parse_person_presence,
     PersonPresenceMonitor,
     PreparedAudio,
+    recognition_alternatives,
     resample_pcm,
+    select_actionable_recognition,
     Speaker,
     take_speech_segments,
     strip_code_fence,
@@ -63,6 +66,40 @@ class TextTests(unittest.TestCase):
         self.assertTrue(is_time_command("现在 几点 了"))
         self.assertTrue(is_time_command("几点？"))
         self.assertFalse(is_time_command("今天天气怎么样"))
+
+    def test_accented_recognition_uses_actionable_alternative(self) -> None:
+        payload = json.dumps(
+            {
+                "alternatives": [
+                    {"text": "打开寄事本", "confidence": 120.0},
+                    {"text": "打开记事本", "confidence": 118.0},
+                    {"text": "打开记事簿", "confidence": 115.0},
+                ]
+            },
+            ensure_ascii=False,
+        )
+        candidates = recognition_alternatives(payload)
+        self.assertEqual(candidates, ["打开寄事本", "打开记事本", "打开记事簿"])
+        self.assertEqual(
+            select_actionable_recognition(
+                candidates, ("老 叶 老 叶", "老爷 老爷"), "command"
+            ),
+            "打开记事本",
+        )
+        self.assertEqual(
+            select_actionable_recognition(
+                ["数据库咋个优化", "数据库怎么优化"], (), "command"
+            ),
+            "数据库咋个优化",
+        )
+
+    def test_accent_candidates_are_added_without_replacing_user_history(self) -> None:
+        prompt = build_accent_aware_question(
+            "数据库杂个优化", ["数据库杂个优化", "数据库咋个优化"]
+        )
+        self.assertIn("带四川口音的普通话", prompt)
+        self.assertIn("数据库咋个优化", prompt)
+        self.assertIn("不要提及识别过程", prompt)
 
     def test_desktop_command_detection(self) -> None:
         self.assertTrue(is_desktop_command("打开计算器"))
@@ -481,6 +518,17 @@ class OllamaClientTests(unittest.TestCase):
         self.assertEqual(payload["keep_alive"], "10m")
         self.assertEqual(answer, "第一句。第二句")
         self.assertEqual(spoken, ["第一句。", "第二句"])
+
+    def test_chat_uses_accent_candidates_but_remembers_plain_question(self) -> None:
+        self.client.ask(
+            "数据库杂个优化",
+            recognition_candidates=["数据库杂个优化", "数据库咋个优化"],
+        )
+        _, payload = self.client._stream_request.call_args.args
+        user_prompt = payload["messages"][-1]["content"]
+        self.assertIn("数据库咋个优化", user_prompt)
+        self.assertIn("不要提及识别过程", user_prompt)
+        self.assertEqual(self.client.history[-2]["content"], "数据库杂个优化")
 
     def test_interrupt_cancels_stream_and_does_not_remember_partial_answer(self) -> None:
         cancel_event = threading.Event()
