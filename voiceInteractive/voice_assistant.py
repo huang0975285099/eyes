@@ -81,6 +81,21 @@ class Config:
     camera_name_keywords: tuple[str, ...]
     camera_frame_max_age_seconds: float
     camera_snapshot_timeout_seconds: float
+    person_monitor_enabled: bool
+    person_alert_voice: bool
+    person_detector: str
+    person_motion_sensitivity: int
+    person_motion_min_area_percent: float
+    person_motion_consecutive_frames: int
+    person_motion_cooldown_seconds: float
+    scene_broadcast_enabled: bool
+    scene_broadcast_cooldown_seconds: float
+    yolo_python_executable: str
+    yolo_model_path: Path
+    yolo_device: str
+    yolo_confidence: float
+    yolo_image_size: int
+    yolo_timeout_seconds: float
     model_path: Path
     model_url: str
 
@@ -94,6 +109,12 @@ class AudioDevice:
     channels: int
 
 
+@dataclass(frozen=True)
+class PreparedAudio:
+    samples: np.ndarray
+    cache_path: Path
+
+
 def load_config(path: Path) -> Config:
     raw = json.loads(path.read_text(encoding="utf-8"))
     model_path = Path(raw.get("model_path", "models/vosk-model-small-cn-0.22"))
@@ -103,6 +124,9 @@ def load_config(path: Path) -> Config:
     online_config_db = Path(online_config_db_value) if online_config_db_value else None
     if online_config_db is not None and not online_config_db.is_absolute():
         online_config_db = APP_DIR / online_config_db
+    yolo_model_path = Path(raw.get("yolo_model_path", "models/yolov8n.pt"))
+    if not yolo_model_path.is_absolute():
+        yolo_model_path = APP_DIR / yolo_model_path
     return Config(
         input_device=raw.get("input_device", "Deli-1080P-Camera-Audio"),
         output_device=raw.get("output_device", "Deli-1080P-Camera Audio"),
@@ -157,6 +181,35 @@ def load_config(path: Path) -> Config:
         ),
         camera_snapshot_timeout_seconds=max(
             0.5, float(raw.get("camera_snapshot_timeout_seconds", 3.0))
+        ),
+        person_monitor_enabled=bool(raw.get("person_monitor_enabled", True)),
+        person_alert_voice=bool(raw.get("person_alert_voice", True)),
+        person_detector=str(raw.get("person_detector", "qwen")).strip().casefold(),
+        person_motion_sensitivity=max(
+            1, min(100, int(raw.get("person_motion_sensitivity", 70)))
+        ),
+        person_motion_min_area_percent=max(
+            0.05, min(50.0, float(raw.get("person_motion_min_area_percent", 0.8)))
+        ),
+        person_motion_consecutive_frames=max(
+            1, min(30, int(raw.get("person_motion_consecutive_frames", 3)))
+        ),
+        person_motion_cooldown_seconds=max(
+            0.5, float(raw.get("person_motion_cooldown_seconds", 5.0))
+        ),
+        scene_broadcast_enabled=bool(raw.get("scene_broadcast_enabled", False)),
+        scene_broadcast_cooldown_seconds=max(
+            3.0, float(raw.get("scene_broadcast_cooldown_seconds", 12.0))
+        ),
+        yolo_python_executable=str(raw.get("yolo_python_executable", "python")).strip(),
+        yolo_model_path=yolo_model_path,
+        yolo_device=str(raw.get("yolo_device", "0")).strip(),
+        yolo_confidence=max(
+            0.05, min(0.95, float(raw.get("yolo_confidence", 0.35)))
+        ),
+        yolo_image_size=max(320, min(1280, int(raw.get("yolo_image_size", 640)))),
+        yolo_timeout_seconds=max(
+            2.0, float(raw.get("yolo_timeout_seconds", 30.0))
         ),
         model_path=model_path,
         model_url=raw.get("model_url", DEFAULT_MODEL_URL),
@@ -369,6 +422,15 @@ def strip_code_fence(text: str) -> str:
     cleaned = text.strip()
     match = re.fullmatch(r"```[^\n]*\n([\s\S]*?)\n?```", cleaned)
     return match.group(1).strip() if match else cleaned
+
+
+def parse_person_presence(text: str) -> bool:
+    normalized = normalize_text(text).casefold()
+    if normalized in {"person", "有人", "检测到人", "画面有人"}:
+        return True
+    if normalized in {"empty", "无人", "没有人", "未检测到人", "画面无人"}:
+        return False
+    raise RuntimeError(f"人物检测返回了无法识别的结果：{text.strip()}")
 
 
 def is_weather_follow_up(text: str) -> bool:
@@ -694,9 +756,24 @@ def resample_pcm(samples: np.ndarray, source_rate: int, target_rate: int) -> np.
 
 
 class Speaker:
+    CACHE_DIR = APP_DIR / ".tts-cache"
+
     def __init__(self, device: AudioDevice, config: Config) -> None:
         self.device = device
         self.config = config
+
+    @classmethod
+    def clear_cache(cls) -> int:
+        if not cls.CACHE_DIR.is_dir():
+            return 0
+        removed = 0
+        for cache_path in cls.CACHE_DIR.glob("*.mp3"):
+            try:
+                cache_path.unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+        return removed
 
     def chime(self, success: bool = True) -> None:
         duration = 0.23
@@ -730,53 +807,67 @@ class Speaker:
             (self.config.tts_voice, self.config.tts_rate, self.config.tts_volume, text)
         )
         digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
-        return APP_DIR / ".tts-cache" / f"{digest}.mp3"
+        return self.CACHE_DIR / f"{digest}.mp3"
 
     def prepare(
         self, text: str, cancel_event: threading.Event | None = None
-    ) -> np.ndarray | None:
+    ) -> PreparedAudio | None:
         if cancel_event is not None and cancel_event.is_set():
             return None
         cache_path = self._cache_path(text)
-        if cache_path.exists():
-            audio_bytes = cache_path.read_bytes()
-        else:
-            audio_bytes = asyncio.run(self._synthesize(text))
-            if audio_bytes:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_bytes(audio_bytes)
-        if not audio_bytes:
-            raise RuntimeError("语音合成没有返回音频")
-        if cancel_event is not None and cancel_event.is_set():
-            return None
-        decoded = miniaudio.decode(
-            audio_bytes, output_format=miniaudio.SampleFormat.SIGNED16
-        )
-        samples = np.asarray(decoded.samples, dtype=np.int16)
-        samples = samples.reshape(-1, decoded.nchannels)
-        samples = resample_pcm(samples, decoded.sample_rate, self.device.sample_rate)
-        if samples.shape[1] == 1:
-            samples = np.repeat(samples, 2, axis=1)
-        return samples
+        try:
+            if cache_path.exists():
+                audio_bytes = cache_path.read_bytes()
+            else:
+                audio_bytes = asyncio.run(self._synthesize(text))
+                if audio_bytes:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_bytes(audio_bytes)
+            if not audio_bytes:
+                raise RuntimeError("语音合成没有返回音频")
+            if cancel_event is not None and cancel_event.is_set():
+                cache_path.unlink(missing_ok=True)
+                return None
+            decoded = miniaudio.decode(
+                audio_bytes, output_format=miniaudio.SampleFormat.SIGNED16
+            )
+            samples = np.asarray(decoded.samples, dtype=np.int16)
+            samples = samples.reshape(-1, decoded.nchannels)
+            samples = resample_pcm(
+                samples, decoded.sample_rate, self.device.sample_rate
+            )
+            if samples.shape[1] == 1:
+                samples = np.repeat(samples, 2, axis=1)
+            return PreparedAudio(samples=samples, cache_path=cache_path)
+        except Exception:
+            cache_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def discard_prepared(prepared: PreparedAudio) -> None:
+        prepared.cache_path.unlink(missing_ok=True)
 
     def play_prepared(
         self,
-        samples: np.ndarray,
+        prepared: PreparedAudio,
         cancel_event: threading.Event | None = None,
     ) -> None:
-        if cancel_event is not None and cancel_event.is_set():
-            return
-        sd.play(
-            samples,
-            self.device.sample_rate,
-            device=self.device.index,
-            blocking=True,
-        )
+        try:
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            sd.play(
+                prepared.samples,
+                self.device.sample_rate,
+                device=self.device.index,
+                blocking=True,
+            )
+        finally:
+            self.discard_prepared(prepared)
 
     def say(self, text: str, cancel_event: threading.Event | None = None) -> None:
-        samples = self.prepare(text, cancel_event)
-        if samples is not None:
-            self.play_prepared(samples, cancel_event)
+        prepared = self.prepare(text, cancel_event)
+        if prepared is not None:
+            self.play_prepared(prepared, cancel_event)
 
 
 class OnlineSearchTools:
@@ -1541,6 +1632,38 @@ class OllamaClient:
             self.remember(question, answer)
         return answer
 
+    def detect_person(self, image_bytes: bytes) -> bool:
+        image_base64 = base64.b64encode(image_bytes).decode("ascii")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "判断图像中是否出现真实的人，包括只露出部分身体的人。"
+                    "有人只回答PERSON，无人只回答EMPTY，不要解释。"
+                ),
+            },
+            {"role": "user", "content": "检查画面。", "images": [image_base64]},
+        ]
+        return parse_person_presence(self._chat(messages, 0.0, 8))
+
+    def describe_scene(self, image_bytes: bytes) -> str:
+        image_base64 = base64.b64encode(image_bytes).decode("ascii")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是摄像头画面播报器。只描述当前图片中明确可见的主体、动作和变化，"
+                    "用一句自然中文，不超过60个汉字，不要猜测，不要Markdown。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": "简短播报这张画面。",
+                "images": [image_base64],
+            },
+        ]
+        return self._chat(messages, 0.2, 80).strip()
+
 
 class OnlineQwenClient:
     def __init__(self, config: Config) -> None:
@@ -1795,6 +1918,52 @@ class OnlineQwenClient:
             self.remember(question, answer)
         return answer
 
+    def detect_person(self, image_bytes: bytes) -> bool:
+        image_base64 = base64.b64encode(image_bytes).decode("ascii")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "判断图像中是否出现真实的人，包括只露出部分身体的人。"
+                    "有人只回答PERSON，无人只回答EMPTY，不要解释。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "检查画面。"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+                    },
+                ],
+            },
+        ]
+        return parse_person_presence(self._chat(messages, 0.0, 8))
+
+    def describe_scene(self, image_bytes: bytes) -> str:
+        image_base64 = base64.b64encode(image_bytes).decode("ascii")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是摄像头画面播报器。只描述当前图片中明确可见的主体、动作和变化，"
+                    "用一句自然中文，不超过60个汉字，不要猜测，不要Markdown。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "简短播报这张画面。"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+                    },
+                ],
+            },
+        ]
+        return self._chat(messages, 0.2, 80).strip()
+
 
 class ModelRouter:
     PROVIDER_ALIASES = {
@@ -1871,6 +2040,12 @@ class ModelRouter:
             question, image_bytes, on_segment, cancel_event
         )
 
+    def detect_person(self, image_bytes: bytes) -> bool:
+        return self._client().detect_person(image_bytes)
+
+    def describe_scene(self, image_bytes: bytes) -> str:
+        return self._client().describe_scene(image_bytes)
+
     def switch(self, provider: str) -> dict[str, str]:
         normalized = self.PROVIDER_ALIASES.get(provider.strip().casefold())
         if normalized is None:
@@ -1909,6 +2084,27 @@ class CameraFrameStore:
         self._analysis_snapshot: bytes | None = None
         self._assistant_status = "等待摄像头连接"
         self._last_answer = ""
+        self._presence_enabled = True
+        self._presence_initialized = False
+        self._person_present = False
+        self._presence_checking = False
+        self._presence_status = "等待建立画面基线"
+        self._presence_error = ""
+        self._presence_event_id = 0
+        self._presence_event_time = ""
+        self._presence_snapshot: bytes | None = None
+        self._pending_presence_alert = False
+        self._scene_broadcast_enabled = False
+        self._scene_broadcast_status = "动态画面播报已关闭"
+        self._scene_broadcast_error = ""
+        self._scene_broadcast_request_id = 0
+        self._pending_scene_broadcast: tuple[int, bytes] | None = None
+        self._processing_scene_broadcast_id: int | None = None
+        self._scene_broadcast_last_requested_at = 0.0
+        self._scene_broadcast_event_id = 0
+        self._scene_broadcast_event_time = ""
+        self._scene_broadcast_snapshot: bytes | None = None
+        self._last_scene_description = ""
 
     def update_frame(self, frame: bytes) -> None:
         with self._lock:
@@ -1952,6 +2148,162 @@ class CameraFrameStore:
         with self._lock:
             return self._analysis_snapshot_id, self._analysis_snapshot
 
+    def begin_presence_check(self) -> bool:
+        with self._lock:
+            if not self._presence_enabled or self._presence_checking:
+                return False
+            self._presence_checking = True
+            self._presence_status = "正在确认画面是否有人"
+            self._presence_error = ""
+            return True
+
+    def finish_presence_check(
+        self, person_present: bool, frame: bytes, reason: str
+    ) -> bool:
+        with self._lock:
+            if not self._presence_enabled:
+                self._presence_checking = False
+                return False
+            was_initialized = self._presence_initialized
+            previous = self._person_present
+            self._presence_initialized = True
+            self._person_present = person_present
+            self._presence_checking = False
+            self._presence_error = ""
+            triggered = (
+                reason != "baseline"
+                and was_initialized
+                and not previous
+                and person_present
+            )
+            if triggered:
+                self._presence_event_id += 1
+                self._presence_event_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._presence_snapshot = frame
+                self._pending_presence_alert = True
+                self._presence_status = "检测到有人进入画面"
+            else:
+                self._presence_status = "画面中有人" if person_present else "画面中无人"
+            return triggered
+
+    def fail_presence_check(self, error: str) -> None:
+        with self._lock:
+            self._presence_checking = False
+            if not self._presence_enabled:
+                return
+            self._presence_error = error
+            self._presence_status = "人物检测暂时不可用"
+
+    def set_presence_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._presence_enabled = enabled
+            self._presence_initialized = False
+            self._person_present = False
+            self._presence_checking = False
+            self._presence_error = ""
+            self._pending_presence_alert = False
+            self._presence_status = (
+                "等待建立画面基线" if enabled else "动态人物监测已关闭"
+            )
+
+    def presence_snapshot(self) -> tuple[int, bytes | None]:
+        with self._lock:
+            return self._presence_event_id, self._presence_snapshot
+
+    def consume_presence_alert(self) -> int | None:
+        with self._lock:
+            if not self._pending_presence_alert:
+                return None
+            self._pending_presence_alert = False
+            return self._presence_event_id
+
+    def set_scene_broadcast_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            if self._scene_broadcast_enabled == enabled:
+                return
+            self._scene_broadcast_enabled = enabled
+            self._pending_scene_broadcast = None
+            self._processing_scene_broadcast_id = None
+            self._scene_broadcast_last_requested_at = 0.0
+            self._scene_broadcast_error = ""
+            self._scene_broadcast_status = (
+                "等待画面变化" if enabled else "动态画面播报已关闭"
+            )
+
+    def scene_broadcast_enabled(self) -> bool:
+        with self._lock:
+            return self._scene_broadcast_enabled
+
+    def submit_scene_broadcast(
+        self, frame: bytes, cooldown_seconds: float
+    ) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            busy = (
+                self._pending_scene_broadcast is not None
+                or self._processing_scene_broadcast_id is not None
+            )
+            cooling_down = (
+                now - self._scene_broadcast_last_requested_at < cooldown_seconds
+            )
+            if not self._scene_broadcast_enabled or busy or cooling_down:
+                return False
+            self._scene_broadcast_request_id += 1
+            request_id = self._scene_broadcast_request_id
+            self._pending_scene_broadcast = (request_id, frame)
+            self._scene_broadcast_last_requested_at = now
+            self._scene_broadcast_error = ""
+            self._scene_broadcast_status = "已捕获变化画面，等待分析"
+            return True
+
+    def consume_scene_broadcast(self) -> tuple[int, bytes] | None:
+        with self._lock:
+            if not self._scene_broadcast_enabled:
+                self._pending_scene_broadcast = None
+                return None
+            pending = self._pending_scene_broadcast
+            if pending is None:
+                return None
+            self._pending_scene_broadcast = None
+            self._processing_scene_broadcast_id = pending[0]
+            self._scene_broadcast_status = "正在分析变化画面"
+            return pending
+
+    def finish_scene_broadcast(
+        self, request_id: int, frame: bytes, description: str
+    ) -> bool:
+        with self._lock:
+            if (
+                not self._scene_broadcast_enabled
+                or self._processing_scene_broadcast_id != request_id
+            ):
+                return False
+            self._processing_scene_broadcast_id = None
+            self._scene_broadcast_event_id = request_id
+            self._scene_broadcast_event_time = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            self._scene_broadcast_snapshot = frame
+            self._last_scene_description = description
+            self._scene_broadcast_error = ""
+            self._scene_broadcast_status = "画面内容已播报"
+            return True
+
+    def fail_scene_broadcast(self, request_id: int, error: str) -> None:
+        with self._lock:
+            if (
+                not self._scene_broadcast_enabled
+                or self._processing_scene_broadcast_id != request_id
+            ):
+                return
+            self._processing_scene_broadcast_id = None
+            self._scene_broadcast_error = error
+            self._scene_broadcast_status = "画面播报暂时不可用"
+
+    def scene_broadcast_snapshot(self) -> tuple[int, bytes | None]:
+        with self._lock:
+            return self._scene_broadcast_event_id, self._scene_broadcast_snapshot
+
     def set_assistant_status(self, status: str, answer: str | None = None) -> None:
         with self._lock:
             self._assistant_status = status
@@ -1967,6 +2319,24 @@ class CameraFrameStore:
                 "snapshot_request_id": self._snapshot_request_id,
                 "analysis_snapshot_id": self._analysis_snapshot_id,
                 "snapshot_pending": self._pending_snapshot_request_id is not None,
+                "presence_enabled": self._presence_enabled,
+                "presence_initialized": self._presence_initialized,
+                "person_present": self._person_present,
+                "presence_checking": self._presence_checking,
+                "presence_status": self._presence_status,
+                "presence_error": self._presence_error,
+                "presence_event_id": self._presence_event_id,
+                "presence_event_time": self._presence_event_time,
+                "scene_broadcast_enabled": self._scene_broadcast_enabled,
+                "scene_broadcast_busy": (
+                    self._pending_scene_broadcast is not None
+                    or self._processing_scene_broadcast_id is not None
+                ),
+                "scene_broadcast_status": self._scene_broadcast_status,
+                "scene_broadcast_error": self._scene_broadcast_error,
+                "scene_broadcast_event_id": self._scene_broadcast_event_id,
+                "scene_broadcast_event_time": self._scene_broadcast_event_time,
+                "last_scene_description": self._last_scene_description,
                 "assistant_status": self._assistant_status,
                 "last_answer": self._last_answer,
             }
@@ -1976,6 +2346,194 @@ class CameraFrameStore:
             self._assistant_status = "正在关闭语音助手"
             self.shutdown_event.set()
             self._snapshot_ready.notify_all()
+
+
+class YoloPersonDetector:
+    def __init__(self, config: Config) -> None:
+        self.python_executable = config.yolo_python_executable
+        self.model_path = config.yolo_model_path
+        self.device = config.yolo_device
+        self.confidence = config.yolo_confidence
+        self.image_size = config.yolo_image_size
+        self.timeout_seconds = config.yolo_timeout_seconds
+        self._lock = threading.RLock()
+        self._process: subprocess.Popen | None = None
+        self._responses: queue.Queue[dict] = queue.Queue()
+        self._stderr_file = None
+        self._request_id = 0
+
+    def _read_responses(self, process: subprocess.Popen) -> None:
+        if process.stdout is None:
+            return
+        for line in process.stdout:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                self._responses.put(payload)
+        self._responses.put({"error": "YOLO检测进程已经退出"})
+
+    def _stop_process(self) -> None:
+        process = self._process
+        self._process = None
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        if self._stderr_file is not None:
+            self._stderr_file.close()
+            self._stderr_file = None
+        self._responses = queue.Queue()
+
+    def _start_process(self) -> None:
+        if self._process is not None and self._process.poll() is None:
+            return
+        if not self.python_executable:
+            raise RuntimeError("没有配置YOLO Python解释器")
+        if not self.model_path.is_file():
+            raise RuntimeError(f"没有找到YOLO模型：{self.model_path}")
+        worker_path = APP_DIR / "yolo_person_worker.py"
+        if not worker_path.is_file():
+            raise RuntimeError("没有找到YOLO检测进程脚本")
+
+        logs_dir = APP_DIR / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        self._stderr_file = (logs_dir / "yolo-error.log").open(
+            "a", encoding="utf-8"
+        )
+        self._process = subprocess.Popen(
+            [
+                self.python_executable,
+                "-u",
+                str(worker_path),
+                "--model",
+                str(self.model_path),
+                "--device",
+                self.device,
+                "--confidence",
+                str(self.confidence),
+                "--image-size",
+                str(self.image_size),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self._stderr_file,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        threading.Thread(
+            target=self._read_responses,
+            args=(self._process,),
+            name="yolo-response-reader",
+            daemon=True,
+        ).start()
+        try:
+            ready = self._responses.get(timeout=self.timeout_seconds)
+        except queue.Empty as error:
+            self._stop_process()
+            raise RuntimeError("YOLO模型加载超时") from error
+        if not ready.get("ready"):
+            message = str(ready.get("error") or "YOLO模型加载失败")
+            self._stop_process()
+            raise RuntimeError(message)
+        print(f"YOLO人物检测：已加载 / GPU {self.device} / {self.model_path.name}")
+
+    def detect_person(self, image_bytes: bytes) -> bool:
+        with self._lock:
+            self._start_process()
+            process = self._process
+            if process is None or process.stdin is None:
+                raise RuntimeError("YOLO检测进程不可用")
+            self._request_id += 1
+            request_id = self._request_id
+            request = {
+                "id": request_id,
+                "jpeg": base64.b64encode(image_bytes).decode("ascii"),
+            }
+            try:
+                process.stdin.write(json.dumps(request) + "\n")
+                process.stdin.flush()
+            except (BrokenPipeError, OSError) as error:
+                self._stop_process()
+                raise RuntimeError("无法向YOLO检测进程发送图像") from error
+
+            deadline = time.monotonic() + self.timeout_seconds
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._stop_process()
+                    raise RuntimeError("YOLO人物检测超时")
+                try:
+                    response = self._responses.get(timeout=remaining)
+                except queue.Empty as error:
+                    self._stop_process()
+                    raise RuntimeError("YOLO人物检测超时") from error
+                if response.get("id") not in {None, request_id}:
+                    continue
+                if response.get("error"):
+                    message = str(response["error"])
+                    self._stop_process()
+                    raise RuntimeError(message)
+                return bool(response.get("person"))
+
+    def close(self) -> None:
+        with self._lock:
+            self._stop_process()
+
+
+class PersonPresenceMonitor:
+    def __init__(
+        self,
+        store: CameraFrameStore,
+        detector,
+        enabled: bool = True,
+    ) -> None:
+        self.store = store
+        self.detector = detector
+        self.enabled = enabled
+        self.store.set_presence_enabled(enabled)
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.store.set_presence_enabled(enabled)
+
+    def submit(self, frame: bytes, reason: str) -> bool:
+        if not self.enabled or not self.store.begin_presence_check():
+            return False
+        normalized_reason = "baseline" if reason == "baseline" else "motion"
+        threading.Thread(
+            target=self._detect,
+            args=(frame, normalized_reason),
+            name="person-presence-check",
+            daemon=True,
+        ).start()
+        return True
+
+    def _detect(self, frame: bytes, reason: str) -> None:
+        try:
+            person_present = self.detector.detect_person(frame)
+            triggered = self.store.finish_presence_check(
+                person_present, frame, reason
+            )
+        except Exception as error:
+            print(f"[动态监测失败] {error}", file=sys.stderr)
+            self.store.fail_presence_check(str(error))
+            return
+        state = "person" if person_present else "empty"
+        transition = " / entered" if triggered else ""
+        print(f"[presence monitor] {state}{transition}")
+
+    def close(self) -> None:
+        close = getattr(self.detector, "close", None)
+        if close is not None:
+            close()
 
 
 class DashboardHTTPServer(ThreadingHTTPServer):
@@ -1989,11 +2547,13 @@ class DashboardHTTPServer(ThreadingHTTPServer):
         store: CameraFrameStore,
         config: Config,
         model_router: ModelRouter,
+        presence_monitor: PersonPresenceMonitor,
     ):
         super().__init__(address, handler)
         self.store = store
         self.config = config
         self.model_router = model_router
+        self.presence_monitor = presence_monitor
 
 
 class DashboardHTTPServerV6(DashboardHTTPServer):
@@ -2046,6 +2606,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             "label": self.server.config.ollama_model,
                         },
                     ],
+                    "person_monitor": {
+                        "enabled": self.server.presence_monitor.enabled,
+                        "detector": self.server.config.person_detector,
+                        "sensitivity": self.server.config.person_motion_sensitivity,
+                        "min_area_percent": self.server.config.person_motion_min_area_percent,
+                        "consecutive_frames": self.server.config.person_motion_consecutive_frames,
+                        "cooldown_seconds": self.server.config.person_motion_cooldown_seconds,
+                    },
+                    "scene_broadcast": {
+                        "enabled": self.server.store.scene_broadcast_enabled(),
+                        "cooldown_seconds": self.server.config.scene_broadcast_cooldown_seconds,
+                    },
                 }
             )
             return
@@ -2062,6 +2634,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(frame)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Snapshot-Id", str(snapshot_id))
+            self.end_headers()
+            self.wfile.write(frame)
+            return
+        if request_path == "/api/presence-snapshot":
+            event_id, frame = self.server.store.presence_snapshot()
+            if frame is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(frame)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Presence-Event-Id", str(event_id))
+            self.end_headers()
+            self.wfile.write(frame)
+            return
+        if request_path == "/api/scene-snapshot":
+            event_id, frame = self.server.store.scene_broadcast_snapshot()
+            if frame is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(frame)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Scene-Event-Id", str(event_id))
             self.end_headers()
             self.wfile.write(frame)
             return
@@ -2096,7 +2694,58 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
             return
-        if request_path not in {"/api/frame", "/api/snapshot"}:
+        if request_path == "/api/person-monitor":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0 or content_length > 1024:
+                    raise ValueError("无效的请求内容")
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                enabled = payload.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled 必须是布尔值")
+                self.server.presence_monitor.set_enabled(enabled)
+                self._send_json({"ok": True, "enabled": enabled})
+            except (ValueError, json.JSONDecodeError) as error:
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
+        if request_path == "/api/scene-broadcast":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0 or content_length > 1024:
+                    raise ValueError("无效的请求内容")
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                enabled = payload.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled 必须是布尔值")
+                self.server.store.set_scene_broadcast_enabled(enabled)
+                queued = False
+                if enabled:
+                    current_frame = self.server.store.latest_frame(
+                        self.server.config.camera_frame_max_age_seconds
+                    )
+                    if current_frame is not None:
+                        queued = self.server.store.submit_scene_broadcast(
+                            current_frame,
+                            self.server.config.scene_broadcast_cooldown_seconds,
+                        )
+                self._send_json(
+                    {"ok": True, "enabled": enabled, "queued": queued}
+                )
+            except (ValueError, json.JSONDecodeError) as error:
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
+        if request_path not in {
+            "/api/frame",
+            "/api/snapshot",
+            "/api/presence-check",
+            "/api/scene-description",
+        }:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
@@ -2109,6 +2758,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         frame = self.rfile.read(content_length)
         if not (frame.startswith(b"\xff\xd8") and frame.endswith(b"\xff\xd9")):
             self._send_json({"error": "JPEG required"}, HTTPStatus.BAD_REQUEST)
+            return
+        if request_path == "/api/presence-check":
+            accepted = self.server.presence_monitor.submit(
+                frame, self.headers.get("X-Presence-Reason", "motion")
+            )
+            self._send_json(
+                {"accepted": accepted},
+                HTTPStatus.ACCEPTED if accepted else HTTPStatus.TOO_MANY_REQUESTS,
+            )
+            return
+        if request_path == "/api/scene-description":
+            accepted = self.server.store.submit_scene_broadcast(
+                frame, self.server.config.scene_broadcast_cooldown_seconds
+            )
+            self._send_json(
+                {"accepted": accepted},
+                HTTPStatus.ACCEPTED if accepted else HTTPStatus.TOO_MANY_REQUESTS,
+            )
             return
         if request_path == "/api/snapshot":
             try:
@@ -2138,6 +2805,18 @@ class CameraDashboard:
         self.config = config
         self.model_router = model_router
         self.store = CameraFrameStore()
+        self.store.set_scene_broadcast_enabled(config.scene_broadcast_enabled)
+        if config.person_detector == "yolo":
+            person_detector = YoloPersonDetector(config)
+        elif config.person_detector == "qwen":
+            person_detector = model_router
+        else:
+            raise ValueError(
+                f"不支持的人物检测器：{config.person_detector}，请使用yolo或qwen"
+            )
+        self.presence_monitor = PersonPresenceMonitor(
+            self.store, person_detector, config.person_monitor_enabled
+        )
         self.server: DashboardHTTPServer | None = None
         self.servers: list[DashboardHTTPServer] = []
         self.threads: list[threading.Thread] = []
@@ -2159,6 +2838,7 @@ class CameraDashboard:
             self.store,
             self.config,
             self.model_router,
+            self.presence_monitor,
         )
         self.servers.append(self.server)
         thread = threading.Thread(
@@ -2175,6 +2855,7 @@ class CameraDashboard:
                     self.store,
                     self.config,
                     self.model_router,
+                    self.presence_monitor,
                 )
                 self.servers.append(ipv6_server)
                 ipv6_thread = threading.Thread(
@@ -2194,6 +2875,7 @@ class CameraDashboard:
         for server in self.servers:
             server.shutdown()
             server.server_close()
+        self.presence_monitor.close()
 
 
 class VoiceAssistant:
@@ -2420,6 +3102,9 @@ class VoiceAssistant:
                         pass
                     continue
                 if playback_failed or self.playback_cancel.is_set():
+                    discard = getattr(self.speaker, "discard_prepared", None)
+                    if discard is not None:
+                        discard(item_value)
                     continue
                 try:
                     # Synthesis is prefetched in streaming-tts, but WASAPI playback
@@ -2456,6 +3141,39 @@ class VoiceAssistant:
         if interrupt_action == "stop":
             return "已停止播报，可以继续提问"
         return "可以继续提问，无需再次唤醒"
+
+    def _broadcast_pending_scene(self) -> bool:
+        if not self.dashboard:
+            return False
+        pending = self.dashboard.store.consume_scene_broadcast()
+        if pending is None:
+            return False
+        request_id, frame = pending
+        try:
+            description = self.ollama.describe_scene(frame)
+        except Exception as error:
+            print(f"[动态画面分析失败] {error}", file=sys.stderr)
+            self.dashboard.store.fail_scene_broadcast(request_id, str(error))
+            return False
+        if not self.dashboard.store.finish_scene_broadcast(
+            request_id, frame, description
+        ):
+            return False
+        print(f"[动态画面播报] {description}")
+        self.dashboard.store.set_assistant_status("动态画面播报", description)
+        try:
+            interrupt_action = self._play_interruptible(
+                self.speaker.say, description, self.playback_cancel
+            )
+        except Exception as error:
+            print(f"[动态画面播报失败] {error}", file=sys.stderr)
+            self._play(self.speaker.chime, False)
+            return True
+        if interrupt_action is not None:
+            self.dashboard.store.set_assistant_status(
+                self._continuation_status(interrupt_action)
+            )
+        return True
 
     def run(self) -> None:
         sample_rate = self.input_device.sample_rate
@@ -2494,6 +3212,35 @@ class VoiceAssistant:
             while not (
                 self.dashboard and self.dashboard.store.shutdown_event.is_set()
             ):
+                if self.dashboard:
+                    scene_broadcasted = self._broadcast_pending_scene()
+                    if scene_broadcasted and state == "command":
+                        command_deadline = (
+                            time.monotonic()
+                            + self.config.command_timeout_seconds
+                        )
+                    presence_event_id = self.dashboard.store.consume_presence_alert()
+                    if presence_event_id is not None:
+                        alert = "检测到有人进入画面。"
+                        print(f"[动态监测提醒] 事件 {presence_event_id} / {alert}")
+                        if not self.dashboard.store.scene_broadcast_enabled():
+                            self.dashboard.store.set_assistant_status(
+                                "动态监测提醒", alert
+                            )
+                        if (
+                            self.config.person_alert_voice
+                            and not self.dashboard.store.scene_broadcast_enabled()
+                        ):
+                            try:
+                                self._play(self.speaker.say, alert)
+                            except Exception as error:
+                                print(f"[动态提醒播报失败] {error}", file=sys.stderr)
+                                self._play(self.speaker.chime, False)
+                        if state == "command":
+                            command_deadline = (
+                                time.monotonic()
+                                + self.config.command_timeout_seconds
+                            )
                 if state == "command" and time.monotonic() > command_deadline:
                     print("[会话结束] 一段时间没有继续提问，重新等待唤醒。")
                     self.ollama.end_conversation()
@@ -2874,6 +3621,9 @@ def main() -> int:
         f"{output_device.host_api} / {output_device.sample_rate} Hz"
     )
     speaker = Speaker(output_device, config)
+    removed_audio_files = speaker.clear_cache()
+    if removed_audio_files:
+        print(f"已清理上次遗留的语音缓存：{removed_audio_files} 个文件")
     if args.test_speaker:
         speaker.say("老叶语音助手已连接成功。")
         print("扬声器测试完成。")

@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+import json
 from pathlib import Path
 import queue
 import sys
@@ -37,11 +38,15 @@ from voice_assistant import (
     OnlineQwenClient,
     OnlineSearchTools,
     parse_weather_query,
+    parse_person_presence,
+    PersonPresenceMonitor,
+    PreparedAudio,
     resample_pcm,
     Speaker,
     take_speech_segments,
     strip_code_fence,
     VoiceAssistant,
+    YoloPersonDetector,
 )
 
 
@@ -66,6 +71,12 @@ class TextTests(unittest.TestCase):
         self.assertTrue(is_desktop_follow_up("保存到桌面"))
         self.assertTrue(is_desktop_follow_up("打开运行"))
         self.assertEqual(strip_code_fence("```python\nprint('ok')\n```"), "print('ok')")
+
+    def test_person_presence_result_parser(self) -> None:
+        self.assertTrue(parse_person_presence("PERSON"))
+        self.assertFalse(parse_person_presence("EMPTY"))
+        with self.assertRaisesRegex(RuntimeError, "无法识别"):
+            parse_person_presence("不确定")
 
     def test_weather_command_and_query(self) -> None:
         self.assertTrue(is_weather_command("帮我查询天气预报"))
@@ -182,6 +193,16 @@ class AudioTests(unittest.TestCase):
 
 
 class SpeakerTests(unittest.TestCase):
+    def test_startup_cleanup_removes_only_audio_cache(self) -> None:
+        with TemporaryDirectory() as directory:
+            cache_dir = Path(directory)
+            (cache_dir / "old.mp3").write_bytes(b"audio")
+            (cache_dir / "keep.txt").write_text("keep", encoding="utf-8")
+            with patch.object(Speaker, "CACHE_DIR", cache_dir):
+                self.assertEqual(Speaker.clear_cache(), 1)
+            self.assertFalse((cache_dir / "old.mp3").exists())
+            self.assertTrue((cache_dir / "keep.txt").exists())
+
     def test_synthesis_uses_configured_proxy(self) -> None:
         class FakeCommunicate:
             async def stream(self):
@@ -206,6 +227,53 @@ class SpeakerTests(unittest.TestCase):
             volume="+0%",
             proxy="http://127.0.0.1:52351",
         )
+
+    def test_played_audio_cache_is_deleted(self) -> None:
+        with TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "speech.mp3"
+            cache_path.write_bytes(b"audio")
+            prepared = PreparedAudio(
+                samples=np.zeros((8, 2), dtype=np.int16),
+                cache_path=cache_path,
+            )
+            speaker = Speaker(
+                SimpleNamespace(sample_rate=16000, index=1), SimpleNamespace()
+            )
+            with patch("voice_assistant.sd.play") as play:
+                speaker.play_prepared(prepared)
+            play.assert_called_once()
+            self.assertFalse(cache_path.exists())
+
+    def test_cancelled_or_failed_audio_cache_is_deleted(self) -> None:
+        speaker = Speaker(
+            SimpleNamespace(sample_rate=16000, index=1), SimpleNamespace()
+        )
+        with TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "cancelled.mp3"
+            cache_path.write_bytes(b"audio")
+            prepared = PreparedAudio(
+                samples=np.zeros((8, 2), dtype=np.int16),
+                cache_path=cache_path,
+            )
+            cancelled = threading.Event()
+            cancelled.set()
+            with patch("voice_assistant.sd.play") as play:
+                speaker.play_prepared(prepared, cancelled)
+            play.assert_not_called()
+            self.assertFalse(cache_path.exists())
+
+            failed_path = Path(directory) / "failed.mp3"
+            failed_path.write_bytes(b"audio")
+            failed = PreparedAudio(
+                samples=np.zeros((8, 2), dtype=np.int16),
+                cache_path=failed_path,
+            )
+            with (
+                patch("voice_assistant.sd.play", side_effect=RuntimeError("失败")),
+                self.assertRaisesRegex(RuntimeError, "失败"),
+            ):
+                speaker.play_prepared(failed)
+            self.assertFalse(failed_path.exists())
 
 
 class ProxyTests(unittest.TestCase):
@@ -277,6 +345,107 @@ class CameraFrameStoreTests(unittest.TestCase):
         self.assertFalse(store.status()["snapshot_pending"])
         self.assertFalse(store.submit_snapshot(request_id, b"late jpeg"))
 
+    def test_person_alert_only_fires_on_empty_to_person_transition(self) -> None:
+        store = CameraFrameStore()
+        self.assertTrue(store.begin_presence_check())
+        self.assertFalse(store.finish_presence_check(False, b"empty", "baseline"))
+        self.assertIsNone(store.consume_presence_alert())
+
+        self.assertTrue(store.begin_presence_check())
+        self.assertTrue(store.finish_presence_check(True, b"person", "motion"))
+        event_id = store.consume_presence_alert()
+        self.assertEqual(event_id, 1)
+        self.assertEqual(store.presence_snapshot(), (1, b"person"))
+
+        self.assertTrue(store.begin_presence_check())
+        self.assertFalse(store.finish_presence_check(True, b"same", "motion"))
+        self.assertIsNone(store.consume_presence_alert())
+
+    def test_disabling_presence_monitor_cancels_pending_and_stale_results(self) -> None:
+        store = CameraFrameStore()
+        self.assertTrue(store.begin_presence_check())
+        store.set_presence_enabled(False)
+        self.assertFalse(store.finish_presence_check(True, b"late", "motion"))
+        status = store.status()
+        self.assertFalse(status["presence_enabled"])
+        self.assertFalse(status["presence_initialized"])
+        self.assertEqual(status["presence_status"], "动态人物监测已关闭")
+        self.assertFalse(store.begin_presence_check())
+        self.assertIsNone(store.consume_presence_alert())
+
+    def test_scene_broadcast_uses_matching_snapshot_and_can_be_disabled(self) -> None:
+        store = CameraFrameStore()
+        self.assertFalse(store.submit_scene_broadcast(b"closed", 0))
+        store.set_scene_broadcast_enabled(True)
+        self.assertTrue(store.submit_scene_broadcast(b"scene", 0))
+        self.assertFalse(store.submit_scene_broadcast(b"busy", 0))
+        self.assertEqual(store.consume_scene_broadcast(), (1, b"scene"))
+        self.assertTrue(store.finish_scene_broadcast(1, b"scene", "一名男子走进房间。"))
+        self.assertEqual(store.scene_broadcast_snapshot(), (1, b"scene"))
+        status = store.status()
+        self.assertEqual(status["last_scene_description"], "一名男子走进房间。")
+        self.assertEqual(status["scene_broadcast_status"], "画面内容已播报")
+
+        self.assertTrue(store.submit_scene_broadcast(b"late", 0))
+        self.assertEqual(store.consume_scene_broadcast(), (2, b"late"))
+        store.set_scene_broadcast_enabled(False)
+        self.assertFalse(store.finish_scene_broadcast(2, b"late", "不应播报"))
+        self.assertEqual(store.status()["scene_broadcast_status"], "动态画面播报已关闭")
+
+
+class PersonPresenceMonitorTests(unittest.TestCase):
+    def test_monitor_classifies_frame_in_background(self) -> None:
+        store = CameraFrameStore()
+        model = Mock()
+        model.detect_person.return_value = False
+        monitor = PersonPresenceMonitor(store, model)
+        self.assertTrue(monitor.submit(b"jpeg", "baseline"))
+        deadline = time.monotonic() + 1
+        while store.status()["presence_checking"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(store.status()["presence_initialized"])
+        self.assertFalse(store.status()["person_present"])
+        model.detect_person.assert_called_once_with(b"jpeg")
+
+    def test_monitor_can_be_toggled_at_runtime(self) -> None:
+        store = CameraFrameStore()
+        model = Mock()
+        monitor = PersonPresenceMonitor(store, model, enabled=False)
+        self.assertFalse(monitor.submit(b"jpeg", "baseline"))
+        monitor.set_enabled(True)
+        model.detect_person.return_value = False
+        self.assertTrue(monitor.submit(b"jpeg", "baseline"))
+        deadline = time.monotonic() + 1
+        while store.status()["presence_checking"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(store.status()["presence_enabled"])
+        model.detect_person.assert_called_once_with(b"jpeg")
+
+
+class YoloPersonDetectorTests(unittest.TestCase):
+    def test_detector_sends_jpeg_to_persistent_worker(self) -> None:
+        config = SimpleNamespace(
+            yolo_python_executable="python",
+            yolo_model_path=Path("yolov8n.pt"),
+            yolo_device="0",
+            yolo_confidence=0.35,
+            yolo_image_size=640,
+            yolo_timeout_seconds=5.0,
+        )
+        detector = YoloPersonDetector(config)
+        process = Mock()
+        process.poll.return_value = None
+        process.stdin = Mock()
+        detector._process = process
+        detector._responses.put(
+            {"id": 1, "person": True, "count": 1, "confidence": 0.9}
+        )
+        self.assertTrue(detector.detect_person(b"jpeg"))
+        request = json.loads(process.stdin.write.call_args.args[0])
+        self.assertEqual(request["id"], 1)
+        self.assertEqual(request["jpeg"], "anBlZw==")
+        process.stdin.flush.assert_called_once()
+
 
 class OllamaClientTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -338,6 +507,28 @@ class OllamaClientTests(unittest.TestCase):
         self.assertIs(payload["think"], False)
         self.assertIs(payload["stream"], True)
         self.assertEqual(payload["messages"][-1]["images"], ["anBlZw=="])
+
+    def test_person_detection_uses_short_non_thinking_vision_request(self) -> None:
+        self.client._stream_request = Mock(
+            return_value=[{"message": {"content": "PERSON"}}]
+        )
+        self.assertTrue(self.client.detect_person(b"jpeg"))
+        _, payload = self.client._stream_request.call_args.args
+        self.assertIs(payload["think"], False)
+        self.assertEqual(payload["options"]["num_predict"], 8)
+        self.assertEqual(payload["messages"][-1]["images"], ["anBlZw=="])
+
+    def test_scene_description_is_short_and_does_not_change_history(self) -> None:
+        self.client._stream_request = Mock(
+            return_value=[{"message": {"content": "一名男子正在走进房间。"}}]
+        )
+        answer = self.client.describe_scene(b"jpeg")
+        _, payload = self.client._stream_request.call_args.args
+        self.assertEqual(answer, "一名男子正在走进房间。")
+        self.assertIs(payload["think"], False)
+        self.assertEqual(payload["options"]["num_predict"], 80)
+        self.assertEqual(payload["messages"][-1]["images"], ["anBlZw=="])
+        self.assertEqual(self.client.history, [])
 
     def test_warm_up_loads_model_without_thinking(self) -> None:
         self.client.warm_up()
@@ -416,6 +607,30 @@ class OnlineQwenClientTests(unittest.TestCase):
         self.assertEqual(
             user_content[1]["image_url"]["url"], "data:image/jpeg;base64,anBlZw=="
         )
+
+    def test_online_person_detection_uses_short_non_thinking_request(self) -> None:
+        self.client._stream_request = Mock(
+            return_value=[{"choices": [{"delta": {"content": "EMPTY"}}]}]
+        )
+        self.assertFalse(self.client.detect_person(b"jpeg"))
+        _, payload = self.client._stream_request.call_args.args
+        self.assertIs(payload["enable_thinking"], False)
+        self.assertEqual(payload["max_tokens"], 8)
+        image_url = payload["messages"][-1]["content"][1]["image_url"]["url"]
+        self.assertEqual(image_url, "data:image/jpeg;base64,anBlZw==")
+
+    def test_online_scene_description_does_not_change_history(self) -> None:
+        self.client._stream_request = Mock(
+            return_value=[{"choices": [{"delta": {"content": "桌前坐着一名男子。"}}]}]
+        )
+        answer = self.client.describe_scene(b"jpeg")
+        _, payload = self.client._stream_request.call_args.args
+        self.assertEqual(answer, "桌前坐着一名男子。")
+        self.assertIs(payload["enable_thinking"], False)
+        self.assertEqual(payload["max_tokens"], 80)
+        image_url = payload["messages"][-1]["content"][1]["image_url"]["url"]
+        self.assertEqual(image_url, "data:image/jpeg;base64,anBlZw==")
+        self.assertEqual(self.client.history, [])
 
 
 class ModelRouterTests(unittest.TestCase):

@@ -111,6 +111,36 @@
     .model-row button { white-space: nowrap; }
     .model-message { margin: 7px 0 0; min-height: 20px; color: #8fa69f; font-size: 12px; }
     .model-message.error { color: #e6aaa3; }
+    .presence-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .presence-switch { display: inline-flex; align-items: center; gap: 8px; color: #9eb4ad; font-size: 12px; cursor: pointer; }
+    .presence-switch input { position: absolute; opacity: 0; pointer-events: none; }
+    .presence-track {
+      position: relative;
+      width: 38px;
+      height: 22px;
+      border-radius: 999px;
+      background: #31443f;
+      transition: background .18s ease;
+    }
+    .presence-track::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #d7e4e0;
+      transition: transform .18s ease;
+    }
+    .presence-switch input:checked + .presence-track { background: #2bc99c; }
+    .presence-switch input:checked + .presence-track::after { transform: translateX(16px); background: #05271e; }
+    .presence-switch input:focus-visible + .presence-track { outline: 2px solid #a4ffe5; outline-offset: 2px; }
+    .presence-switch input:disabled + .presence-track { opacity: .55; cursor: wait; }
+    .presence-state { margin: 8px 0 3px; color: #bcd1ca; line-height: 1.45; }
+    .presence-state.alert { color: #ffd08a; }
+    .presence-detail { color: #78928a; font-size: 12px; }
+    .presence-image[hidden] { display: none; }
     .snapshot-panel[hidden] { display: none; }
     .snapshot-image {
       display: block;
@@ -196,6 +226,32 @@
           </div>
           <p id="modelMessage" class="model-message"></p>
         </div>
+        <div id="presencePanel">
+          <div class="presence-heading">
+            <div class="label">动态人物监测</div>
+            <label class="presence-switch">
+              <input id="presenceToggle" type="checkbox" role="switch" aria-label="开启动态人物监测">
+              <span class="presence-track" aria-hidden="true"></span>
+              <span id="presenceToggleText">已关闭</span>
+            </label>
+          </div>
+          <p id="presenceState" class="presence-state">正在初始化</p>
+          <small id="presenceDetail" class="presence-detail">本地检测画面变化，模型确认是否有人</small>
+          <img id="presenceImage" class="snapshot-image presence-image" hidden alt="检测到有人时的画面快照">
+        </div>
+        <div id="sceneBroadcastPanel">
+          <div class="presence-heading">
+            <div class="label">动态画面播报</div>
+            <label class="presence-switch">
+              <input id="sceneBroadcastToggle" type="checkbox" role="switch" aria-label="开启动态画面播报">
+              <span class="presence-track" aria-hidden="true"></span>
+              <span id="sceneBroadcastToggleText">已关闭</span>
+            </label>
+          </div>
+          <p id="sceneBroadcastState" class="presence-state">动态画面播报已关闭</p>
+          <small id="sceneBroadcastDetail" class="presence-detail">开启后，画面变化时会抓拍、描述并播报</small>
+          <img id="sceneBroadcastImage" class="snapshot-image presence-image" hidden alt="动态播报所分析的画面快照">
+        </div>
         <div id="snapshotPanel" class="snapshot-panel" hidden>
           <div class="label">本次分析快照</div>
           <img id="snapshotImage" class="snapshot-image" alt="本次视觉回答所分析的摄像头快照">
@@ -221,6 +277,16 @@
     const modelSelect = document.querySelector('#modelSelect');
     const switchModelButton = document.querySelector('#switchModelButton');
     const modelMessage = document.querySelector('#modelMessage');
+    const presenceToggle = document.querySelector('#presenceToggle');
+    const presenceToggleText = document.querySelector('#presenceToggleText');
+    const presenceState = document.querySelector('#presenceState');
+    const presenceDetail = document.querySelector('#presenceDetail');
+    const presenceImage = document.querySelector('#presenceImage');
+    const sceneBroadcastToggle = document.querySelector('#sceneBroadcastToggle');
+    const sceneBroadcastToggleText = document.querySelector('#sceneBroadcastToggleText');
+    const sceneBroadcastState = document.querySelector('#sceneBroadcastState');
+    const sceneBroadcastDetail = document.querySelector('#sceneBroadcastDetail');
+    const sceneBroadcastImage = document.querySelector('#sceneBroadcastImage');
     const snapshotPanel = document.querySelector('#snapshotPanel');
     const snapshotImage = document.querySelector('#snapshotImage');
     const shutdownButton = document.querySelector('#shutdownButton');
@@ -229,12 +295,69 @@
     let snapshotRequestInFlight = 0;
     let lastSnapshotRequestId = 0;
     let displayedSnapshotId = 0;
+    let displayedPresenceEventId = 0;
+    let displayedSceneBroadcastEventId = 0;
+    let presenceRequestInFlight = false;
+    let sceneBroadcastRequestInFlight = false;
+    let presenceRetryTimer = 0;
+    let presenceBackground = null;
+    let presenceStartedAt = 0;
+    let presenceChangedFrames = 0;
+    let lastPresenceMotionAt = 0;
+    let presenceSettings = {
+      enabled: true,
+      sensitivity: 70,
+      min_area_percent: 0.8,
+      consecutive_frames: 3,
+      cooldown_seconds: 5,
+    };
+    let sceneBroadcastSettings = {
+      enabled: false,
+      cooldown_seconds: 12,
+    };
+    const presenceCanvas = document.createElement('canvas');
+    presenceCanvas.width = 160;
+    presenceCanvas.height = 90;
+    const presenceContext = presenceCanvas.getContext('2d', { willReadFrequently: true });
     let preferredKeywords = ['Deli', '1080P', 'MM101S'];
 
     function setCameraStatus(text, ready) {
       cameraState.textContent = text;
       livePill.classList.toggle('ready', ready);
       cameraCard.classList.toggle('connected', ready);
+    }
+
+    function resetPresenceDetection() {
+      presenceBackground = null;
+      presenceStartedAt = performance.now();
+      presenceChangedFrames = 0;
+      lastPresenceMotionAt = 0;
+      presenceRequestInFlight = false;
+      sceneBroadcastRequestInFlight = false;
+      if (presenceRetryTimer) clearTimeout(presenceRetryTimer);
+      presenceRetryTimer = 0;
+      if (presenceSettings.enabled) {
+        presenceState.textContent = '正在建立画面基线';
+      } else {
+        presenceState.textContent = '动态人物监测已关闭';
+      }
+      if (sceneBroadcastSettings.enabled) {
+        sceneBroadcastState.textContent = '正在建立画面基线';
+      } else {
+        sceneBroadcastState.textContent = '动态画面播报已关闭';
+      }
+    }
+
+    function syncPresenceToggle(enabled) {
+      presenceSettings.enabled = Boolean(enabled);
+      presenceToggle.checked = presenceSettings.enabled;
+      presenceToggleText.textContent = presenceSettings.enabled ? '已开启' : '已关闭';
+    }
+
+    function syncSceneBroadcastToggle(enabled) {
+      sceneBroadcastSettings.enabled = Boolean(enabled);
+      sceneBroadcastToggle.checked = sceneBroadcastSettings.enabled;
+      sceneBroadcastToggleText.textContent = sceneBroadcastSettings.enabled ? '已开启' : '已关闭';
     }
 
     async function enumerateCameras() {
@@ -264,6 +387,7 @@
         stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
         video.srcObject = stream;
         await video.play();
+        resetPresenceDetection();
         const cameras = await enumerateCameras();
         const activeId = stream.getVideoTracks()[0]?.getSettings().deviceId;
         if (!deviceId) {
@@ -308,6 +432,94 @@
       }
     }
 
+    async function sendPresenceCheck(reason) {
+      if (!presenceSettings.enabled || presenceRequestInFlight) return;
+      presenceRequestInFlight = true;
+      try {
+        const blob = await captureCurrentFrame();
+        if (!blob) return;
+        const response = await fetch('/api/presence-check', {
+          method: 'POST',
+          headers: { 'X-Presence-Reason': reason },
+          body: blob,
+        });
+        if (response.status === 429 && reason === 'motion' && !presenceRetryTimer) {
+          presenceRetryTimer = setTimeout(() => {
+            presenceRetryTimer = 0;
+            void sendPresenceCheck('motion');
+          }, 1200);
+        }
+      } catch (error) {
+        console.error(error);
+      } finally {
+        presenceRequestInFlight = false;
+      }
+    }
+
+    async function sendSceneDescription() {
+      if (!sceneBroadcastSettings.enabled || sceneBroadcastRequestInFlight) return;
+      sceneBroadcastRequestInFlight = true;
+      try {
+        const blob = await captureCurrentFrame();
+        if (!blob) return;
+        await fetch('/api/scene-description', { method: 'POST', body: blob });
+      } catch (error) {
+        console.error(error);
+      } finally {
+        sceneBroadcastRequestInFlight = false;
+      }
+    }
+
+    function monitorPresenceMotion() {
+      const motionMonitoringEnabled = presenceSettings.enabled || sceneBroadcastSettings.enabled;
+      if (!motionMonitoringEnabled || !stream || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+      presenceContext.drawImage(video, 0, 0, presenceCanvas.width, presenceCanvas.height);
+      const pixels = presenceContext.getImageData(0, 0, presenceCanvas.width, presenceCanvas.height).data;
+      const gray = new Uint8Array(presenceCanvas.width * presenceCanvas.height);
+      for (let pixel = 0, index = 0; pixel < pixels.length; pixel += 4, index += 1) {
+        gray[index] = Math.round(pixels[pixel] * .299 + pixels[pixel + 1] * .587 + pixels[pixel + 2] * .114);
+      }
+
+      const now = performance.now();
+      if (!presenceBackground) {
+        presenceBackground = Float32Array.from(gray);
+        presenceStartedAt = now;
+        if (presenceSettings.enabled) void sendPresenceCheck('baseline');
+        if (sceneBroadcastSettings.enabled) void sendSceneDescription();
+        return;
+      }
+
+      const threshold = Math.round(42 - (presenceSettings.sensitivity - 1) * 30 / 99);
+      let changedPixels = 0;
+      for (let index = 0; index < gray.length; index += 1) {
+        if (Math.abs(gray[index] - presenceBackground[index]) >= threshold) changedPixels += 1;
+      }
+      const changedPercent = changedPixels / gray.length * 100;
+      const significant = changedPercent >= presenceSettings.min_area_percent;
+      presenceChangedFrames = significant ? presenceChangedFrames + 1 : 0;
+
+      const learningRate = significant ? .002 : .025;
+      for (let index = 0; index < gray.length; index += 1) {
+        presenceBackground[index] += (gray[index] - presenceBackground[index]) * learningRate;
+      }
+
+      const warmedUp = now - presenceStartedAt >= 1200;
+      const motionCooldownSeconds = presenceSettings.enabled
+        ? presenceSettings.cooldown_seconds
+        : sceneBroadcastSettings.cooldown_seconds;
+      const cooledDown = now - lastPresenceMotionAt >= motionCooldownSeconds * 1000;
+      if (warmedUp && cooledDown && presenceChangedFrames >= presenceSettings.consecutive_frames) {
+        presenceChangedFrames = 0;
+        lastPresenceMotionAt = now;
+        // Treat the changed scene as the next baseline. This is essential for
+        // detecting both "person left" and a later "person returned" transition.
+        presenceBackground = Float32Array.from(gray);
+        presenceStartedAt = now;
+        if (presenceSettings.enabled) void sendPresenceCheck('motion');
+        if (sceneBroadcastSettings.enabled) void sendSceneDescription();
+      }
+    }
+
     async function sendAnalysisSnapshot(requestId) {
       if (snapshotRequestInFlight) return;
       snapshotRequestInFlight = requestId;
@@ -333,6 +545,36 @@
         const status = await response.json();
         assistantState.textContent = status.assistant_status;
         if (status.last_answer) lastAnswer.textContent = status.last_answer;
+        syncPresenceToggle(status.presence_enabled);
+        syncSceneBroadcastToggle(status.scene_broadcast_enabled);
+        presenceState.textContent = status.presence_status || '等待动态监测';
+        presenceState.classList.toggle(
+          'alert',
+          Number(status.presence_event_id || 0) > 0 && Boolean(status.person_present)
+        );
+        if (status.presence_error) {
+          presenceDetail.textContent = status.presence_error;
+        } else if (status.presence_event_time) {
+          presenceDetail.textContent = `最近事件：${status.presence_event_time}`;
+        }
+        const presenceEventId = Number(status.presence_event_id || 0);
+        if (presenceEventId > displayedPresenceEventId) {
+          displayedPresenceEventId = presenceEventId;
+          presenceImage.src = `/api/presence-snapshot?id=${presenceEventId}`;
+          presenceImage.hidden = false;
+        }
+        sceneBroadcastState.textContent = status.scene_broadcast_status || '等待动态播报';
+        if (status.scene_broadcast_error) {
+          sceneBroadcastDetail.textContent = status.scene_broadcast_error;
+        } else if (status.scene_broadcast_event_time) {
+          sceneBroadcastDetail.textContent = `最近播报：${status.scene_broadcast_event_time}`;
+        }
+        const sceneEventId = Number(status.scene_broadcast_event_id || 0);
+        if (sceneEventId > displayedSceneBroadcastEventId) {
+          displayedSceneBroadcastEventId = sceneEventId;
+          sceneBroadcastImage.src = `/api/scene-snapshot?id=${sceneEventId}`;
+          sceneBroadcastImage.hidden = false;
+        }
         const requestedSnapshotId = Number(status.snapshot_request_id || 0);
         if (
           status.snapshot_pending &&
@@ -359,6 +601,54 @@
 
     connectButton.addEventListener('click', () => connectCamera(cameraSelect.value));
     cameraSelect.addEventListener('change', () => connectCamera(cameraSelect.value));
+    presenceToggle.addEventListener('change', async () => {
+      const enabled = presenceToggle.checked;
+      presenceToggle.disabled = true;
+      presenceToggleText.textContent = enabled ? '开启中' : '关闭中';
+      try {
+        const response = await fetch('/api/person-monitor', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || '设置失败');
+        syncPresenceToggle(result.enabled);
+        resetPresenceDetection();
+        presenceDetail.textContent = result.enabled
+          ? '本地画面变化筛选 · YOLO GPU人物确认'
+          : '开启后，有人进入画面时会语音提示';
+      } catch (error) {
+        syncPresenceToggle(!enabled);
+        presenceDetail.textContent = error.message || '设置失败，请稍后重试';
+      } finally {
+        presenceToggle.disabled = false;
+      }
+    });
+    sceneBroadcastToggle.addEventListener('change', async () => {
+      const enabled = sceneBroadcastToggle.checked;
+      sceneBroadcastToggle.disabled = true;
+      sceneBroadcastToggleText.textContent = enabled ? '开启中' : '关闭中';
+      try {
+        const response = await fetch('/api/scene-broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || '设置失败');
+        syncSceneBroadcastToggle(result.enabled);
+        resetPresenceDetection();
+        sceneBroadcastDetail.textContent = result.enabled
+          ? '画面变化时会抓拍，并由当前视觉模型简短播报'
+          : '开启后，画面变化时会抓拍、描述并播报';
+      } catch (error) {
+        syncSceneBroadcastToggle(!enabled);
+        sceneBroadcastDetail.textContent = error.message || '设置失败，请稍后重试';
+      } finally {
+        sceneBroadcastToggle.disabled = false;
+      }
+    });
     switchModelButton.addEventListener('click', async () => {
       switchModelButton.disabled = true;
       modelSelect.disabled = true;
@@ -404,6 +694,20 @@
         const response = await fetch('/api/config');
         const config = await response.json();
         preferredKeywords = config.camera_name_keywords || preferredKeywords;
+        presenceSettings = { ...presenceSettings, ...(config.person_monitor || {}) };
+        sceneBroadcastSettings = { ...sceneBroadcastSettings, ...(config.scene_broadcast || {}) };
+        syncPresenceToggle(presenceSettings.enabled);
+        syncSceneBroadcastToggle(sceneBroadcastSettings.enabled);
+        if (!presenceSettings.enabled) {
+          presenceState.textContent = '动态人物监测已关闭';
+          presenceDetail.textContent = '开启后，有人进入画面时会语音提示';
+        } else if (presenceSettings.detector === 'yolo') {
+          presenceDetail.textContent = '本地画面变化筛选 · YOLO GPU人物确认';
+        }
+        if (sceneBroadcastSettings.enabled) {
+          sceneBroadcastState.textContent = '等待画面变化';
+          sceneBroadcastDetail.textContent = '画面变化时会抓拍，并由当前视觉模型简短播报';
+        }
         modelSelect.replaceChildren();
         (config.model_options || []).forEach((item) => {
           const option = document.createElement('option');
@@ -422,6 +726,7 @@
       }
       await connectCamera();
       setInterval(sendCurrentFrame, 1000);
+      setInterval(monitorPresenceMotion, 500);
       setInterval(refreshStatus, 1000);
       refreshStatus();
     })();

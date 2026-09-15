@@ -13,8 +13,14 @@
 当前选定的模型分析，并在网页显示同一张“本次分析快照”供人对照。在线模式会把快照发送
 到在线模型服务；切换为 Ollama 模式后才会完全在本机分析。
 
+网页还会在本机浏览器中进行低分辨率背景差分监测。画面连续多帧发生明显变化时，才提交
+一张变化快照给本机 GPU 上常驻的 YOLOv8n 确认是否有人。系统维护“无人/有人”状态，只在确认发生
+“无人到有人”的变化时语音提醒“检测到有人进入画面”，并在网页保留本次事件快照；
+同一个人持续停留不会反复播报。
+
 语音识别使用 Vosk 小型中文模型，模型下载完成后可离线识别。中文语音合成使用
 Microsoft Edge 在线语音服务，因此回答首次生成时需要。
+合成音频只作为本次播放的临时缓存；播放完成、被打断或播放失败后会立即删除。
 
 普通问答和视觉描述都使用流式输出。模型生成出完整句子后会立即进入语音播放队列；播放
 当前句子时，下一句会在后台预合成，以减少句子之间的停顿。
@@ -140,6 +146,17 @@ cd D:\project\eyes\voiceInteractive
 默认语音为 `zh-CN-YunyangNeural`，使用偏沉稳的成年男声并略微降低语速。
 `tts_proxy` 控制 Edge 在线语音合成代理，`network_proxy` 控制在线 Qwen 和天气接口代理；
 当前两项均设置为 `http://127.0.0.1:52351`。
+`person_monitor_enabled` 设置动态人物监测的启动默认值，页面开关可在运行时启用或关闭；`person_alert_voice` 控制语音提醒；
+`scene_broadcast_enabled` 设置动态画面播报的启动默认值，页面也可独立开关；开启后先播报当前画面，之后仅在画面连续发生明显变化时抓拍并播报。
+`scene_broadcast_cooldown_seconds` 控制两次画面播报之间的最短间隔，默认12秒，避免频繁打扰。
+`person_detector` 默认使用 `yolo`，也可改为 `qwen`。YOLO配置项包括外部Python解释器、
+模型路径、GPU设备、置信度、输入尺寸和超时时间。当前使用标准COCO版 `yolov8n.pt`，
+只推理类别0 `person`，模型在独立GPU进程中加载一次，不污染老叶自身的Python环境。
+灵敏度、
+最小变化面积、连续确认帧数和冷却时间分别由 `person_motion_sensitivity`、
+`person_motion_min_area_percent`、`person_motion_consecutive_frames`、
+`person_motion_cooldown_seconds` 调整。默认每0.5秒做一次本地变化检测，连续3帧变化后才让
+YOLO确认，以减少GPU推理次数和误报。
 程序优先选择同名端点的 Windows WASAPI 设备；也可以把设备名改成 `--list-devices`
 显示的数字编号。
 
