@@ -116,6 +116,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "enabled": self.server.native_camera.enabled,
                         "fallback_seconds": self.server.config.native_camera_fallback_seconds,
                         "retention_days": self.server.config.native_camera_event_retention_days,
+                        "max_megabytes": self.server.config.native_camera_event_max_megabytes,
+                        "cameras": [
+                            {
+                                "id": camera.id,
+                                "name": camera.name,
+                                "index": camera.index,
+                                "enabled": camera.enabled,
+                                "primary": camera.primary,
+                            }
+                            for camera in self.server.config.native_cameras
+                        ],
                     },
                 }
             )

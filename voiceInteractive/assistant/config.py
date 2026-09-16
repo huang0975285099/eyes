@@ -15,6 +15,17 @@ DEFAULT_MODEL_URL = (
 
 
 @dataclass(frozen=True)
+class NativeCameraConfig:
+    """One OpenCV camera monitored by the background service."""
+
+    id: str
+    name: str
+    index: int
+    enabled: bool
+    primary: bool
+
+
+@dataclass(frozen=True)
 class Config:
     input_device: str | int
     output_device: str | int
@@ -23,6 +34,7 @@ class Config:
     conversation_history_turns: int
     asr_accent_enhancement_enabled: bool
     asr_max_alternatives: int
+    barge_in_during_playback: bool
     tts_voice: str
     tts_rate: str
     tts_volume: str
@@ -57,12 +69,15 @@ class Config:
     camera_snapshot_timeout_seconds: float
     native_camera_enabled: bool
     native_camera_index: int
+    native_cameras: tuple[NativeCameraConfig, ...]
     native_camera_fallback_seconds: float
     native_camera_width: int
     native_camera_height: int
     native_camera_fps: int
     native_camera_save_snapshots: bool
     native_camera_event_retention_days: int
+    native_camera_event_max_megabytes: int
+    native_camera_cleanup_interval_minutes: int
     person_monitor_enabled: bool
     person_alert_voice: bool
     person_detector: str
@@ -103,8 +118,74 @@ class AudioDevice:
     channels: int
 
 
+def _load_native_cameras(raw: dict) -> tuple[NativeCameraConfig, ...]:
+    configured = raw.get("native_cameras")
+    if not isinstance(configured, list) or not configured:
+        configured = [
+            {
+                "id": "camera_1",
+                "name": "USB Camera 1",
+                "index": raw.get("native_camera_index", 0),
+                "enabled": True,
+                "primary": True,
+            }
+        ]
+
+    cameras: list[NativeCameraConfig] = []
+    used_ids: set[str] = set()
+    used_indexes: set[int] = set()
+    for position, item in enumerate(configured, start=1):
+        if not isinstance(item, dict):
+            continue
+        index = max(0, min(99, int(item.get("index", position - 1))))
+        if index in used_indexes:
+            continue
+        camera_id = str(item.get("id", f"camera_{position}")).strip()
+        camera_id = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in camera_id
+        ).strip("_")
+        if not camera_id:
+            camera_id = f"camera_{position}"
+        if camera_id in used_ids:
+            camera_id = f"{camera_id}_{position}"
+        used_ids.add(camera_id)
+        used_indexes.add(index)
+        cameras.append(
+            NativeCameraConfig(
+                id=camera_id,
+                name=str(item.get("name", f"USB Camera {position}")).strip()
+                or f"USB Camera {position}",
+                index=index,
+                enabled=bool(item.get("enabled", True)),
+                primary=bool(item.get("primary", False)),
+            )
+        )
+
+    if not cameras:
+        cameras.append(NativeCameraConfig("camera_1", "USB Camera 1", 0, True, True))
+    if not any(camera.enabled and camera.primary for camera in cameras):
+        first_enabled = next((camera for camera in cameras if camera.enabled), cameras[0])
+        cameras = [
+            NativeCameraConfig(
+                camera.id,
+                camera.name,
+                camera.index,
+                camera.enabled,
+                camera.id == first_enabled.id,
+            )
+            for camera in cameras
+        ]
+    return tuple(cameras)
+
+
 def load_config(path: Path) -> Config:
     raw = json.loads(path.read_text(encoding="utf-8"))
+    native_cameras = _load_native_cameras(raw)
+    primary_camera = next(
+        (camera for camera in native_cameras if camera.enabled and camera.primary),
+        native_cameras[0],
+    )
     model_path = Path(raw.get("model_path", "models/vosk-model-small-cn-0.22"))
     if not model_path.is_absolute():
         model_path = APP_DIR / model_path
@@ -147,6 +228,9 @@ def load_config(path: Path) -> Config:
         ),
         asr_max_alternatives=max(
             1, min(10, int(raw.get("asr_max_alternatives", 3)))
+        ),
+        barge_in_during_playback=bool(
+            raw.get("barge_in_during_playback", False)
         ),
         tts_voice=raw.get("tts_voice", "zh-CN-YunyangNeural"),
         tts_rate=raw.get("tts_rate", "+0%"),
@@ -200,7 +284,8 @@ def load_config(path: Path) -> Config:
             0.5, float(raw.get("camera_snapshot_timeout_seconds", 3.0))
         ),
         native_camera_enabled=bool(raw.get("native_camera_enabled", True)),
-        native_camera_index=max(0, min(9, int(raw.get("native_camera_index", 0)))),
+        native_camera_index=primary_camera.index,
+        native_cameras=native_cameras,
         native_camera_fallback_seconds=max(
             2.0, float(raw.get("native_camera_fallback_seconds", 5.0))
         ),
@@ -212,6 +297,12 @@ def load_config(path: Path) -> Config:
         ),
         native_camera_event_retention_days=max(
             1, int(raw.get("native_camera_event_retention_days", 7))
+        ),
+        native_camera_event_max_megabytes=max(
+            50, int(raw.get("native_camera_event_max_megabytes", 1024))
+        ),
+        native_camera_cleanup_interval_minutes=max(
+            5, int(raw.get("native_camera_cleanup_interval_minutes", 60))
         ),
         person_monitor_enabled=bool(raw.get("person_monitor_enabled", True)),
         person_alert_voice=bool(raw.get("person_alert_voice", True)),

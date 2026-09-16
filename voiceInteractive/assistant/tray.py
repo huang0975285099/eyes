@@ -6,6 +6,8 @@ import threading
 import webbrowser
 from typing import TYPE_CHECKING, Any
 
+from .windows_notification import WindowsNotificationService
+
 if TYPE_CHECKING:
     from .dashboard import CameraDashboard
 
@@ -54,12 +56,17 @@ class SystemTray:
         self.icon = pystray.Icon(
             "LaoYeVoiceAssistant", image, "老叶视觉语音助手", menu
         )
+        self.notifier = WindowsNotificationService(
+            dashboard.url,
+            fallback=self._notify_via_tray,
+        )
         self.dashboard.native_camera.add_event_listener(self.notify_motion)
 
     def start(self) -> None:
         self.icon.run_detached()
 
     def stop(self) -> None:
+        self.notifier.stop()
         try:
             self.icon.stop()
         except Exception:
@@ -71,10 +78,10 @@ class SystemTray:
     def _refresh(self, message: str) -> None:
         self.icon.update_menu()
         if self.notifications_enabled:
-            try:
-                self.icon.notify(message, "老叶视觉助手")
-            except Exception:
-                pass
+            self.notifier.show("老叶视觉助手", message)
+
+    def _notify_via_tray(self, title: str, message: str) -> None:
+        self.icon.notify(message, title)
 
     def toggle_native_camera(self, *_: Any) -> None:
         enabled = not self.dashboard.native_camera.enabled
@@ -108,21 +115,16 @@ class SystemTray:
         if not self.notifications_enabled:
             return
         score = float(event.get("motion_score", 0.0))
-        try:
-            self.icon.notify(
-                f"检测到持续画面变化，变化面积 {score:.2f}%",
-                "老叶视觉助手",
-            )
-        except Exception:
-            pass
+        camera_name = str(event.get("camera_name", "USB 摄像头"))
+        self.notifier.show(
+            "老叶视觉助手",
+            f"{camera_name} 检测到持续画面变化，变化面积 {score:.2f}%",
+        )
 
     def test_notification(self, *_: Any) -> None:
         if not self.notifications_enabled:
             return
-        try:
-            self.icon.notify("托盘与后台通知工作正常", "老叶视觉助手")
-        except Exception:
-            pass
+        self.notifier.show("老叶视觉助手", "Windows 原生后台通知工作正常")
 
     def exit_application(self, *_: Any) -> None:
         self.icon.stop()

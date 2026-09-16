@@ -175,7 +175,13 @@ class VoiceAssistant:
         self._consume_interrupt_action()
         self.playback_cancel.clear()
         self._clear_interrupt_audio()
-        self.barge_in_enabled.set()
+        # USB 摄像头的麦克风和扬声器距离很近，且没有硬件 AEC。默认在播报时
+        # 丢弃麦克风输入，避免把老叶自己的声音识别成唤醒词或停止命令。
+        config = getattr(self, "config", None)
+        if getattr(config, "barge_in_during_playback", True):
+            self.barge_in_enabled.set()
+        else:
+            self.barge_in_enabled.clear()
 
     def _end_interruptible_playback(self) -> str | None:
         self.barge_in_enabled.clear()

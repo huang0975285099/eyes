@@ -896,7 +896,7 @@
         nativeCameraState.classList.toggle('alert', Boolean(nativeStatus.active));
         nativeCameraDetail.textContent = nativeStatus.error || (
           nativeStatus.active
-            ? `后台正在监测 · ${Number(nativeStatus.fps || 0).toFixed(1)} FPS`
+            ? `后台正在监测 ${Number(nativeStatus.active_count || 1)}/${Number(nativeStatus.configured_count || 1)} 个摄像头 · ${Number(nativeStatus.fps || 0).toFixed(1)} FPS`
             : '网页使用摄像头时后台待机，网页关闭后自动接管'
         );
         const latestNativeEvent = nativeStatus.events?.[0];

@@ -12,6 +12,7 @@ from .config import DEFAULT_CONFIG, load_config
 from .core import VoiceAssistant
 from .dashboard import CameraDashboard
 from .llm import ModelRouter
+from .native_camera import list_native_cameras
 from .platform_utils import (
     configure_windows_console,
     find_audio_device,
@@ -32,6 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-devices", action="store_true", help="列出 PortAudio 音频设备"
     )
     parser.add_argument(
+        "--list-cameras", action="store_true", help="探测 OpenCV 摄像头索引"
+    )
+    parser.add_argument(
         "--download-model", action="store_true", help="只下载并校验识别模型"
     )
     parser.add_argument(
@@ -46,6 +50,9 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.list_devices:
         list_audio_devices()
+        return 0
+    if args.list_cameras:
+        list_native_cameras()
         return 0
 
     config = load_config(args.config.resolve())

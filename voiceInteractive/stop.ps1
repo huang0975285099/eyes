@@ -1,16 +1,36 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LogDir = Join-Path $ProjectDir 'logs'
 $StopLog = Join-Path $LogDir 'last-stop.log'
-$PidFile = Join-Path $LogDir 'assistant.pid'
-$TaskName = 'XiaobuVoiceAssistant'
+$RuntimeStateFile = Join-Path $LogDir 'runtime.json'
+$LegacyPidFile = Join-Path $LogDir 'assistant.pid'
+$TaskNames = @('LaoyeVoiceAssistant', 'XiaobuVoiceAssistant')
+$DashboardPort = 8765
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 
+if (Test-Path -LiteralPath $RuntimeStateFile) {
+    try {
+        $RuntimeState = Get-Content -LiteralPath $RuntimeStateFile -Raw | ConvertFrom-Json
+        if ($RuntimeState.port) {
+            $DashboardPort = [int]$RuntimeState.port
+        }
+    } catch {
+        $DashboardPort = 8765
+    }
+} else {
+    try {
+        $DefaultConfig = Get-Content -LiteralPath (Join-Path $ProjectDir 'config.json') -Raw | ConvertFrom-Json
+        if ($DefaultConfig.web_port) {
+            $DashboardPort = [int]$DefaultConfig.web_port
+        }
+    } catch {
+        $DashboardPort = 8765
+    }
+}
+
 function Get-DashboardListeners {
-    @(
-        Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue
-    )
+    @(Get-NetTCPConnection -LocalPort $DashboardPort -State Listen -ErrorAction SilentlyContinue)
 }
 
 function Get-AssistantPythonProcesses {
@@ -37,7 +57,7 @@ function Wait-ForDashboardStop([int]$Seconds) {
 function Request-AssistantShutdown {
     $Client = New-Object System.Net.Sockets.TcpClient
     try {
-        $Connect = $Client.BeginConnect('127.0.0.1', 8765, $null, $null)
+        $Connect = $Client.BeginConnect('127.0.0.1', $DashboardPort, $null, $null)
         if (-not $Connect.AsyncWaitHandle.WaitOne(3000)) {
             return $false
         }
@@ -69,23 +89,27 @@ function Save-StopResult([string]$Message) {
 }
 
 try {
-    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $Tasks = @(
+        foreach ($TaskName in $TaskNames) {
+            Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        }
+    )
     $InitialListeners = Get-DashboardListeners
-    $WasRunning = ($InitialListeners.Count -gt 0) -or ($Task -and $Task.State -eq 'Running')
+    $WasRunning = ($InitialListeners.Count -gt 0) -or @(
+        $Tasks | Where-Object { $_.State -eq 'Running' }
+    ).Count -gt 0
 
-    # 正常路径：让 Python 后台自己退出。这样会先关麦克风、HTTP 服务并写完日志。
+    # 正常路径：让 Python 后台自己退出，先释放麦克风、摄像头和 HTTP 服务。
     if ($InitialListeners.Count -gt 0) {
         $null = Request-AssistantShutdown
     }
-
     $StoppedGracefully = Wait-ForDashboardStop 12
 
     if (-not $StoppedGracefully) {
-        # 兜底只处理本项目的计划任务和 Python 进程，不会误杀其他 8765 服务。
-        if ($Task) {
-            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 750
+        foreach ($Task in $Tasks) {
+            Stop-ScheduledTask -TaskName $Task.TaskName -ErrorAction SilentlyContinue
         }
+        Start-Sleep -Milliseconds 750
 
         $Processes = Get-AssistantPythonProcesses
         $ProcessIds = @($Processes.ProcessId)
@@ -98,7 +122,7 @@ try {
                 continue
             }
             if ($ListenerProcess.CommandLine -notlike "*$ProjectDir*voice_assistant.py*") {
-                throw "端口 8765 被其他程序占用（进程 $ListenerPid），为安全起见未结束它。"
+                throw "端口 $DashboardPort 被其他程序占用（进程 $ListenerPid），为安全起见未结束它。"
             }
             if ($ListenerPid -notin $ProcessIds) {
                 $Processes += $ListenerProcess
@@ -106,7 +130,6 @@ try {
             }
         }
 
-        # 先结束子 Python，再结束启动器 Python。
         foreach ($Process in ($Processes | Sort-Object {
             if ($_.ParentProcessId -in $ProcessIds) { 0 } else { 1 }
         })) {
@@ -117,23 +140,24 @@ try {
 
         if (-not (Wait-ForDashboardStop 5)) {
             $RemainingPids = ((Get-DashboardListeners).OwningProcess | Select-Object -Unique) -join ', '
-            throw "停止失败，端口 8765 仍由进程 $RemainingPids 监听。"
+            throw "停止失败，端口 $DashboardPort 仍由进程 $RemainingPids 监听。"
         }
     }
 
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    foreach ($TaskName in $TaskNames) {
+        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        }
     }
-    if (Test-Path -LiteralPath $PidFile) {
-        Remove-Item -LiteralPath $PidFile -Force
-    }
+    Remove-Item -LiteralPath $RuntimeStateFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $LegacyPidFile -Force -ErrorAction SilentlyContinue
 
     if ($WasRunning) {
-        $Message = '老叶语音助手已停止，端口 8765 已释放。'
+        $Message = "老叶语音助手已停止，端口 $DashboardPort 已释放。"
         Write-Host $Message -ForegroundColor Green
     } else {
-        $Message = '老叶语音助手当前没有运行，端口 8765 已释放。'
+        $Message = "老叶语音助手当前没有运行，端口 $DashboardPort 已释放。"
         Write-Host $Message -ForegroundColor Yellow
     }
     Save-StopResult $Message

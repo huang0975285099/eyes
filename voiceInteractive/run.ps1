@@ -6,9 +6,12 @@ $OutputLog = Join-Path $LogDir 'assistant-output.log'
 $ErrorLog = Join-Path $LogDir 'assistant-error.log'
 $LauncherErrorLog = Join-Path $LogDir 'launcher-error.log'
 $StartLog = Join-Path $LogDir 'last-start.log'
-$PidFile = Join-Path $LogDir 'assistant.pid'
-$TaskName = 'XiaobuVoiceAssistant'
+$RuntimeStateFile = Join-Path $LogDir 'runtime.json'
+$TaskName = 'LaoyeVoiceAssistant'
+$LegacyTaskNames = @('XiaobuVoiceAssistant')
 $RunFailed = $false
+$DashboardPort = 8765
+$DashboardUrl = 'http://localhost:8765/'
 
 Set-Location -LiteralPath $ProjectDir
 $env:PYTHONUTF8 = '1'
@@ -30,7 +33,7 @@ function Get-RunningAssistant {
 function Test-Dashboard {
     $Client = New-Object System.Net.Sockets.TcpClient
     try {
-        $Connect = $Client.BeginConnect('127.0.0.1', 8765, $null, $null)
+        $Connect = $Client.BeginConnect('127.0.0.1', $DashboardPort, $null, $null)
         if (-not $Connect.AsyncWaitHandle.WaitOne(2000)) {
             return $false
         }
@@ -76,7 +79,7 @@ function Wait-AndActivateDashboard([string[]]$ProcessNames) {
 }
 
 function Open-CameraDashboard {
-    $Url = 'http://localhost:8765/'
+    $Url = $DashboardUrl
     $ChromeCandidates = @(
         (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
         (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'),
@@ -128,7 +131,21 @@ try {
         }
     }
 
-    $DiagnosticArguments = @('--list-devices', '--download-model', '--test-speaker')
+    $ConfigArgumentIndex = [Array]::IndexOf([object[]]$args, '--config')
+    $ConfigPath = Join-Path $ProjectDir 'config.json'
+    if ($ConfigArgumentIndex -ge 0 -and $ConfigArgumentIndex + 1 -lt $args.Count) {
+        $ConfigPath = [string]$args[$ConfigArgumentIndex + 1]
+        if (-not [System.IO.Path]::IsPathRooted($ConfigPath)) {
+            $ConfigPath = Join-Path $ProjectDir $ConfigPath
+        }
+    }
+    $RuntimeConfig = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    if ($RuntimeConfig.web_port) {
+        $DashboardPort = [int]$RuntimeConfig.web_port
+    }
+    $DashboardUrl = "http://localhost:$DashboardPort/"
+
+    $DiagnosticArguments = @('--list-devices', '--list-cameras', '--download-model', '--test-speaker')
     $IsDiagnosticRun = @($args | Where-Object { $_ -in $DiagnosticArguments }).Count -gt 0
 
     if ($IsDiagnosticRun) {
@@ -143,17 +160,23 @@ try {
     if ($ExistingAssistant) {
         $SuccessMessage = "老叶语音助手已经在后台运行（进程 $($ExistingAssistant.ProcessId)）。"
         Write-Host $SuccessMessage -ForegroundColor Green
-        Write-Host '正在打开摄像头页面：http://localhost:8765/'
+        Write-Host "正在打开摄像头页面：$DashboardUrl"
         Save-StartResult $SuccessMessage
         Open-CameraDashboard
         return
     }
 
-    $RuntimeConfig = Get-Content -LiteralPath (Join-Path $ProjectDir 'config.json') -Raw | ConvertFrom-Json
     if ($RuntimeConfig.llm_provider -in @('online', 'qwen', 'openai')) {
         Write-Host "在线模型：$($RuntimeConfig.online_model)" -ForegroundColor Green
     } else {
         & (Join-Path $ProjectDir 'ensure-ollama.ps1')
+    }
+
+    foreach ($LegacyTaskName in $LegacyTaskNames) {
+        if (Get-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $LegacyTaskName -Confirm:$false
+        }
     }
 
     Write-Host '老叶语音助手：正在后台启动……' -ForegroundColor Yellow
@@ -164,7 +187,16 @@ try {
         (Get-Process -Id $PID).Path
     }
     $HostScript = Join-Path $ProjectDir 'assistant-host.ps1'
-    $TaskArguments = "-WindowStyle Hidden -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$HostScript`""
+    $JsonItems = @(
+        $args | ForEach-Object {
+            ConvertTo-Json -InputObject ([string]$_) -Compress
+        }
+    )
+    $ArgumentsJson = '[' + ($JsonItems -join ',') + ']'
+    $ArgumentsBase64 = [System.Convert]::ToBase64String(
+        [System.Text.Encoding]::UTF8.GetBytes($ArgumentsJson)
+    )
+    $TaskArguments = "-WindowStyle Hidden -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$HostScript`" -AssistantArgumentsBase64 `"$ArgumentsBase64`""
     $TaskAction = New-ScheduledTaskAction -Execute $PowerShellExe -Argument $TaskArguments -WorkingDirectory $ProjectDir
     $TaskPrincipal = New-ScheduledTaskPrincipal `
         -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
@@ -181,6 +213,12 @@ try {
         -Principal $TaskPrincipal `
         -Settings $TaskSettings `
         -Force | Out-Null
+    [ordered]@{
+        task_name = $TaskName
+        config_path = (Resolve-Path -LiteralPath $ConfigPath).Path
+        port = $DashboardPort
+        url = $DashboardUrl
+    } | ConvertTo-Json | Set-Content -LiteralPath $RuntimeStateFile -Encoding UTF8
     Start-ScheduledTask -TaskName $TaskName
 
     $Deadline = [DateTime]::UtcNow.AddSeconds(40)
@@ -206,10 +244,10 @@ try {
     }
 
     Write-Host '老叶语音助手已由 Windows 后台任务托管。' -ForegroundColor Green
-    Write-Host '摄像头页面：http://localhost:8765/'
+    Write-Host "摄像头页面：$DashboardUrl"
     Write-Host '关闭此 PowerShell 窗口不会停止语音助手。'
     Write-Host '需要停止时运行：.\stop.ps1'
-    Save-StartResult '启动成功：http://localhost:8765/ 可以访问。'
+    Save-StartResult "启动成功：$DashboardUrl 可以访问。"
     Open-CameraDashboard
 } catch {
     $RunFailed = $true

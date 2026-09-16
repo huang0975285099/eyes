@@ -1,11 +1,11 @@
-"""浏览器关闭后接管 USB 摄像头的本机后台监控。"""
+"""浏览器关闭后接管一个或多个 USB 摄像头的本机后台监控。"""
 
 from __future__ import annotations
 
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -13,12 +13,31 @@ from typing import TYPE_CHECKING, Callable
 import cv2
 import numpy as np
 
-from .config import Config
+from .config import Config, NativeCameraConfig
 from .paths import APP_DIR
 
 if TYPE_CHECKING:
     from .camera import CameraFrameStore, PersonPresenceMonitor
     from .face import FaceRecognitionService
+
+
+def list_native_cameras(max_index: int = 9) -> None:
+    """Probe OpenCV indexes for the camera configuration diagnostic."""
+    found = 0
+    print("OpenCV 摄像头索引：")
+    for index in range(max_index + 1):
+        capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        if not capture.isOpened():
+            capture.release()
+            continue
+        ok, frame = capture.read()
+        if ok and frame is not None:
+            height, width = frame.shape[:2]
+            print(f"  [{index}] 可用 / {width}x{height}")
+            found += 1
+        capture.release()
+    if not found:
+        print("  未找到可读取的摄像头；请先关闭占用摄像头的浏览器或程序。")
 
 
 @dataclass(frozen=True)
@@ -89,7 +108,6 @@ class MotionDetector:
         )
         if triggered:
             self.changed_frames = 0
-            # 变化后的画面成为新基线，便于之后检测人员离开或再次进入。
             self.background = gray.astype("float")
             self.background_started_at = now
         else:
@@ -100,21 +118,32 @@ class MotionDetector:
 
 
 class MotionEventArchive:
-    """保存后台变化快照，并按保留天数自动清理。"""
+    """保存变化快照，并按保留天数与容量上限定期清理。"""
 
-    def __init__(self, retention_days: int, enabled: bool) -> None:
+    def __init__(
+        self,
+        retention_days: int,
+        enabled: bool,
+        max_megabytes: int = 1024,
+        cleanup_interval_minutes: int = 60,
+    ) -> None:
         self.directory = APP_DIR / "data" / "events"
         self.directory.mkdir(parents=True, exist_ok=True)
         self.retention_days = retention_days
         self.enabled = enabled
+        self.max_bytes = max_megabytes * 1024 * 1024
+        self.cleanup_interval_seconds = cleanup_interval_minutes * 60.0
         self._lock = threading.Lock()
-        self._events: deque[dict] = deque(maxlen=30)
-        self.cleanup()
-        for path in sorted(
+        self._cleanup_lock = threading.Lock()
+        self._last_cleanup_at = 0.0
+        self._events: deque[dict] = deque(maxlen=50)
+        self.cleanup(force=True)
+        paths = sorted(
             self.directory.glob("motion_*.jpg"),
             key=lambda item: item.stat().st_mtime,
             reverse=True,
-        )[:30]:
+        )[:50]
+        for path in paths:
             timestamp = datetime.fromtimestamp(path.stat().st_mtime)
             self._events.append(
                 {
@@ -124,25 +153,62 @@ class MotionEventArchive:
                 }
             )
 
-    def cleanup(self) -> int:
-        cutoff = datetime.now() - timedelta(days=self.retention_days)
-        removed = 0
-        for path in self.directory.glob("motion_*.jpg"):
-            try:
-                if datetime.fromtimestamp(path.stat().st_mtime) < cutoff:
-                    path.unlink()
-                    removed += 1
-            except OSError:
-                continue
-        return removed
+    def cleanup(self, force: bool = False) -> int:
+        now_monotonic = time.monotonic()
+        if (
+            not force
+            and now_monotonic - self._last_cleanup_at
+            < self.cleanup_interval_seconds
+        ):
+            return 0
+        if not self._cleanup_lock.acquire(blocking=False):
+            return 0
+        try:
+            self._last_cleanup_at = now_monotonic
+            cutoff = datetime.now() - timedelta(days=self.retention_days)
+            removed = 0
+            retained: list[tuple[Path, float, int]] = []
+            for path in self.directory.glob("motion_*.jpg"):
+                try:
+                    stat = path.stat()
+                    if datetime.fromtimestamp(stat.st_mtime) < cutoff:
+                        path.unlink()
+                        removed += 1
+                    else:
+                        retained.append((path, stat.st_mtime, stat.st_size))
+                except OSError:
+                    continue
 
-    def record(self, jpeg: bytes, score: float) -> dict:
+            total_bytes = sum(item[2] for item in retained)
+            if total_bytes > self.max_bytes:
+                for path, _, size in sorted(retained, key=lambda item: item[1]):
+                    try:
+                        path.unlink()
+                        total_bytes -= size
+                        removed += 1
+                    except OSError:
+                        continue
+                    if total_bytes <= self.max_bytes:
+                        break
+            return removed
+        finally:
+            self._cleanup_lock.release()
+
+    def record(
+        self,
+        jpeg: bytes,
+        score: float,
+        camera_id: str = "camera_1",
+        camera_name: str = "USB Camera 1",
+    ) -> dict:
         now = datetime.now()
-        event_id = now.strftime("%Y%m%d_%H%M%S_%f")
+        event_id = f"{camera_id}_{now.strftime('%Y%m%d_%H%M%S_%f')}"
         event = {
             "id": event_id,
             "display_time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "motion_score": round(score, 2),
+            "camera_id": camera_id,
+            "camera_name": camera_name,
             "snapshot_url": None,
         }
         if self.enabled:
@@ -151,10 +217,11 @@ class MotionEventArchive:
                 (self.directory / filename).write_bytes(jpeg)
                 event["snapshot_url"] = f"/api/motion-events/{filename}"
             except OSError:
-                # 磁盘只读或空间不足时，监控和语音提醒仍应继续工作。
+                # 磁盘只读或空间不足时，监控和通知仍应继续工作。
                 pass
         with self._lock:
             self._events.appendleft(event)
+        # 这里只做廉价的时间判断；实际目录扫描默认每小时最多一次。
         self.cleanup()
         return event
 
@@ -173,8 +240,24 @@ class MotionEventArchive:
         return path
 
 
+@dataclass
+class _CameraRuntime:
+    config: NativeCameraConfig
+    detector: MotionDetector = field(default_factory=MotionDetector)
+    capture: cv2.VideoCapture | None = None
+    thread: threading.Thread | None = None
+    state: str = "等待后台监控"
+    error: str = ""
+    active: bool = False
+    fps: float = 0.0
+    motion_score: float = 0.0
+    last_alert_at: float = 0.0
+    last_frame_at: float = 0.0
+    last_face_submit_at: float = 0.0
+
+
 class NativeCameraMonitor:
-    """网页画面中断后自动接管摄像头，网页恢复时主动释放设备。"""
+    """网页画面中断后接管配置中的全部 USB 摄像头。"""
 
     def __init__(
         self,
@@ -190,6 +273,8 @@ class NativeCameraMonitor:
         self.archive = MotionEventArchive(
             config.native_camera_event_retention_days,
             config.native_camera_save_snapshots,
+            config.native_camera_event_max_megabytes,
+            config.native_camera_cleanup_interval_minutes,
         )
         self.settings = MotionSettings(
             config.person_motion_sensitivity,
@@ -200,19 +285,13 @@ class NativeCameraMonitor:
         self._enabled = config.native_camera_enabled
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._capture: cv2.VideoCapture | None = None
-        self._detector = MotionDetector()
-        self._state = "等待网页摄像头"
-        self._error = ""
-        self._camera_active = False
-        self._fps = 0.0
-        self._motion_score = 0.0
-        self._last_alert_at = 0.0
-        self._last_frame_at = 0.0
-        self._last_face_submit_at = 0.0
         self._browser_claim_until = 0.0
         self._listeners: list[Callable[[dict], None]] = []
+        self._cameras = {
+            camera.id: _CameraRuntime(camera)
+            for camera in config.native_cameras
+            if camera.enabled
+        }
 
     @property
     def enabled(self) -> bool:
@@ -225,51 +304,93 @@ class NativeCameraMonitor:
     def set_enabled(self, enabled: bool) -> None:
         with self._lock:
             self._enabled = enabled
-            self._state = "等待网页摄像头" if enabled else "后台摄像头接管已关闭"
-            self._error = ""
+            for runtime in self._cameras.values():
+                runtime.state = "等待后台监控" if enabled else "后台摄像头接管已关闭"
+                runtime.error = ""
 
     def claim_for_browser(self, seconds: float = 12.0) -> None:
-        """Temporarily release the device so getUserMedia can acquire it."""
+        """暂时释放全部设备，让网页选择并独占其中一个摄像头。"""
         with self._lock:
             self._browser_claim_until = time.monotonic() + max(2.0, seconds)
-            self._state = "正在把摄像头交给网页"
+            for runtime in self._cameras.values():
+                runtime.state = "正在把摄像头交给网页"
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
         self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run, name="native-camera-monitor", daemon=True
-        )
-        self._thread.start()
+        for runtime in self._cameras.values():
+            if runtime.thread and runtime.thread.is_alive():
+                continue
+            runtime.thread = threading.Thread(
+                target=self._run_camera,
+                args=(runtime,),
+                name=f"native-camera-{runtime.config.id}",
+                daemon=True,
+            )
+            runtime.thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=4)
-        self._release_camera()
+        for runtime in self._cameras.values():
+            if runtime.thread:
+                runtime.thread.join(timeout=4)
+        for runtime in self._cameras.values():
+            self._release_camera(runtime)
 
     def status(self) -> dict:
         with self._lock:
+            cameras = [
+                {
+                    "id": runtime.config.id,
+                    "name": runtime.config.name,
+                    "index": runtime.config.index,
+                    "primary": runtime.config.primary,
+                    "active": runtime.active,
+                    "state": runtime.state,
+                    "error": runtime.error,
+                    "fps": round(runtime.fps, 1),
+                    "motion_score": round(runtime.motion_score, 2),
+                    "last_frame_at": runtime.last_frame_at,
+                }
+                for runtime in self._cameras.values()
+            ]
+            active_count = sum(1 for camera in cameras if camera["active"])
+            errors = [camera["error"] for camera in cameras if camera["error"]]
+            if not self._enabled:
+                state = "后台摄像头接管已关闭"
+            elif time.monotonic() < self._browser_claim_until:
+                state = "网页摄像头正在工作，后台待机"
+            elif active_count:
+                state = f"后台正在监测 {active_count}/{len(cameras)} 个摄像头"
+            elif cameras:
+                state = cameras[0]["state"]
+            else:
+                state = "没有启用后台摄像头"
             return {
                 "enabled": self._enabled,
-                "active": self._camera_active,
-                "state": self._state,
-                "error": self._error,
+                "active": active_count > 0,
+                "active_count": active_count,
+                "configured_count": len(cameras),
+                "state": state,
+                "error": "；".join(dict.fromkeys(errors)),
                 "camera_index": self.config.native_camera_index,
-                "fps": round(self._fps, 1),
-                "motion_score": round(self._motion_score, 2),
-                "last_frame_at": self._last_frame_at,
+                "fps": round(sum(camera["fps"] for camera in cameras), 1),
+                "motion_score": round(
+                    max((camera["motion_score"] for camera in cameras), default=0.0),
+                    2,
+                ),
+                "last_frame_at": max(
+                    (camera["last_frame_at"] for camera in cameras), default=0.0
+                ),
                 "browser_claimed": time.monotonic() < self._browser_claim_until,
+                "cameras": cameras,
                 "events": self.archive.events(),
             }
 
-    def _open_camera(self) -> cv2.VideoCapture:
-        index = self.config.native_camera_index
-        capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    def _open_camera(self, camera: NativeCameraConfig) -> cv2.VideoCapture:
+        capture = cv2.VideoCapture(camera.index, cv2.CAP_DSHOW)
         if not capture.isOpened():
             capture.release()
-            capture = cv2.VideoCapture(index, cv2.CAP_MSMF)
+            capture = cv2.VideoCapture(camera.index, cv2.CAP_MSMF)
         if capture.isOpened():
             capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.native_camera_width)
             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.native_camera_height)
@@ -277,16 +398,16 @@ class NativeCameraMonitor:
             capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return capture
 
-    def _release_camera(self) -> None:
-        capture = self._capture
-        self._capture = None
+    def _release_camera(self, runtime: _CameraRuntime) -> None:
+        capture = runtime.capture
+        runtime.capture = None
         if capture is not None:
             capture.release()
-        self._detector.reset()
+        runtime.detector.reset()
         with self._lock:
-            self._camera_active = False
-            self._fps = 0.0
-            self._motion_score = 0.0
+            runtime.active = False
+            runtime.fps = 0.0
+            runtime.motion_score = 0.0
 
     def _dispatch_event(self, event: dict) -> None:
         for callback in tuple(self._listeners):
@@ -295,61 +416,72 @@ class NativeCameraMonitor:
             except Exception:
                 continue
 
-    def _process_frame(self, frame: np.ndarray, now: float) -> None:
+    def _process_frame(
+        self, runtime: _CameraRuntime, frame: np.ndarray, now: float
+    ) -> None:
         encoded_ok, encoded = cv2.imencode(
             ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 84]
         )
         if not encoded_ok:
             return
         jpeg = encoded.tobytes()
-        self.store.update_frame(jpeg, source="native")
-        self._last_frame_at = time.time()
+        with self._lock:
+            runtime.last_frame_at = time.time()
 
-        presence_status = self.store.status()
-        if (
-            self.presence_monitor.enabled
-            and not presence_status["presence_initialized"]
-            and not presence_status["presence_checking"]
-        ):
-            self.presence_monitor.submit(jpeg, "baseline")
+        # 主摄像头继续为视觉问答、人物确认和人脸识别提供统一画面。
+        if runtime.config.primary:
+            self.store.update_frame(jpeg, source="native")
+            presence_status = self.store.status()
+            if (
+                self.presence_monitor.enabled
+                and not presence_status["presence_initialized"]
+                and not presence_status["presence_checking"]
+            ):
+                self.presence_monitor.submit(jpeg, "baseline")
 
-        if self.face_service.enabled and now - self._last_face_submit_at >= 1.2:
-            if self.face_service.submit(jpeg):
-                self._last_face_submit_at = now
+            if self.face_service.enabled and now - runtime.last_face_submit_at >= 1.2:
+                if self.face_service.submit(jpeg):
+                    runtime.last_face_submit_at = now
 
-        score, triggered = self._detector.process(
-            frame, self.settings, time.time(), self._last_alert_at
+        score, triggered = runtime.detector.process(
+            frame, self.settings, now, runtime.last_alert_at
         )
         with self._lock:
-            self._motion_score = score
+            runtime.motion_score = score
         if not triggered:
             return
-        self._last_alert_at = time.time()
-        event = self.archive.record(jpeg, score)
-        if self.presence_monitor.enabled:
-            self.presence_monitor.submit(jpeg, "motion")
-        if self.store.scene_broadcast_enabled():
-            self.store.submit_scene_broadcast(
-                jpeg, self.config.scene_broadcast_cooldown_seconds
-            )
+        runtime.last_alert_at = now
+        event = self.archive.record(
+            jpeg,
+            score,
+            runtime.config.id,
+            runtime.config.name,
+        )
+        if runtime.config.primary:
+            if self.presence_monitor.enabled:
+                self.presence_monitor.submit(jpeg, "motion")
+            if self.store.scene_broadcast_enabled():
+                self.store.submit_scene_broadcast(
+                    jpeg, self.config.scene_broadcast_cooldown_seconds
+                )
         self._dispatch_event(event)
 
-    def _run(self) -> None:
+    def _run_camera(self, runtime: _CameraRuntime) -> None:
         frame_count = 0
         fps_started_at = time.monotonic()
         failures = 0
         while not self._stop_event.is_set():
             if not self.enabled:
-                self._release_camera()
+                self._release_camera(runtime)
                 self._stop_event.wait(0.5)
                 continue
 
             if time.monotonic() < self._browser_claim_until:
-                if self._capture is not None:
-                    self._release_camera()
+                if runtime.capture is not None:
+                    self._release_camera(runtime)
                 with self._lock:
-                    self._state = "等待网页连接摄像头"
-                    self._error = ""
+                    runtime.state = "等待网页连接摄像头"
+                    runtime.error = ""
                 self._stop_event.wait(0.25)
                 continue
 
@@ -358,37 +490,39 @@ class NativeCameraMonitor:
                 browser_age is not None
                 and browser_age < self.config.native_camera_fallback_seconds
             ):
-                if self._capture is not None:
-                    self._release_camera()
+                if runtime.capture is not None:
+                    self._release_camera(runtime)
                 with self._lock:
-                    self._state = "网页摄像头正在工作，后台待机"
-                    self._error = ""
+                    runtime.state = "网页摄像头正在工作，后台待机"
+                    runtime.error = ""
                 self._stop_event.wait(0.5)
                 continue
 
-            if self._capture is None or not self._capture.isOpened():
-                self._capture = self._open_camera()
-                if not self._capture.isOpened():
-                    self._release_camera()
+            if runtime.capture is None or not runtime.capture.isOpened():
+                runtime.capture = self._open_camera(runtime.config)
+                if not runtime.capture.isOpened():
+                    self._release_camera(runtime)
                     with self._lock:
-                        self._state = "等待摄像头释放"
-                        self._error = "后台暂时无法打开摄像头，将自动重试"
+                        runtime.state = "等待摄像头释放"
+                        runtime.error = (
+                            f"{runtime.config.name}（索引 {runtime.config.index}）暂时无法打开"
+                        )
                     self._stop_event.wait(2.0)
                     continue
-                self._detector.reset()
+                runtime.detector.reset()
                 with self._lock:
-                    self._camera_active = True
-                    self._state = "后台摄像头已接管"
-                    self._error = ""
+                    runtime.active = True
+                    runtime.state = "后台摄像头已接管"
+                    runtime.error = ""
 
-            ok, frame = self._capture.read()
+            ok, frame = runtime.capture.read()
             if not ok or frame is None:
                 failures += 1
                 if failures >= 8:
-                    self._release_camera()
+                    self._release_camera(runtime)
                     with self._lock:
-                        self._state = "摄像头读取失败，正在重连"
-                        self._error = "连续读取失败"
+                        runtime.state = "摄像头读取失败，正在重连"
+                        runtime.error = f"{runtime.config.name} 连续读取失败"
                     failures = 0
                 self._stop_event.wait(0.05)
                 continue
@@ -399,10 +533,8 @@ class NativeCameraMonitor:
             elapsed = now - fps_started_at
             if elapsed >= 1.0:
                 with self._lock:
-                    self._fps = frame_count / elapsed
+                    runtime.fps = frame_count / elapsed
                 frame_count = 0
                 fps_started_at = now
-            self._process_frame(frame, now)
-
-            target_delay = 1.0 / self.config.native_camera_fps
-            self._stop_event.wait(max(0.0, target_delay))
+            self._process_frame(runtime, frame, now)
+            self._stop_event.wait(1.0 / self.config.native_camera_fps)

@@ -1,11 +1,11 @@
-# MM101S USB 摄像头语音助手
+# 老叶 USB 摄像头视觉语音助手
 
 这是一个面向 Windows 的最小可用语音交互程序：
 
 1. 从 `麦克风 (Deli-1080P-Camera-Audio)` 持续监听。
 2. 听到“老叶老叶”后回答“我在”。
 3. 听到“现在几点了”后读取电脑当前时间。
-4. 其他问题默认交给在线 `qwen3.8-flash` 回答，也可切换回本机 Ollama。
+4. 其他问题默认交给本机 Ollama `qwen3.5:4b` 回答，也可切换到在线 `qwen3.8-flash`。
 5. 从 `Speakers (Deli-1080P-Camera Audio)` 播报中文答案。
 
 启动时还会自动打开 `http://localhost:8765/` 摄像头页面。浏览器取得授权后，会显示
@@ -14,9 +14,10 @@
 到在线模型服务；切换为 Ollama 模式后才会完全在本机分析。
 
 程序同时驻留在 Windows 系统托盘。关闭摄像头页面不会退出老叶：网页画面中断约5秒后，
-本机 OpenCV 会自动接管 USB 摄像头，继续进行变化检测、YOLO人物确认、动态画面播报和
+本机 OpenCV 会自动接管配置中的一个或多个 USB 摄像头，继续进行变化检测、YOLO人物确认、动态画面播报和
 人脸识别；再次打开页面时，后台会先释放设备，再交还给浏览器。托盘菜单可以打开页面、
 切换后台接管及各项视觉能力，或安全退出整个助手。
+检测到持续变化时使用 Windows 10/11 原生通知中心提示；点击通知会打开控制台页面。
 
 网页还会在本机浏览器中进行低分辨率背景差分监测。画面连续多帧发生明显变化时，才提交
 一张变化快照给本机 GPU 上常驻的 YOLOv8n 确认是否有人。系统维护“无人/有人”状态，只在确认发生
@@ -24,7 +25,7 @@
 同一个人持续停留不会反复播报。
 
 语音识别使用 Vosk 小型中文模型，模型下载完成后可离线识别。中文语音合成使用
-Microsoft Edge 在线语音服务，因此回答首次生成时需要。
+Microsoft Edge 在线语音服务，因此语音合成需要网络。
 合成音频只作为本次播放的临时缓存；播放完成、被打断或播放失败后会立即删除。
 唤醒后的交流默认启用四川口音普通话增强：Vosk保留多个声学识别候选，内置命令优先选择
 语义可执行的候选，普通问题由当前Qwen结合候选和多轮上下文判断真实含义。该功能不改变
@@ -33,9 +34,9 @@ Microsoft Edge 在线语音服务，因此回答首次生成时需要。
 普通问答和视觉描述都使用流式输出。模型生成出完整句子后会立即进入语音播放队列；播放
 当前句子时，下一句会在后台预合成，以减少句子之间的停顿。
 
-老叶播报回答时，可以说“老叶老叶”“停一下”“别说了”“停止回答”或“停止播报”立即
-停止当前音频、剩余待播句子和本次模型生成。打断后仍处于当前连续对话中，可以直接提出
-新问题；被打断的不完整答案不会写入上下文。
+MM101S 的麦克风与扬声器距离很近且没有硬件回声消除，默认采用可靠的半双工模式：老叶
+播报时不监听麦克风，避免把自己的声音识别成唤醒词或停止命令。若以后使用带 AEC 的设备，
+可把 `barge_in_during_playback` 改为 `true`，恢复“停一下”等语音打断能力。
 
 ## 首次安装
 
@@ -54,8 +55,8 @@ cd D:\project\eyes\voiceInteractive
 .\run.ps1
 ```
 
-也可以直接双击 `启动小布.cmd`。这是从资源管理器启动时的推荐入口，窗口会保留启动结果，
-不会一闪而过。`logs/last-start.log` 会记录最近一次启动是否成功。
+也可以直接双击 `启动老叶.cmd`。这是从资源管理器启动时的统一入口；启动失败时窗口会保留
+错误信息。`logs/last-start.log` 会记录最近一次启动是否成功。
 
 `run.ps1` 会自动检查运行环境。在线模式直接连接配置的 Qwen 服务，不启动 Ollama；切换到
 本地模式后，脚本才会启动 Ollama 并检查本地模型是否已经安装。
@@ -151,7 +152,7 @@ cd D:\project\eyes\voiceInteractive
 设备名、唤醒词、连续对话等待时间、上下文轮数、TTS 声音和模型设置均可在
 `config.json` 中修改。`command_timeout_seconds` 控制会话空闲超时，
 `conversation_history_turns` 控制当前会话最多保留多少轮问答。
-默认语音为 `zh-CN-YunyangNeural`，使用偏沉稳的成年男声并略微降低语速。
+默认语音为 `zh-CN-YunyangNeural`，使用偏沉稳的成年男声；当前 `tts_rate` 为 `+25%`。
 `asr_accent_enhancement_enabled` 控制交流阶段的口音增强，`asr_max_alternatives` 控制
 Vosk保留的候选数量，默认3个。
 `tts_proxy` 控制 Edge 在线语音合成代理，`network_proxy` 控制在线 Qwen 和天气接口代理；
@@ -159,10 +160,25 @@ Vosk保留的候选数量，默认3个。
 `person_monitor_enabled` 设置动态人物监测的启动默认值，页面开关可在运行时启用或关闭；`person_alert_voice` 控制语音提醒；
 `scene_broadcast_enabled` 设置动态画面播报的启动默认值，页面也可独立开关；开启后先播报当前画面，之后仅在画面连续发生明显变化时抓拍并播报。
 `scene_broadcast_cooldown_seconds` 控制两次画面播报之间的最短间隔，默认12秒，避免频繁打扰。
-`tray_enabled` 和 `tray_notifications_enabled` 分别控制托盘图标与 Windows 通知。
-`native_camera_enabled` 控制浏览器关闭后的摄像头接管；摄像头索引、接管等待时间、分辨率、
-帧率和事件快照保留天数可通过 `native_camera_*` 配置项调整。后台变化快照保存在
-`data/events/`，默认保留7天并自动清理，不会提交到Git。
+`tray_enabled` 和 `tray_notifications_enabled` 分别控制托盘图标与 Windows 原生通知。
+`native_camera_enabled` 控制浏览器关闭后的摄像头接管；`native_cameras` 支持配置多个摄像头。
+每个启用的摄像头独立检测变化并告警；只有一个摄像头应标记 `primary: true`，它为视觉问答、
+YOLO人物确认、动态播报和人脸识别提供统一画面。网页占用摄像头期间，后台会暂时释放全部
+OpenCV 摄像头，网页关闭后自动恢复。
+
+第二个 USB 摄像头接入后，先停止后台助手，再运行 `run.ps1 --list-cameras` 查看 OpenCV 索引，
+然后增加配置：
+
+```json
+"native_cameras": [
+  {"id": "camera_1", "name": "Deli MM101S 1", "index": 0, "enabled": true, "primary": true},
+  {"id": "camera_2", "name": "Deli MM101S 2", "index": 1, "enabled": true, "primary": false}
+]
+```
+
+后台变化快照保存在 `data/events/`，不会提交到 Git。默认保留7天且总量不超过1024 MB；
+`native_camera_event_max_megabytes` 控制容量上限，目录清理默认每60分钟最多执行一次，避免
+每次告警都扫描磁盘。
 `person_detector` 默认使用 `yolo`，也可改为 `qwen`。YOLO配置项包括外部Python解释器、
 模型路径、GPU设备、置信度、输入尺寸和超时时间。当前使用标准COCO版 `yolov8n.pt`，
 只推理类别0 `person`，模型在独立GPU进程中加载一次，不污染老叶自身的Python环境。
@@ -193,7 +209,7 @@ YOLO确认，以减少GPU推理次数和误报。
 程序优先选择同名端点的 Windows WASAPI 设备；也可以把设备名改成 `--list-devices`
 显示的数字编号。
 
-当前默认使用在线模型。API 密钥优先读取 `QWEN_API_KEY` 环境变量；未设置时，从
+当前默认使用本机 Ollama。切换到在线模式时，API 密钥优先读取 `QWEN_API_KEY` 环境变量；未设置时，从
 `online_config_db` 指向的 qwenchat 数据库读取现有连接。在线 Qwen 和国内天气接口使用
 `network_proxy` 指定的代理；留空时才会直接连接：
 
@@ -228,7 +244,7 @@ YOLO确认，以减少GPU推理次数和误报。
 - 回答失败但识别正常：中文 TTS 需要；控制台仍会打印准确时间。
 - 旧 PowerShell 显示方框：请始终用 `run.ps1` 启动；脚本会切换 UTF-8，程序会尝试为
   旧控制台启用“新宋体”。如果窗口仍不支持中文字形，可在窗口属性中手动选择“新宋体”。
-- 启动窗口关闭：`run.ps1` 会注册并启动名为 `XiaobuVoiceAssistant` 的本机 Windows 后台
+- 启动窗口关闭：`run.ps1` 会注册并启动名为 `LaoyeVoiceAssistant` 的本机 Windows 后台
   任务，因此启动完成后 PowerShell 窗口可以安全关闭，语音监听和摄像头页面会继续运行。
   标准输出和错误分别保存在
   `logs/assistant-output.log`、`logs/assistant-error.log`；启动器错误保存在
@@ -240,18 +256,19 @@ YOLO确认，以减少GPU推理次数和误报。
 .\stop.ps1
 ```
 
-也可以点击网页中的“关闭老叶助手”，或直接双击 `停止小布.cmd`。后台提供固定的
+也可以点击网页中的“关闭老叶助手”，或直接双击 `停止老叶.cmd`。后台提供固定的
 `POST /api/shutdown` 安全关闭接口；`stop.ps1` 会先请求后台自行释放麦克风和网页端口，
 确认端口释放后再移除后台任务。只有旧版本没有关闭接口或退出超时时，脚本才会核对项目路径
 并结束本项目的 Python 进程。停止结果保存在 `logs/last-stop.log`。
 
 ## 稳定的后台边界
 
-启动和关闭只由以下三层负责，后续增加搜索、长期记忆等功能时不再改动这一层：
+启动和关闭只由以下入口负责，后续增加搜索、长期记忆等功能时不再增加另一套生命周期：
 
-1. `run.ps1`：准备所选模型和环境，并启动唯一后台任务。
-2. `voice_assistant.py`：持有麦克风、摄像头帧、模型会话和关闭事件。
-3. `stop.ps1` / 网页关闭按钮：通过 `/api/shutdown` 通知后台安全退出。
+1. `启动老叶.cmd` / `run.ps1`：准备所选模型和环境，并启动唯一后台任务。
+2. `assistant-host.ps1`：仅作为计划任务宿主，原样转发 `--config`、`--no-tray` 等参数。
+3. `voice_assistant.py`：持有麦克风、摄像头帧、模型会话和关闭事件。
+4. `停止老叶.cmd` / `stop.ps1` / 网页关闭按钮：通过 `/api/shutdown` 通知后台安全退出。
 
 搜索和记忆将作为 Python 后台内部的独立能力接入，不再另外启动一组需要单独关闭的进程。
 

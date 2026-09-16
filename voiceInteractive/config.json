@@ -9,6 +9,7 @@
   "conversation_history_turns": 6,
   "asr_accent_enhancement_enabled": true,
   "asr_max_alternatives": 3,
+  "barge_in_during_playback": false,
   "tts_voice": "zh-CN-YunyangNeural",
   "tts_rate": "+25%",
   "tts_volume": "+0%",
@@ -46,13 +47,23 @@
   "camera_frame_max_age_seconds": 6.0,
   "camera_snapshot_timeout_seconds": 3.0,
   "native_camera_enabled": true,
-  "native_camera_index": 0,
+  "native_cameras": [
+    {
+      "id": "camera_1",
+      "name": "Deli MM101S 1",
+      "index": 0,
+      "enabled": true,
+      "primary": true
+    }
+  ],
   "native_camera_fallback_seconds": 5.0,
   "native_camera_width": 1280,
   "native_camera_height": 720,
   "native_camera_fps": 5,
   "native_camera_save_snapshots": true,
   "native_camera_event_retention_days": 7,
+  "native_camera_event_max_megabytes": 1024,
+  "native_camera_cleanup_interval_minutes": 60,
   "person_monitor_enabled": true,
   "person_alert_voice": true,
   "person_detector": "yolo",
