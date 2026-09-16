@@ -128,6 +128,8 @@ def main() -> int:
             tray.stop()
         if dashboard:
             dashboard.stop()
+    if dashboard and dashboard.store.restart_event.is_set():
+        return 75
     return 0
 
 

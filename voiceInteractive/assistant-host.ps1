@@ -23,9 +23,17 @@ if ($AssistantArgumentsBase64) {
 }
 
 try {
-    & $VenvPython -u (Join-Path $ProjectDir 'voice_assistant.py') @AssistantArguments 1> $OutputLog 2> $ErrorLog
-    if ($LASTEXITCODE -ne 0) {
-        Add-Content -LiteralPath $ErrorLog -Value "语音助手退出代码：$LASTEXITCODE" -Encoding UTF8
+    while ($true) {
+        & $VenvPython -u (Join-Path $ProjectDir 'voice_assistant.py') @AssistantArguments 1> $OutputLog 2> $ErrorLog
+        $AssistantExitCode = $LASTEXITCODE
+        if ($AssistantExitCode -eq 75) {
+            Start-Sleep -Seconds 1
+            continue
+        }
+        if ($AssistantExitCode -ne 0) {
+            Add-Content -LiteralPath $ErrorLog -Value "语音助手退出代码：$AssistantExitCode" -Encoding UTF8
+        }
+        break
     }
 } catch {
     $_ | Out-String | Set-Content -LiteralPath $ErrorLog -Encoding UTF8

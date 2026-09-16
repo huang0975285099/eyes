@@ -221,6 +221,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.server.store.request_shutdown()
             self._send_json({"accepted": True}, HTTPStatus.ACCEPTED)
             return
+        if request_path == "/api/restart":
+            self._send_json({"accepted": True}, HTTPStatus.ACCEPTED)
+            threading.Timer(0.15, self.server.store.request_restart).start()
+            return
         if request_path == "/api/model-provider":
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))

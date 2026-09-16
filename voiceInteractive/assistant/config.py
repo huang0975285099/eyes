@@ -283,7 +283,7 @@ def load_config(path: Path) -> Config:
         camera_snapshot_timeout_seconds=max(
             0.5, float(raw.get("camera_snapshot_timeout_seconds", 3.0))
         ),
-        native_camera_enabled=bool(raw.get("native_camera_enabled", True)),
+        native_camera_enabled=bool(raw.get("native_camera_enabled", False)),
         native_camera_index=primary_camera.index,
         native_cameras=native_cameras,
         native_camera_fallback_seconds=max(
@@ -304,7 +304,7 @@ def load_config(path: Path) -> Config:
         native_camera_cleanup_interval_minutes=max(
             5, int(raw.get("native_camera_cleanup_interval_minutes", 60))
         ),
-        person_monitor_enabled=bool(raw.get("person_monitor_enabled", True)),
+        person_monitor_enabled=bool(raw.get("person_monitor_enabled", False)),
         person_alert_voice=bool(raw.get("person_alert_voice", True)),
         person_detector=str(raw.get("person_detector", "qwen")).strip().casefold(),
         person_motion_sensitivity=max(

@@ -507,6 +507,13 @@ class CameraFrameStoreTests(unittest.TestCase):
         self.assertTrue(store.shutdown_event.is_set())
         self.assertEqual(store.status()["assistant_status"], "正在关闭语音助手")
 
+    def test_restart_request_uses_distinct_exit_signal(self) -> None:
+        store = CameraFrameStore()
+        store.request_restart()
+        self.assertTrue(store.shutdown_event.is_set())
+        self.assertTrue(store.restart_event.is_set())
+        self.assertEqual(store.status()["assistant_status"], "正在重启语音助手")
+
     def test_native_frame_answers_snapshot_without_waiting_for_browser(self) -> None:
         store = CameraFrameStore()
         store.update_frame(b"native jpeg", source="native")
@@ -663,7 +670,11 @@ class NativeCameraTests(unittest.TestCase):
         presence = SimpleNamespace(enabled=False)
         face = SimpleNamespace(enabled=False)
         config = load_config(DEFAULT_CONFIG)
-        config = replace(config, native_cameras=(config.native_cameras[0],))
+        config = replace(
+            config,
+            native_camera_enabled=True,
+            native_cameras=(config.native_cameras[0],),
+        )
         monitor = NativeCameraMonitor(config, store, presence, face)
         capture = FakeCapture()
         with patch.object(monitor, "_open_camera", return_value=capture):
@@ -698,6 +709,7 @@ class NativeCameraTests(unittest.TestCase):
         config = load_config(DEFAULT_CONFIG)
         config = replace(
             config,
+            native_camera_enabled=True,
             native_cameras=(
                 NativeCameraConfig("front", "Front", 0, True, True),
                 NativeCameraConfig("side", "Side", 1, True, False),

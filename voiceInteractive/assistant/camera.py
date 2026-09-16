@@ -20,6 +20,7 @@ class CameraFrameStore:
         self._lock = threading.Lock()
         self._snapshot_ready = threading.Condition(self._lock)
         self.shutdown_event = threading.Event()
+        self.restart_event = threading.Event()
         self._frame: bytes | None = None
         self._frame_time = 0.0
         self._frame_source = ""
@@ -316,6 +317,13 @@ class CameraFrameStore:
     def request_shutdown(self) -> None:
         with self._snapshot_ready:
             self._assistant_status = "正在关闭语音助手"
+            self.shutdown_event.set()
+            self._snapshot_ready.notify_all()
+
+    def request_restart(self) -> None:
+        with self._snapshot_ready:
+            self._assistant_status = "正在重启语音助手"
+            self.restart_event.set()
             self.shutdown_event.set()
             self._snapshot_ready.notify_all()
 

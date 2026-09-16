@@ -46,7 +46,7 @@
   ],
   "camera_frame_max_age_seconds": 6.0,
   "camera_snapshot_timeout_seconds": 3.0,
-  "native_camera_enabled": true,
+  "native_camera_enabled": false,
   "native_cameras": [
     {
       "id": "camera_1",
@@ -71,7 +71,7 @@
   "native_camera_event_retention_days": 7,
   "native_camera_event_max_megabytes": 1024,
   "native_camera_cleanup_interval_minutes": 60,
-  "person_monitor_enabled": true,
+  "person_monitor_enabled": false,
   "person_alert_voice": true,
   "person_detector": "yolo",
   "person_motion_sensitivity": 70,
