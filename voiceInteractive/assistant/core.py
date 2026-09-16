@@ -79,6 +79,7 @@ class VoiceAssistant:
         self.barge_in_enabled = threading.Event()
         self.playback_cancel = threading.Event()
         self._barge_in_stop = threading.Event()
+        self._wake_interrupt = threading.Event()
         self._interrupt_lock = threading.Lock()
         self._interrupt_action: str | None = None
 
@@ -150,6 +151,8 @@ class VoiceAssistant:
                 continue
             print(f"[打断播报] {text}", flush=True)
             self._set_interrupt_action(action)
+            if action == "wake":
+                self._wake_interrupt.set()
             self.playback_cancel.set()
             if self.dashboard:
                 self.dashboard.store.set_assistant_status(
@@ -400,6 +403,25 @@ class VoiceAssistant:
             while not (
                 self.dashboard and self.dashboard.store.shutdown_event.is_set()
             ):
+                if self._wake_interrupt.is_set():
+                    self._wake_interrupt.clear()
+                    self.ollama.start_conversation()
+                    self.online_tools.start_conversation()
+                    self.desktop_tools.start_conversation()
+                    vision_context_active = False
+                    weather_context_active = False
+                    desktop_context_active = False
+                    state = "command"
+                    command_deadline = (
+                        time.monotonic() + self.config.command_timeout_seconds
+                    )
+                    command_recognizer.Reset()
+                    last_partial = ""
+                    if self.dashboard:
+                        self.dashboard.store.start_conversation()
+                        self.dashboard.store.set_assistant_status(
+                            "已开启新对话，请直接提问", "我在"
+                        )
                 if self.dashboard:
                     scene_broadcasted = self._broadcast_pending_scene()
                     if scene_broadcasted and state == "command":
@@ -442,6 +464,7 @@ class VoiceAssistant:
                     command_recognizer.Reset()
                     last_partial = ""
                     if self.dashboard:
+                        self.dashboard.store.end_conversation("空闲超时")
                         self.dashboard.store.set_assistant_status("等待“老叶老叶”唤醒")
 
                 try:
@@ -493,8 +516,9 @@ class VoiceAssistant:
                 if state == "command":
                     command_deadline = max(command_deadline, time.monotonic() + 3.0)
 
-                if state == "waiting" and contains_wake_phrase(
-                    text, self.config.wake_phrases
+                if (
+                    (state == "waiting" or (state == "command" and is_final))
+                    and contains_wake_phrase(text, self.config.wake_phrases)
                 ):
                     print("[已唤醒] 正在听……")
                     print("[回答] 我在")
@@ -505,6 +529,7 @@ class VoiceAssistant:
                     weather_context_active = False
                     desktop_context_active = False
                     if self.dashboard:
+                        self.dashboard.store.start_conversation(text, "我在")
                         self.dashboard.store.set_assistant_status("我在，请开始提问", "我在")
                     try:
                         self._play(self.speaker.say, "我在。")
@@ -516,6 +541,9 @@ class VoiceAssistant:
                     command_recognizer.Reset()
                     last_partial = ""
                     continue
+
+                if state == "command" and is_final and self.dashboard:
+                    self.dashboard.store.add_conversation_message("user", text)
 
                 if (
                     state == "command"
@@ -545,6 +573,9 @@ class VoiceAssistant:
                     self.ollama.remember(text, response)
                     print(f"[电脑操作回答] {response}")
                     if self.dashboard:
+                        self.dashboard.store.add_conversation_message(
+                            "assistant", response
+                        )
                         self.dashboard.store.set_assistant_status(
                             "电脑操作完成" if action_succeeded else "电脑操作失败",
                             response,
@@ -585,6 +616,7 @@ class VoiceAssistant:
                     if resolved_text != text:
                         print(f"[人员姓名纠错] {text} -> {resolved_text}")
                     print(f"[人员位置回答] {answer}")
+                    self.dashboard.store.add_conversation_message("assistant", answer)
                     self.dashboard.store.set_assistant_status("人员位置查询完成", answer)
                     try:
                         interrupt_action = self._play_interruptible(
@@ -601,13 +633,16 @@ class VoiceAssistant:
                     self.dashboard.store.set_assistant_status(
                         self._continuation_status(interrupt_action), answer
                     )
-                elif state == "command" and is_time_command(text):
+                elif state == "command" and is_final and is_time_command(text):
                     vision_context_active = False
                     weather_context_active = False
                     response = format_time_zh(datetime.now().astimezone())
                     self.ollama.remember(text, response)
                     print(f"[回答] {response}")
                     if self.dashboard:
+                        self.dashboard.store.add_conversation_message(
+                            "assistant", response
+                        )
                         self.dashboard.store.set_assistant_status("回答完成", response)
                     try:
                         interrupt_action = self._play_interruptible(
@@ -662,6 +697,9 @@ class VoiceAssistant:
                     self.ollama.remember(text, answer)
                     print(f"[天气回答] {answer}")
                     if self.dashboard:
+                        self.dashboard.store.add_conversation_message(
+                            "assistant", answer
+                        )
                         self.dashboard.store.set_assistant_status(
                             "天气查询完成" if weather_succeeded else "天气查询失败",
                             answer,
@@ -693,6 +731,10 @@ class VoiceAssistant:
                     weather_context_active = False
                     desktop_context_active = False
                     print("再见。")
+                    if self.dashboard:
+                        self.dashboard.store.end_conversation(
+                            "关闭助手", "再见"
+                        )
                     try:
                         self._play(self.speaker.say, "再见。")
                     except Exception:
@@ -712,6 +754,7 @@ class VoiceAssistant:
                     weather_context_active = False
                     desktop_context_active = False
                     if self.dashboard:
+                        self.dashboard.store.end_conversation(text, answer)
                         self.dashboard.store.set_assistant_status(
                             "等待“老叶老叶”唤醒", answer
                         )
@@ -724,13 +767,9 @@ class VoiceAssistant:
                     wake_recognizer.Reset()
                     command_recognizer.Reset()
                     last_partial = ""
-                elif state == "command" and (
+                elif state == "command" and is_final and (
                     is_vision_command(text)
-                    or (
-                        is_final
-                        and vision_context_active
-                        and is_vision_follow_up(text)
-                    )
+                    or (vision_context_active and is_vision_follow_up(text))
                 ):
                     weather_context_active = False
                     answer_was_streamed = False
@@ -769,6 +808,9 @@ class VoiceAssistant:
                             vision_context_active = False
                     print(f"[视觉回答] {answer}")
                     if self.dashboard:
+                        self.dashboard.store.add_conversation_message(
+                            "assistant", answer
+                        )
                         self.dashboard.store.set_assistant_status("视觉回答完成", answer)
                     if not answer_was_streamed:
                         try:
@@ -809,14 +851,25 @@ class VoiceAssistant:
                         )
                         print(f"[模型回答] {answer}")
                         if self.dashboard:
+                            self.dashboard.store.add_conversation_message(
+                                "assistant", answer
+                            )
                             self.dashboard.store.set_assistant_status("回答完成", answer)
                     except Exception as error:
                         interrupt_action = None
                         print(f"[模型调用失败] {error}", file=sys.stderr)
+                        answer = "模型服务暂时无法回答，请稍后再试。"
+                        if self.dashboard:
+                            self.dashboard.store.add_conversation_message(
+                                "assistant", answer
+                            )
+                            self.dashboard.store.set_assistant_status(
+                                "回答失败", answer
+                            )
                         try:
                             self._play(
                                 self.speaker.say,
-                                "模型服务暂时无法回答，请稍后再试。",
+                                answer,
                             )
                         except Exception:
                             self._play(self.speaker.chime, False)
@@ -830,5 +883,7 @@ class VoiceAssistant:
                         self.dashboard.store.set_assistant_status(
                             self._continuation_status(interrupt_action)
                         )
+        if self.dashboard:
+            self.dashboard.store.end_conversation("助手关闭")
         self._barge_in_stop.set()
         print("已收到关闭请求，语音助手安全退出。")

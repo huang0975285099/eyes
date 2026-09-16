@@ -64,9 +64,9 @@
     }
   ],
   "native_camera_fallback_seconds": 5.0,
-  "native_camera_width": 1280,
-  "native_camera_height": 720,
-  "native_camera_fps": 5,
+  "native_camera_width": 640,
+  "native_camera_height": 480,
+  "native_camera_fps": 20,
   "native_camera_save_snapshots": true,
   "native_camera_event_retention_days": 7,
   "native_camera_event_max_megabytes": 1024,

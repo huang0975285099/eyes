@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import sys
 import urllib.request
 
@@ -129,6 +130,20 @@ def find_audio_device(selector: str | int, direction: str) -> AudioDevice:
             for index, device in enumerate(devices)
             if needle in str(device["name"]).casefold()
         ]
+        if not candidates:
+            # Windows changes duplicate USB audio suffixes after reconnecting,
+            # for example ``(2- Deli...)`` may become ``(3- Deli...)``.
+            normalized_needle = re.sub(r"\(\d+-\s*", "(", needle)
+            candidates = [
+                (index, device)
+                for index, device in enumerate(devices)
+                if normalized_needle
+                in re.sub(
+                    r"\(\d+-\s*",
+                    "(",
+                    str(device["name"]).casefold(),
+                )
+            ]
 
     candidates = [item for item in candidates if int(item[1][channel_key]) > 0]
     if not candidates:
@@ -137,7 +152,11 @@ def find_audio_device(selector: str | int, direction: str) -> AudioDevice:
             f"找不到匹配 {selector!r} 的{kind}设备。运行 --list-devices 查看设备名。"
         )
 
-    def score(item: tuple[int, object]) -> tuple[int, float]:
+    requested_numbered_duplicate = bool(
+        isinstance(selector, str) and re.search(r"\(\d+-\s*", selector)
+    )
+
+    def score(item: tuple[int, object]) -> tuple[int, int, float]:
         device = item[1]
         api = _host_api_name(int(device["hostapi"]))
         api_score = {
@@ -146,8 +165,12 @@ def find_audio_device(selector: str | int, direction: str) -> AudioDevice:
             "MME": 2,
             "Windows WDM-KS": 1,
         }.get(api, 0)
+        duplicate_score = int(
+            requested_numbered_duplicate
+            and bool(re.search(r"\(\d+-\s*", str(device["name"])))
+        )
         latency = float(device[f"default_low_{direction}_latency"])
-        return api_score, -latency
+        return api_score, duplicate_score, -latency
 
     index, device = max(candidates, key=score)
     return AudioDevice(

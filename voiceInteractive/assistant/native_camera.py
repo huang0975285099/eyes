@@ -254,6 +254,10 @@ class _CameraRuntime:
     last_alert_at: float = 0.0
     last_frame_at: float = 0.0
     last_face_submit_at: float = 0.0
+    latest_jpeg: bytes | None = None
+    frame_sequence: int = 0
+    preview_clients: int = 0
+    black_frames: int = 0
 
 
 class NativeCameraMonitor:
@@ -284,6 +288,7 @@ class NativeCameraMonitor:
         )
         self._enabled = config.native_camera_enabled
         self._lock = threading.RLock()
+        self._frame_ready = threading.Condition(self._lock)
         self._stop_event = threading.Event()
         self._browser_claim_until = 0.0
         self._browser_connected_count = 0
@@ -299,15 +304,94 @@ class NativeCameraMonitor:
         with self._lock:
             return self._enabled
 
+    def has_camera(self, camera_id: str) -> bool:
+        with self._lock:
+            return camera_id in self._cameras
+
     def add_event_listener(self, callback: Callable[[dict], None]) -> None:
         self._listeners.append(callback)
 
     def set_enabled(self, enabled: bool) -> None:
-        with self._lock:
+        with self._frame_ready:
             self._enabled = enabled
             for runtime in self._cameras.values():
                 runtime.state = "等待后台监控" if enabled else "后台摄像头接管已关闭"
                 runtime.error = ""
+            self._frame_ready.notify_all()
+
+    def preview_frames(self, camera_id: str):
+        """Yield only the newest JPEG for an MJPEG client; old frames never queue."""
+        with self._frame_ready:
+            runtime = self._cameras.get(camera_id)
+            if runtime is None:
+                raise KeyError(camera_id)
+            runtime.preview_clients += 1
+            last_sequence = (
+                runtime.frame_sequence - 1
+                if runtime.latest_jpeg is not None
+                else runtime.frame_sequence
+            )
+            self._frame_ready.notify_all()
+        try:
+            while not self._stop_event.is_set():
+                with self._frame_ready:
+                    self._frame_ready.wait_for(
+                        lambda: self._stop_event.is_set()
+                        or runtime.frame_sequence > last_sequence,
+                        timeout=2.0,
+                    )
+                    if self._stop_event.is_set():
+                        return
+                    if runtime.latest_jpeg is None or runtime.frame_sequence <= last_sequence:
+                        if not runtime.error:
+                            continue
+                        placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+                        cv2.putText(
+                            placeholder,
+                            "Camera signal unavailable",
+                            (120, 225),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.8,
+                            (110, 140, 132),
+                            2,
+                            cv2.LINE_AA,
+                        )
+                        encoded_ok, encoded = cv2.imencode(".jpg", placeholder)
+                        if not encoded_ok:
+                            continue
+                        frame = encoded.tobytes()
+                    else:
+                        last_sequence = runtime.frame_sequence
+                        frame = runtime.latest_jpeg
+                yield frame
+        finally:
+            with self._frame_ready:
+                runtime.preview_clients = max(0, runtime.preview_clients - 1)
+                self._frame_ready.notify_all()
+
+    def preview_frame(self, camera_id: str, timeout: float = 4.0) -> bytes | None:
+        """Return a recent frame, starting capture temporarily when required."""
+        with self._frame_ready:
+            runtime = self._cameras.get(camera_id)
+            if runtime is None:
+                raise KeyError(camera_id)
+            runtime.preview_clients += 1
+            recent = time.time() - runtime.last_frame_at < 2.0
+            initial_sequence = runtime.frame_sequence - 1 if recent else runtime.frame_sequence
+            self._frame_ready.notify_all()
+            try:
+                self._frame_ready.wait_for(
+                    lambda: self._stop_event.is_set()
+                    or (
+                        runtime.latest_jpeg is not None
+                        and runtime.frame_sequence > initial_sequence
+                    ),
+                    timeout=max(0.1, timeout),
+                )
+                return runtime.latest_jpeg if runtime.frame_sequence > initial_sequence else None
+            finally:
+                runtime.preview_clients = max(0, runtime.preview_clients - 1)
+                self._frame_ready.notify_all()
 
     def claim_for_browser(
         self, seconds: float = 12.0, connected_count: int | None = None
@@ -356,6 +440,7 @@ class NativeCameraMonitor:
                     "fps": round(runtime.fps, 1),
                     "motion_score": round(runtime.motion_score, 2),
                     "last_frame_at": runtime.last_frame_at,
+                    "preview_clients": runtime.preview_clients,
                 }
                 for runtime in self._cameras.values()
             ]
@@ -404,6 +489,10 @@ class NativeCameraMonitor:
             capture.release()
             capture = cv2.VideoCapture(camera.index, cv2.CAP_MSMF)
         if capture.isOpened():
+            capture.set(
+                cv2.CAP_PROP_FOURCC,
+                cv2.VideoWriter_fourcc(*"MJPG"),
+            )
             capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.native_camera_width)
             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.native_camera_height)
             capture.set(cv2.CAP_PROP_FPS, self.config.native_camera_fps)
@@ -420,6 +509,7 @@ class NativeCameraMonitor:
             runtime.active = False
             runtime.fps = 0.0
             runtime.motion_score = 0.0
+            runtime.black_frames = 0
 
     def _dispatch_event(self, event: dict) -> None:
         for callback in tuple(self._listeners):
@@ -430,15 +520,36 @@ class NativeCameraMonitor:
 
     def _process_frame(
         self, runtime: _CameraRuntime, frame: np.ndarray, now: float
-    ) -> None:
+    ) -> bool:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        mean, deviation = cv2.meanStdDev(gray)
+        if float(mean[0][0]) < 18.0 and float(deviation[0][0]) < 2.0:
+            with self._lock:
+                runtime.black_frames += 1
+                if runtime.black_frames >= 3:
+                    runtime.state = "摄像头返回黑屏，正在重连"
+                    runtime.error = f"{runtime.config.name} 持续返回黑帧"
+            return False
+        with self._lock:
+            runtime.black_frames = 0
+            if "黑帧" in runtime.error:
+                runtime.error = ""
+                runtime.state = (
+                    "网页实时预览"
+                    if runtime.preview_clients and not self._enabled
+                    else "后台摄像头已接管"
+                )
         encoded_ok, encoded = cv2.imencode(
             ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 84]
         )
         if not encoded_ok:
-            return
+            return False
         jpeg = encoded.tobytes()
-        with self._lock:
+        with self._frame_ready:
             runtime.last_frame_at = time.time()
+            runtime.latest_jpeg = jpeg
+            runtime.frame_sequence += 1
+            self._frame_ready.notify_all()
 
         # 主摄像头继续为视觉问答、人物确认和人脸识别提供统一画面。
         if runtime.config.primary:
@@ -455,13 +566,16 @@ class NativeCameraMonitor:
                 if self.face_service.submit(jpeg):
                     runtime.last_face_submit_at = now
 
+        if not self.enabled:
+            return True
+
         score, triggered = runtime.detector.process(
             frame, self.settings, now, runtime.last_alert_at
         )
         with self._lock:
             runtime.motion_score = score
         if not triggered:
-            return
+            return True
         runtime.last_alert_at = now
         event = self.archive.record(
             jpeg,
@@ -477,18 +591,21 @@ class NativeCameraMonitor:
                     jpeg, self.config.scene_broadcast_cooldown_seconds
                 )
         self._dispatch_event(event)
+        return True
 
     def _run_camera(self, runtime: _CameraRuntime) -> None:
         frame_count = 0
         fps_started_at = time.monotonic()
         failures = 0
         while not self._stop_event.is_set():
-            if not self.enabled:
+            with self._lock:
+                preview_active = runtime.preview_clients > 0
+            if not self.enabled and not preview_active:
                 self._release_camera(runtime)
                 self._stop_event.wait(0.5)
                 continue
 
-            if time.monotonic() < self._browser_claim_until:
+            if time.monotonic() < self._browser_claim_until and not preview_active:
                 if runtime.capture is not None:
                     self._release_camera(runtime)
                 with self._lock:
@@ -499,6 +616,8 @@ class NativeCameraMonitor:
 
             browser_age = self.store.browser_frame_age_seconds()
             if (
+                not preview_active
+                and
                 browser_age is not None
                 and browser_age < self.config.native_camera_fallback_seconds
             ):
@@ -524,9 +643,14 @@ class NativeCameraMonitor:
                 runtime.detector.reset()
                 with self._lock:
                     runtime.active = True
-                    runtime.state = "后台摄像头已接管"
+                    runtime.state = (
+                        "网页实时预览"
+                        if preview_active and not self.enabled
+                        else "后台摄像头已接管"
+                    )
                     runtime.error = ""
 
+            iteration_started_at = time.monotonic()
             ok, frame = runtime.capture.read()
             if not ok or frame is None:
                 failures += 1
@@ -548,5 +672,16 @@ class NativeCameraMonitor:
                     runtime.fps = frame_count / elapsed
                 frame_count = 0
                 fps_started_at = now
-            self._process_frame(runtime, frame, now)
-            self._stop_event.wait(1.0 / self.config.native_camera_fps)
+            valid_frame = self._process_frame(runtime, frame, now)
+            if (
+                not valid_frame
+                and runtime.black_frames
+                >= max(10, self.config.native_camera_fps * 2)
+            ):
+                self._release_camera(runtime)
+                self._stop_event.wait(0.8)
+                continue
+            frame_interval = 1.0 / self.config.native_camera_fps
+            remaining = frame_interval - (time.monotonic() - iteration_started_at)
+            if remaining > 0:
+                self._stop_event.wait(remaining)

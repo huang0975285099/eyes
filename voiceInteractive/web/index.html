@@ -72,7 +72,7 @@
     .camera-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .camera-pane { position: relative; min-width: 0; overflow: hidden; border: 1px solid #203b34; border-radius: 15px; background: #020504; }
     .video-wrap { position: relative; aspect-ratio: 16 / 9; background: #020504; }
-    video { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .camera-feed { display: block; width: 100%; height: 100%; object-fit: cover; }
     .camera-badge { position: absolute; z-index: 2; left: 10px; top: 10px; padding: 5px 9px; border-radius: 999px; background: rgba(3, 17, 14, .78); border: 1px solid rgba(95, 231, 191, .25); color: #d9f8ef; font-size: 11px; backdrop-filter: blur(8px); }
     .face-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
     .empty {
@@ -108,7 +108,7 @@
       cursor: pointer;
     }
     button:hover { background: #4cdbb3; }
-    .side-card { position: sticky; top: 18px; padding: 20px; display: flex; flex-direction: column; gap: 24px; }
+    .side-card { position: sticky; top: 18px; max-height: calc(100vh - 36px); padding: 20px; display: flex; flex-direction: column; gap: 20px; }
     .feature-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .feature-card { padding: 16px; min-height: 150px; }
     .feature-card .snapshot-image { max-height: 160px; }
@@ -121,6 +121,36 @@
       min-height: 78px;
       overflow-wrap: anywhere;
     }
+    .conversation-section { min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 9px; }
+    .conversation-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .conversation-count { color: #87a098; font-size: 12px; }
+    .conversation-log {
+      max-height: min(52vh, 560px);
+      min-height: 150px;
+      flex: 1;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-color: #31594e transparent;
+      padding-right: 4px;
+      display: grid;
+      gap: 9px;
+    }
+    .conversation-empty { color: #7f9790; line-height: 1.6; font-size: 13px; padding: 12px 0; }
+    .conversation-item { border: 1px solid #244139; border-radius: 12px; background: rgba(255,255,255,.018); overflow: hidden; }
+    .conversation-item[open] { border-color: #356457; }
+    .conversation-item summary { cursor: pointer; list-style: none; padding: 11px 12px; display: grid; gap: 4px; }
+    .conversation-item summary::-webkit-details-marker { display: none; }
+    .conversation-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .conversation-title { color: #dcece7; font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .conversation-time { color: #78928a; font-size: 11px; }
+    .conversation-state { flex: none; padding: 2px 7px; border-radius: 999px; background: #243a34; color: #91aaa2; font-size: 10px; }
+    .conversation-state.active { background: rgba(43,201,156,.16); color: #66e6c0; }
+    .message-list { display: grid; gap: 8px; border-top: 1px solid #203a33; padding: 10px; }
+    .message { border-radius: 10px; padding: 8px 9px; line-height: 1.5; overflow-wrap: anywhere; }
+    .message.user { background: rgba(44, 116, 240, .1); border: 1px solid rgba(85, 145, 245, .18); }
+    .message.assistant { background: rgba(43, 201, 156, .08); border: 1px solid rgba(43, 201, 156, .16); }
+    .message-meta { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 3px; color: #79928a; font-size: 10px; }
+    .message-text { color: #cbdcd7; font-size: 12px; white-space: pre-wrap; }
     .model-row { display: flex; gap: 8px; margin-top: 9px; }
     .model-row button { white-space: nowrap; }
     .model-message { margin: 7px 0 0; min-height: 20px; color: #8fa69f; font-size: 12px; }
@@ -207,7 +237,9 @@
     .face-message.error { color: #efaaa3; }
     @media (max-width: 820px) {
       .layout { grid-template-columns: 1fr; }
-      .side-card { position: static; min-height: 270px; }
+      .side-card { position: static; max-height: none; min-height: 270px; }
+      .conversation-section { flex: none; }
+      .conversation-log { max-height: 480px; }
     }
     @media (max-width: 700px) {
       .camera-grid, .feature-grid { grid-template-columns: 1fr; }
@@ -247,7 +279,7 @@
             <div id="primaryCameraPane" class="camera-pane">
               <div class="video-wrap">
                 <span id="primaryCameraBadge" class="camera-badge">主摄像头</span>
-                <video id="video" autoplay muted playsinline></video>
+                <img id="video" class="camera-feed" alt="主摄像头实时画面">
                 <canvas id="faceOverlay" class="face-overlay" aria-hidden="true"></canvas>
                 <div id="empty" class="empty">请允许浏览器访问主摄像头</div>
               </div>
@@ -255,7 +287,7 @@
             <div id="secondaryCameraPane" class="camera-pane">
               <div class="video-wrap">
                 <span id="secondaryCameraBadge" class="camera-badge">辅助摄像头</span>
-                <video id="secondaryVideo" autoplay muted playsinline></video>
+                <img id="secondaryVideo" class="camera-feed" alt="辅助摄像头实时画面">
                 <div id="secondaryEmpty" class="empty">正在等待第二个摄像头</div>
               </div>
             </div>
@@ -346,9 +378,14 @@
           <div class="label">助手状态</div>
           <p id="assistantState" class="assistant-state">等待程序启动</p>
         </div>
-        <div>
-          <div class="label">最近回答</div>
-          <p id="lastAnswer" class="answer">唤醒后问我：“你看到了什么？”</p>
+        <div class="conversation-section">
+          <div class="conversation-heading">
+            <div class="label">对话记录</div>
+            <span id="conversationCount" class="conversation-count">0 次</span>
+          </div>
+          <div id="conversationLog" class="conversation-log" aria-live="polite">
+            <div class="conversation-empty">说“老叶老叶”开启新对话，对话内容会显示在这里。</div>
+          </div>
         </div>
         <div>
           <div class="label">当前模型</div>
@@ -368,7 +405,7 @@
 
   <dialog id="peopleDialog" aria-labelledby="peopleDialogTitle">
     <div class="dialog-heading">
-      <div><h2 id="peopleDialogTitle">本地人员库</h2><div class="person-meta">先建人员，再录制8～15秒视频。慢慢左右转头、抬头和低头。</div></div>
+      <div><h2 id="peopleDialogTitle">本地人员库</h2><div class="person-meta">先建人员，再采集8～15秒人脸画面。慢慢左右转头、抬头和低头。</div></div>
       <button id="closePeopleButton" class="icon-button" type="button" aria-label="关闭">×</button>
     </div>
     <div class="form-grid">
@@ -396,7 +433,8 @@
     const livePill = document.querySelector('#livePill');
     const cameraState = document.querySelector('#cameraState');
     const assistantState = document.querySelector('#assistantState');
-    const lastAnswer = document.querySelector('#lastAnswer');
+    const conversationLog = document.querySelector('#conversationLog');
+    const conversationCount = document.querySelector('#conversationCount');
     const modelSelect = document.querySelector('#modelSelect');
     const switchModelButton = document.querySelector('#switchModelButton');
     const modelMessage = document.querySelector('#modelMessage');
@@ -440,22 +478,24 @@
     const shutdownButton = document.querySelector('#shutdownButton');
     let stream = null;
     let secondaryStream = null;
-    let sendingFrame = false;
     let snapshotRequestInFlight = 0;
     let lastSnapshotRequestId = 0;
     let displayedSnapshotId = 0;
     let displayedPresenceEventId = 0;
     let displayedSceneBroadcastEventId = 0;
     let displayedNativeCameraEventId = '';
+    let conversationRevision = -1;
+    let conversationLoading = false;
     let presenceRequestInFlight = false;
     let sceneBroadcastRequestInFlight = false;
     let faceRecognitionRequestInFlight = false;
     let faceRecorder = null;
-    let faceRecordingChunks = [];
     let faceRecordingPersonId = '';
     let faceRecordingButton = null;
     let faceRecordingTimer = 0;
-    let faceRecordingStartedAt = 0;
+    let faceSampleInterval = 0;
+    let faceSampleBusy = false;
+    let faceSampleCount = 0;
     let presenceRetryTimer = 0;
     let presenceBackground = null;
     let presenceStartedAt = 0;
@@ -478,7 +518,7 @@
     presenceCanvas.width = 160;
     presenceCanvas.height = 90;
     const presenceContext = presenceCanvas.getContext('2d', { willReadFrequently: true });
-    let preferredKeywords = ['Deli', '1080P', 'MM101S'];
+    let configuredCameras = [];
 
     function setCameraStatus(text, ready) {
       cameraState.textContent = text;
@@ -584,239 +624,110 @@
       });
     }
 
-    function cameraDisplayName(cameras, camera) {
-      const fallbackIndex = cameras.indexOf(camera) + 1;
-      const base = camera?.label || `摄像头 ${fallbackIndex}`;
-      return cameras.length > 1 ? `${base} · ${fallbackIndex}` : base;
-    }
-
-    async function enumerateCameras(primaryId = '', secondaryId = '') {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const cameras = devices.filter((device) => device.kind === 'videoinput');
+    function populateCameraSelects(primaryId = '', secondaryId = '') {
       cameraSelect.replaceChildren();
       secondaryCameraSelect.replaceChildren();
       const disabledOption = document.createElement('option');
       disabledOption.value = '';
       disabledOption.textContent = '不显示第二路';
       secondaryCameraSelect.append(disabledOption);
-      cameras.forEach((camera, index) => {
+      configuredCameras.forEach((camera, index) => {
         const option = document.createElement('option');
-        option.value = camera.deviceId;
-        option.textContent = cameraDisplayName(cameras, camera) || `摄像头 ${index + 1}`;
+        option.value = camera.id;
+        option.textContent = `${camera.name || `摄像头 ${index + 1}`} · 索引 ${camera.index}`;
         cameraSelect.append(option);
         const secondaryOption = option.cloneNode(true);
         secondaryCameraSelect.append(secondaryOption);
       });
-      const preferred = cameras.find((camera) =>
-        preferredKeywords.some((keyword) => camera.label.toLowerCase().includes(keyword.toLowerCase()))
-      );
-      if (primaryId && cameras.some((camera) => camera.deviceId === primaryId)) {
-        cameraSelect.value = primaryId;
-      } else if (preferred) {
-        cameraSelect.value = preferred.deviceId;
-      }
-      if (secondaryId && cameras.some((camera) => camera.deviceId === secondaryId)) {
+      const primary = configuredCameras.find((camera) => camera.id === primaryId)
+        || configuredCameras.find((camera) => camera.primary)
+        || configuredCameras[0];
+      if (primary) cameraSelect.value = primary.id;
+      if (secondaryId && configuredCameras.some((camera) => camera.id === secondaryId)) {
         secondaryCameraSelect.value = secondaryId;
+      } else if (secondaryId === '') {
+        secondaryCameraSelect.value = '';
+      } else {
+        secondaryCameraSelect.value = configuredCameras.find((camera) => camera.id !== primary?.id)?.id || '';
       }
-      return cameras;
     }
 
     function stopCameraStreams() {
-      if (stream) stream.getTracks().forEach((track) => track.stop());
-      if (secondaryStream) secondaryStream.getTracks().forEach((track) => track.stop());
       stream = null;
       secondaryStream = null;
-      video.srcObject = null;
-      secondaryVideo.srcObject = null;
+      video.removeAttribute('src');
+      secondaryVideo.removeAttribute('src');
       primaryCameraPane.classList.remove('connected');
       secondaryCameraPane.classList.remove('connected');
     }
 
-    function cameraConstraints(deviceId = '') {
-      const stablePreview = {
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-        frameRate: { ideal: 5, max: 10 },
-      };
-      return deviceId
-        ? { ...stablePreview, deviceId: { exact: deviceId } }
-        : stablePreview;
-    }
-
-    function compatibilityCameraConstraints(deviceId) {
-      return {
-        deviceId: { exact: deviceId },
-        width: { ideal: 320, max: 320 },
-        height: { ideal: 240, max: 240 },
-        frameRate: { ideal: 5, max: 5 },
-      };
-    }
-
-    async function videoHasVisibleFrame(element, timeoutMs = 2600) {
-      const probe = document.createElement('canvas');
-      probe.width = 48;
-      probe.height = 36;
-      const context = probe.getContext('2d', { willReadFrequently: true });
+    async function waitForCameraFrame(cameraId, timeoutMs = 9000) {
       const deadline = performance.now() + timeoutMs;
       while (performance.now() < deadline) {
-        if (element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && element.videoWidth > 0) {
-          try {
-            context.drawImage(element, 0, 0, probe.width, probe.height);
-            const pixels = context.getImageData(0, 0, probe.width, probe.height).data;
-            let visibleSamples = 0;
-            let samples = 0;
-            for (let index = 0; index < pixels.length; index += 16) {
-              samples += 1;
-              if (pixels[index] + pixels[index + 1] + pixels[index + 2] > 24) visibleSamples += 1;
-            }
-            if (visibleSamples > samples * 0.02) return true;
-          } catch (_) {
-            return true;
-          }
-        }
-        await new Promise((resolve) => setTimeout(resolve, 180));
+        try {
+          const response = await fetch(`/api/camera-frame/${encodeURIComponent(cameraId)}?ready=${Date.now()}`, { cache: 'no-store' });
+          if (response.ok && Number(response.headers.get('Content-Length') || 0) > 1000) return true;
+        } catch (_) {}
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
       return false;
-    }
-
-    async function reopenLowBandwidthPair(primaryId, secondaryId) {
-      stopCameraStreams();
-      const results = await Promise.allSettled([
-        navigator.mediaDevices.getUserMedia({ video: compatibilityCameraConstraints(primaryId), audio: false }),
-        navigator.mediaDevices.getUserMedia({ video: compatibilityCameraConstraints(secondaryId), audio: false }),
-      ]);
-      if (results.some((result) => result.status === 'rejected')) {
-        results.forEach((result) => {
-          if (result.status === 'fulfilled') result.value.getTracks().forEach((track) => track.stop());
-        });
-        throw new Error('双摄像头兼容模式打开失败');
-      }
-      stream = results[0].value;
-      secondaryStream = results[1].value;
-      video.srcObject = stream;
-      secondaryVideo.srcObject = secondaryStream;
-      await Promise.all([video.play(), secondaryVideo.play()]);
-      const [primaryReady, secondaryReady] = await Promise.all([
-        videoHasVisibleFrame(video),
-        videoHasVisibleFrame(secondaryVideo),
-      ]);
-      primaryCameraPane.classList.toggle('connected', primaryReady);
-      secondaryCameraPane.classList.toggle('connected', secondaryReady);
-      return { primaryReady, secondaryReady };
     }
 
     async function connectCameras(primaryId = '', secondaryId = null) {
       stopCameraStreams();
       setCameraStatus('正在连接', false);
       secondaryEmpty.textContent = '正在连接辅助摄像头';
-      await fetch('/api/camera-client', { method: 'POST' });
-      await new Promise((resolve) => setTimeout(resolve, 350));
+      populateCameraSelects(primaryId, secondaryId);
+      const selectedPrimaryId = cameraSelect.value;
+      let selectedSecondaryId = secondaryCameraSelect.value;
+      if (selectedSecondaryId === selectedPrimaryId) {
+        selectedSecondaryId = configuredCameras.find((camera) => camera.id !== selectedPrimaryId)?.id || '';
+        secondaryCameraSelect.value = selectedSecondaryId;
+      }
+      if (!selectedPrimaryId) {
+        setCameraStatus('没有配置摄像头', false);
+        return;
+      }
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints(primaryId), audio: false });
-        video.srcObject = stream;
-        await video.play();
+        const primaryCamera = configuredCameras.find((camera) => camera.id === selectedPrimaryId);
+        stream = selectedPrimaryId;
+        video.src = `/api/camera-stream/${encodeURIComponent(selectedPrimaryId)}?stream=${Date.now()}`;
+        const primaryReady = await waitForCameraFrame(selectedPrimaryId);
+        if (!primaryReady) throw new Error(`${primaryCamera?.name || '主摄像头'}无法读取画面`);
         primaryCameraPane.classList.add('connected');
-        resetPresenceDetection();
-        const activeId = stream.getVideoTracks()[0]?.getSettings().deviceId;
-        const cameras = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = cameras.filter((device) => device.kind === 'videoinput');
-        if (!primaryId) {
-          const preferred = videoDevices.find((camera) =>
-            preferredKeywords.some((keyword) => camera.label.toLowerCase().includes(keyword.toLowerCase()))
-          );
-          if (preferred && preferred.deviceId !== activeId) {
-            const second = videoDevices.find((camera) => camera.deviceId !== preferred.deviceId);
-            return connectCameras(preferred.deviceId, second?.deviceId || '');
-          }
-        }
-        let selectedSecondaryId = secondaryId;
-        if (selectedSecondaryId === null) {
-          selectedSecondaryId = videoDevices.find((camera) => camera.deviceId !== activeId)?.deviceId || '';
-        } else if (selectedSecondaryId === activeId) {
-          selectedSecondaryId = videoDevices.find((camera) => camera.deviceId !== activeId)?.deviceId || '';
-        }
-        await enumerateCameras(activeId, selectedSecondaryId);
-        const primaryDevice = videoDevices.find((camera) => camera.deviceId === activeId);
-        primaryCameraBadge.textContent = `主摄像头 · ${cameraDisplayName(videoDevices, primaryDevice)}`;
-
+        primaryCameraBadge.textContent = `主摄像头 · ${primaryCamera?.name || selectedPrimaryId}`;
         let connectedCount = 1;
         if (selectedSecondaryId) {
-          try {
-            secondaryStream = await navigator.mediaDevices.getUserMedia({
-              video: cameraConstraints(selectedSecondaryId),
-              audio: false,
-            });
-            secondaryVideo.srcObject = secondaryStream;
-            await secondaryVideo.play();
-            const secondaryDevice = videoDevices.find((camera) => camera.deviceId === selectedSecondaryId);
-            secondaryCameraBadge.textContent = `辅助摄像头 · ${cameraDisplayName(videoDevices, secondaryDevice)}`;
-            if (await videoHasVisibleFrame(secondaryVideo)) {
-              secondaryCameraPane.classList.add('connected');
-              connectedCount = 2;
-            } else {
-              secondaryEmpty.textContent = '第二路无有效画面，正在使用低带宽兼容模式重试…';
-              const pair = await reopenLowBandwidthPair(activeId, selectedSecondaryId);
-              if (!pair.primaryReady) throw new Error('主摄像头在兼容模式下没有有效画面');
-              resetPresenceDetection();
-              connectedCount = pair.secondaryReady ? 2 : 1;
-              if (!pair.secondaryReady) {
-                secondaryStream.getTracks().forEach((track) => track.stop());
-                secondaryStream = null;
-                secondaryVideo.srcObject = null;
-                secondaryCameraPane.classList.remove('connected');
-                secondaryEmpty.textContent = '第二路仍无有效画面，请将两个摄像头连接到不同的 USB 控制器';
-              }
-            }
-          } catch (secondaryError) {
-            console.error(secondaryError);
-            if (!stream) {
-              stream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints(activeId), audio: false });
-              video.srcObject = stream;
-              await video.play();
-              primaryCameraPane.classList.add('connected');
-              resetPresenceDetection();
-            }
+          const secondaryCamera = configuredCameras.find((camera) => camera.id === selectedSecondaryId);
+          secondaryStream = selectedSecondaryId;
+          secondaryVideo.src = `/api/camera-stream/${encodeURIComponent(selectedSecondaryId)}?stream=${Date.now()}`;
+          secondaryCameraBadge.textContent = `辅助摄像头 · ${secondaryCamera?.name || selectedSecondaryId}`;
+          if (await waitForCameraFrame(selectedSecondaryId)) {
+            secondaryCameraPane.classList.add('connected');
+            connectedCount = 2;
+          } else {
+            secondaryStream = null;
+            secondaryVideo.removeAttribute('src');
             secondaryCameraPane.classList.remove('connected');
-            secondaryEmpty.textContent = '辅助摄像头无法打开，请检查 USB 接口或是否被其他程序占用';
+            secondaryEmpty.textContent = '辅助摄像头无法读取，请检查 USB 接口或摄像头索引';
           }
         } else {
           secondaryEmpty.textContent = '未选择辅助摄像头';
         }
-        await fetch('/api/camera-client', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ connected_count: connectedCount }),
-        });
+        resetPresenceDetection();
         setCameraStatus(`已连接 ${connectedCount} 个画面`, true);
       } catch (error) {
         console.error(error);
-        setCameraStatus('需要摄像头权限', false);
-        document.querySelector('#empty').textContent = '无法打开摄像头，请允许权限后点击“连接摄像头”';
+        setCameraStatus('摄像头读取失败', false);
+        document.querySelector('#empty').textContent = error.message || '无法从后台读取摄像头';
       }
     }
 
     async function captureCurrentFrame() {
-      if (!stream || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
-      const canvas = document.createElement('canvas');
-      const maxWidth = 1280;
-      const scale = Math.min(1, maxWidth / video.videoWidth);
-      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-      return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
-    }
-
-    async function sendCurrentFrame() {
-      if (sendingFrame) return;
-      sendingFrame = true;
-      try {
-        const blob = await captureCurrentFrame();
-        if (blob) await fetch('/api/frame', { method: 'POST', body: blob });
-      } catch (error) {
-        console.error(error);
-      } finally {
-        sendingFrame = false;
-      }
+      if (!stream) return null;
+      const response = await fetch(`/api/camera-frame/${encodeURIComponent(stream)}?capture=${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) return null;
+      return response.blob();
     }
 
     async function sendPresenceCheck(reason) {
@@ -906,7 +817,7 @@
         record.type = 'button';
         record.dataset.action = 'record';
         record.dataset.personId = person.id;
-        record.textContent = '开始视频采集';
+        record.textContent = '开始人脸采集';
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'danger-button';
@@ -931,27 +842,55 @@
       }
     }
 
-    function supportedRecordingType() {
-      return ['video/webm;codecs=vp8', 'video/webm', 'video/mp4'].find(
-        (type) => window.MediaRecorder?.isTypeSupported(type)
-      ) || '';
+    async function collectFaceSample() {
+      if (faceRecorder?.state !== 'recording' || faceSampleBusy) return;
+      faceSampleBusy = true;
+      try {
+        const blob = await captureCurrentFrame();
+        if (!blob) return;
+        const response = await fetch(`/api/people/${faceRecordingPersonId}/samples`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'image/jpeg' },
+          body: blob,
+        });
+        const result = await response.json();
+        if (response.ok && result.ok) {
+          faceSampleCount += 1;
+          setPeopleMessage(`正在采集：已保存 ${faceSampleCount} 张有效人脸，请继续缓慢转头。`);
+        }
+      } catch (_) {
+        // 模糊、转头过大等单帧会被跳过，下一帧继续采集。
+      } finally {
+        faceSampleBusy = false;
+      }
     }
 
-    async function uploadFaceVideo(personId, blob) {
-      setPeopleMessage('正在本机解析视频并筛选清晰人脸，请稍候…');
-      const response = await fetch(`/api/people/${personId}/video`, {
-        method: 'POST',
-        headers: { 'Content-Type': blob.type || 'video/webm' },
-        body: blob,
-      });
-      const result = await response.json();
-      if (!response.ok || !result.ok) throw new Error(result.error || '视频解析失败');
-      setPeopleMessage(`采集完成：新增 ${result.added_samples} 张有效样本，原视频已保存在本机。`);
+    async function stopFaceRecording() {
+      if (faceRecorder?.state !== 'recording') return;
+      faceRecorder.state = 'stopping';
+      clearTimeout(faceRecordingTimer);
+      clearInterval(faceSampleInterval);
+      const currentButton = faceRecordingButton;
+      if (currentButton) {
+        currentButton.disabled = true;
+        currentButton.classList.remove('recording');
+        currentButton.textContent = '正在完成';
+      }
+      await new Promise((resolve) => setTimeout(resolve, faceSampleBusy ? 500 : 0));
+      setPeopleMessage(
+        faceSampleCount
+          ? `采集完成：新增 ${faceSampleCount} 张有效样本。`
+          : '没有采集到清晰正脸，请靠近摄像头后重试。',
+        faceSampleCount === 0,
+      );
       await loadPeople();
-    }
-
-    function stopFaceRecording() {
-      if (faceRecorder?.state === 'recording') faceRecorder.stop();
+      if (currentButton) {
+        currentButton.disabled = false;
+        currentButton.textContent = '开始人脸采集';
+      }
+      faceRecordingPersonId = '';
+      faceRecordingButton = null;
+      faceRecorder = null;
     }
 
     function startFaceRecording(personId, button) {
@@ -959,63 +898,26 @@
         setPeopleMessage('摄像头尚未连接。', true);
         return;
       }
-      if (!window.MediaRecorder) {
-        setPeopleMessage('当前浏览器不支持视频录制。', true);
-        return;
-      }
       if (faceRecorder?.state === 'recording') {
-        if (personId === faceRecordingPersonId) stopFaceRecording();
-        else setPeopleMessage('请先结束当前人员的视频采集。', true);
+        if (personId === faceRecordingPersonId) void stopFaceRecording();
+        else setPeopleMessage('请先结束当前人员的人脸采集。', true);
         return;
       }
-      const mimeType = supportedRecordingType();
-      faceRecordingChunks = [];
       faceRecordingPersonId = personId;
       faceRecordingButton = button;
-      faceRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      faceRecorder.ondataavailable = (event) => {
-        if (event.data?.size) faceRecordingChunks.push(event.data);
-      };
-      faceRecorder.onerror = () => setPeopleMessage('视频录制失败，请重新连接摄像头。', true);
-      faceRecorder.onstop = async () => {
-        clearTimeout(faceRecordingTimer);
-        const currentButton = faceRecordingButton;
-        const currentPersonId = faceRecordingPersonId;
-        const blob = new Blob(faceRecordingChunks, { type: faceRecorder.mimeType || 'video/webm' });
-        if (currentButton) {
-          currentButton.disabled = true;
-          currentButton.classList.remove('recording');
-          currentButton.textContent = '正在解析';
-        }
-        try {
-          if (performance.now() - faceRecordingStartedAt < 4500 || blob.size < 1024) {
-            throw new Error('录制时间太短，请至少录制5秒');
-          }
-          await uploadFaceVideo(currentPersonId, blob);
-        } catch (error) {
-          setPeopleMessage(error.message || '视频录入失败', true);
-        } finally {
-          if (currentButton) {
-            currentButton.disabled = false;
-            currentButton.textContent = '开始视频采集';
-          }
-          faceRecordingChunks = [];
-          faceRecordingPersonId = '';
-          faceRecordingButton = null;
-          faceRecorder = null;
-        }
-      };
-      faceRecorder.start(500);
-      faceRecordingStartedAt = performance.now();
+      faceRecorder = { state: 'recording' };
+      faceSampleCount = 0;
       button.classList.add('recording');
       button.textContent = '结束采集';
-      setPeopleMessage('正在录制：请正对镜头，慢慢左右转头，再轻微抬头、低头。最长20秒。');
-      faceRecordingTimer = setTimeout(stopFaceRecording, 20000);
+      setPeopleMessage('正在采集：请正对镜头，慢慢左右转头，再轻微抬头、低头。最长15秒。');
+      void collectFaceSample();
+      faceSampleInterval = setInterval(collectFaceSample, 850);
+      faceRecordingTimer = setTimeout(() => void stopFaceRecording(), 15000);
     }
 
     function monitorPresenceMotion() {
       const motionMonitoringEnabled = presenceSettings.enabled || sceneBroadcastSettings.enabled;
-      if (!motionMonitoringEnabled || !stream || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+      if (!motionMonitoringEnabled || !stream || !video.complete || video.naturalWidth === 0) return;
       presenceContext.drawImage(video, 0, 0, presenceCanvas.width, presenceCanvas.height);
       const pixels = presenceContext.getImageData(0, 0, presenceCanvas.width, presenceCanvas.height).data;
       const gray = new Uint8Array(presenceCanvas.width * presenceCanvas.height);
@@ -1082,12 +984,97 @@
       }
     }
 
+    function displayTime(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '';
+      return date.toLocaleString('zh-CN', {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false,
+      });
+    }
+
+    function renderConversations(conversations) {
+      conversationLog.replaceChildren();
+      conversationCount.textContent = `${conversations.length} 次`;
+      if (!conversations.length) {
+        const empty = document.createElement('div');
+        empty.className = 'conversation-empty';
+        empty.textContent = '说“老叶老叶”开启新对话，对话内容会显示在这里。';
+        conversationLog.append(empty);
+        return;
+      }
+      conversations.forEach((conversation, index) => {
+        const item = document.createElement('details');
+        item.className = 'conversation-item';
+        item.open = index === 0;
+
+        const summary = document.createElement('summary');
+        const titleRow = document.createElement('div');
+        titleRow.className = 'conversation-title-row';
+        const title = document.createElement('span');
+        title.className = 'conversation-title';
+        title.textContent = conversation.title || '新对话';
+        const state = document.createElement('span');
+        state.className = `conversation-state${conversation.active ? ' active' : ''}`;
+        state.textContent = conversation.active ? '进行中' : '已结束';
+        titleRow.append(title, state);
+        const time = document.createElement('span');
+        time.className = 'conversation-time';
+        const endReason = !conversation.active && conversation.end_reason
+          ? ` · ${conversation.end_reason}`
+          : '';
+        time.textContent = `${displayTime(conversation.started_at)}${endReason}`;
+        summary.append(titleRow, time);
+        item.append(summary);
+
+        const messages = document.createElement('div');
+        messages.className = 'message-list';
+        (conversation.messages || []).forEach((message) => {
+          const row = document.createElement('div');
+          row.className = `message ${message.role === 'user' ? 'user' : 'assistant'}`;
+          const meta = document.createElement('div');
+          meta.className = 'message-meta';
+          const speaker = document.createElement('span');
+          speaker.textContent = message.role === 'user' ? '我' : '老叶';
+          const messageTime = document.createElement('span');
+          messageTime.textContent = displayTime(message.timestamp);
+          meta.append(speaker, messageTime);
+          const content = document.createElement('div');
+          content.className = 'message-text';
+          content.textContent = message.text || '';
+          row.append(meta, content);
+          messages.append(row);
+        });
+        item.append(messages);
+        conversationLog.append(item);
+      });
+      conversationLog.scrollTop = 0;
+    }
+
+    async function refreshConversations(revision) {
+      if (conversationLoading || Number(revision) === conversationRevision) return;
+      conversationLoading = true;
+      try {
+        const response = await fetch('/api/conversations', { cache: 'no-store' });
+        const payload = await response.json();
+        if (!response.ok) throw new Error('对话记录读取失败');
+        conversationRevision = Number(payload.revision || 0);
+        renderConversations(payload.conversations || []);
+      } catch (error) {
+        if (conversationRevision < 0) {
+          conversationLog.textContent = error.message || '对话记录暂时不可用';
+        }
+      } finally {
+        conversationLoading = false;
+      }
+    }
+
     async function refreshStatus() {
       try {
         const response = await fetch('/api/status', { cache: 'no-store' });
         const status = await response.json();
         assistantState.textContent = status.assistant_status;
-        if (status.last_answer) lastAnswer.textContent = status.last_answer;
+        void refreshConversations(status.conversation_revision);
         const presenceWasEnabled = presenceSettings.enabled;
         const sceneWasEnabled = sceneBroadcastSettings.enabled;
         syncPresenceToggle(status.presence_enabled);
@@ -1316,7 +1303,7 @@
       void loadPeople();
     });
     closePeopleButton.addEventListener('click', () => {
-      if (faceRecorder?.state === 'recording') stopFaceRecording();
+      if (faceRecorder?.state === 'recording') void stopFaceRecording();
       peopleDialog.close();
     });
     addPersonButton.addEventListener('click', async () => {
@@ -1336,7 +1323,7 @@
         personNameInput.value = '';
         personAliasesInput.value = '';
         personConsentInput.checked = false;
-        setPeopleMessage(`已新增${result.person.name}，现在可以开始视频采集。`);
+        setPeopleMessage(`已新增${result.person.name}，现在可以开始人脸采集。`);
         await loadPeople();
       } catch (error) {
         setPeopleMessage(error.message || '新增人员失败', true);
@@ -1405,7 +1392,7 @@
       try {
         const response = await fetch('/api/config');
         const config = await response.json();
-        preferredKeywords = config.camera_name_keywords || preferredKeywords;
+        configuredCameras = (config.native_camera?.cameras || []).filter((camera) => camera.enabled !== false);
         presenceSettings = { ...presenceSettings, ...(config.person_monitor || {}) };
         sceneBroadcastSettings = { ...sceneBroadcastSettings, ...(config.scene_broadcast || {}) };
         faceRecognitionSettings = { ...faceRecognitionSettings, ...(config.face_recognition || {}) };
@@ -1446,12 +1433,7 @@
           modelMessage.textContent = `正在使用：${config.model.label}`;
         }
       } catch (_) {}
-      if (!navigator.mediaDevices?.getUserMedia) {
-        setCameraStatus('浏览器不支持摄像头', false);
-        return;
-      }
       await connectCameras();
-      setInterval(sendCurrentFrame, 1000);
       setInterval(monitorPresenceMotion, 500);
       setInterval(sendFaceRecognitionFrame, 1200);
       setInterval(refreshStatus, 1000);

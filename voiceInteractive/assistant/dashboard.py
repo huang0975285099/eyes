@@ -153,6 +153,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             status["native_camera"] = self.server.native_camera.status()
             self._send_json(status)
             return
+        if request_path == "/api/conversations":
+            self._send_json(self.server.store.conversations())
+            return
         if request_path.startswith("/api/motion-events/"):
             filename = request_path.removeprefix("/api/motion-events/")
             path = self.server.native_camera.archive.resolve(filename)
@@ -213,7 +216,55 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
             return
+        stream_match = re.fullmatch(r"/api/camera-stream/([A-Za-z0-9_-]+)", request_path)
+        if stream_match:
+            self._send_camera_stream(stream_match.group(1))
+            return
+        frame_match = re.fullmatch(r"/api/camera-frame/([A-Za-z0-9_-]+)", request_path)
+        if frame_match:
+            self._send_camera_frame(frame_match.group(1))
+            return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _send_camera_frame(self, camera_id: str) -> None:
+        try:
+            frame = self.server.native_camera.preview_frame(camera_id)
+        except KeyError:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        if frame is None:
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "camera frame unavailable")
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(frame)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.end_headers()
+        self.wfile.write(frame)
+
+    def _send_camera_stream(self, camera_id: str) -> None:
+        if not self.server.native_camera.has_camera(camera_id):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        try:
+            frames = self.server.native_camera.preview_frames(camera_id)
+            self.send_response(HTTPStatus.OK)
+            self.send_header(
+                "Content-Type", "multipart/x-mixed-replace; boundary=frame"
+            )
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for frame in frames:
+                self.wfile.write(b"--frame\r\n")
+                self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii"))
+                self.wfile.write(frame)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
 
     def do_POST(self) -> None:
         request_path = self.path.partition("?")[0]
@@ -538,7 +589,7 @@ class CameraDashboard:
     def __init__(self, config: Config, model_router: ModelRouter) -> None:
         self.config = config
         self.model_router = model_router
-        self.store = CameraFrameStore()
+        self.store = CameraFrameStore(APP_DIR / "data" / "conversations.json")
         self.store.set_scene_broadcast_enabled(config.scene_broadcast_enabled)
         if config.person_detector == "yolo":
             person_detector = YoloPersonDetector(config)

@@ -25,7 +25,7 @@ from assistant.native_camera import (
     MotionSettings,
     NativeCameraMonitor,
 )
-from assistant.platform_utils import audio_device_options
+from assistant.platform_utils import audio_device_options, find_audio_device
 
 from voice_assistant import (
     build_accent_aware_question,
@@ -378,6 +378,38 @@ class AudioTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in options], ["Deli", "2- Deli"])
         self.assertEqual([item["selector"] for item in options], ["Deli", "2- Deli"])
 
+    def test_audio_device_survives_windows_duplicate_number_change(self) -> None:
+        devices = [
+            {
+                "name": "Microphone (3- Deli-1080P-Camera-Audio)",
+                "hostapi": 0,
+                "max_input_channels": 1,
+                "max_output_channels": 0,
+                "default_low_input_latency": 0.01,
+                "default_samplerate": 48000,
+            },
+            {
+                "name": "麦克风 (Deli-1080P-Camera-Audio)",
+                "hostapi": 0,
+                "max_input_channels": 1,
+                "max_output_channels": 0,
+                "default_low_input_latency": 0.01,
+                "default_samplerate": 48000,
+            },
+        ]
+        with (
+            patch("assistant.platform_utils.sd.query_devices", return_value=devices),
+            patch(
+                "assistant.platform_utils.sd.query_hostapis",
+                return_value={"name": "Windows WASAPI"},
+            ),
+        ):
+            selected = find_audio_device(
+                "Microphone (2- Deli-1080P-Camera-Audio)", "input"
+            )
+        self.assertEqual(selected.index, 0)
+        self.assertIn("3- Deli", selected.name)
+
     def test_resample_pcm_shape_and_edges(self) -> None:
         samples = np.array([[0], [100], [200]], dtype=np.int16)
         result = resample_pcm(samples, 3, 6)
@@ -506,6 +538,51 @@ class CameraFrameStoreTests(unittest.TestCase):
         store.request_shutdown()
         self.assertTrue(store.shutdown_event.is_set())
         self.assertEqual(store.status()["assistant_status"], "正在关闭语音助手")
+
+    def test_conversations_are_newest_first_and_goodbye_closes_current(self) -> None:
+        store = CameraFrameStore()
+        first_id = store.start_conversation("老叶老叶", "我在")
+        self.assertTrue(store.add_conversation_message("user", "今天会下雨吗"))
+        self.assertTrue(store.add_conversation_message("assistant", "今天降雨概率不高。"))
+        self.assertTrue(store.end_conversation("再见", "好的，需要时再叫我。"))
+
+        first = store.conversations()["conversations"][0]
+        self.assertEqual(first["id"], first_id)
+        self.assertFalse(first["active"])
+        self.assertEqual(first["end_reason"], "再见")
+        self.assertEqual(first["title"], "今天会下雨吗")
+        self.assertEqual(first["messages"][0]["text"], "好的，需要时再叫我。")
+
+        second_id = store.start_conversation("老叶老叶", "我在")
+        snapshot = store.conversations()
+        self.assertEqual(snapshot["active_conversation_id"], second_id)
+        self.assertEqual(snapshot["conversations"][0]["id"], second_id)
+        self.assertEqual(snapshot["conversations"][1]["id"], first_id)
+        self.assertEqual(snapshot["conversations"][0]["messages"][0]["text"], "我在")
+
+    def test_conversation_history_persists_and_closes_after_restart(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "conversations.json"
+            store = CameraFrameStore(path)
+            store.start_conversation()
+            store.add_conversation_message("user", "测试持久化")
+
+            restored = CameraFrameStore(path)
+            snapshot = restored.conversations()
+            self.assertEqual(len(snapshot["conversations"]), 1)
+            self.assertFalse(snapshot["conversations"][0]["active"])
+            self.assertEqual(snapshot["conversations"][0]["end_reason"], "程序重启")
+            self.assertEqual(snapshot["conversations"][0]["title"], "测试持久化")
+
+    def test_wake_phrase_starts_new_conversation_and_closes_previous(self) -> None:
+        store = CameraFrameStore()
+        first_id = store.start_conversation()
+        second_id = store.start_conversation()
+        snapshot = store.conversations()
+        self.assertEqual(snapshot["active_conversation_id"], second_id)
+        previous = next(item for item in snapshot["conversations"] if item["id"] == first_id)
+        self.assertFalse(previous["active"])
+        self.assertEqual(previous["end_reason"], "重新唤醒")
 
     def test_restart_request_uses_distinct_exit_signal(self) -> None:
         store = CameraFrameStore()
@@ -660,7 +737,7 @@ class NativeCameraTests(unittest.TestCase):
                 return self.opened
 
             def read(self):
-                return True, np.zeros((90, 160, 3), dtype=np.uint8)
+                return True, np.full((90, 160, 3), 120, dtype=np.uint8)
 
             def release(self) -> None:
                 self.opened = False
@@ -701,7 +778,7 @@ class NativeCameraTests(unittest.TestCase):
                 return self.opened
 
             def read(self):
-                return True, np.zeros((90, 160, 3), dtype=np.uint8)
+                return True, np.full((90, 160, 3), 120, dtype=np.uint8)
 
             def release(self) -> None:
                 self.opened = False
@@ -735,6 +812,41 @@ class NativeCameraTests(unittest.TestCase):
         self.assertEqual(status["configured_count"], 2)
         self.assertEqual(status["active_count"], 2)
         self.assertEqual(store.status()["frame_source"], "native")
+
+    def test_preview_reads_camera_while_monitoring_is_disabled(self) -> None:
+        class FakeCapture:
+            def __init__(self) -> None:
+                self.opened = True
+
+            def isOpened(self) -> bool:
+                return self.opened
+
+            def read(self):
+                return True, np.full((90, 160, 3), 120, dtype=np.uint8)
+
+            def release(self) -> None:
+                self.opened = False
+
+        config = load_config(DEFAULT_CONFIG)
+        config = replace(
+            config,
+            native_camera_enabled=False,
+            native_cameras=(config.native_cameras[0],),
+        )
+        monitor = NativeCameraMonitor(
+            config,
+            CameraFrameStore(),
+            SimpleNamespace(enabled=False),
+            SimpleNamespace(enabled=False),
+        )
+        with patch.object(monitor, "_open_camera", return_value=FakeCapture()):
+            monitor.start()
+            frame = monitor.preview_frame(config.native_cameras[0].id, timeout=1.0)
+            status = monitor.status()
+            monitor.stop()
+        self.assertIsNotNone(frame)
+        self.assertTrue(frame.startswith(b"\xff\xd8"))
+        self.assertFalse(status["enabled"])
 
 
 class PersonPresenceMonitorTests(unittest.TestCase):
