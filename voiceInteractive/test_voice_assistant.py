@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import datetime
 import json
 from pathlib import Path
@@ -17,7 +18,7 @@ import voice_assistant as voice_assistant_module
 
 from face_service import FaceDatabase, describe_position, match_face_embeddings
 from assistant.face import FaceRecognitionService
-from assistant.config import DEFAULT_CONFIG, load_config
+from assistant.config import DEFAULT_CONFIG, NativeCameraConfig, load_config
 from assistant.native_camera import (
     MotionDetector,
     MotionEventArchive,
@@ -584,6 +585,19 @@ class CameraFrameStoreTests(unittest.TestCase):
 
 
 class NativeCameraTests(unittest.TestCase):
+    def test_config_accepts_multiple_native_cameras(self) -> None:
+        with TemporaryDirectory() as temporary:
+            raw = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+            raw["native_cameras"] = [
+                {"id": "front", "name": "Front", "index": 0, "primary": True},
+                {"id": "side", "name": "Side", "index": 1, "primary": False},
+            ]
+            path = Path(temporary) / "config.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            config = load_config(path)
+        self.assertEqual([camera.index for camera in config.native_cameras], [0, 1])
+        self.assertEqual(config.native_camera_index, 0)
+
     def test_sustained_change_triggers_after_warmup(self) -> None:
         detector = MotionDetector()
         settings = MotionSettings(70, 0.5, 3, 1.0)
@@ -644,6 +658,49 @@ class NativeCameraTests(unittest.TestCase):
             self.assertTrue(capture.released.wait(1.0))
             self.assertFalse(monitor.status()["active"])
             monitor.stop()
+
+    def test_monitor_runs_one_worker_per_enabled_camera(self) -> None:
+        class FakeCapture:
+            def __init__(self) -> None:
+                self.opened = True
+
+            def isOpened(self) -> bool:
+                return self.opened
+
+            def read(self):
+                return True, np.zeros((90, 160, 3), dtype=np.uint8)
+
+            def release(self) -> None:
+                self.opened = False
+
+        config = load_config(DEFAULT_CONFIG)
+        config = replace(
+            config,
+            native_cameras=(
+                NativeCameraConfig("front", "Front", 0, True, True),
+                NativeCameraConfig("side", "Side", 1, True, False),
+            ),
+        )
+        store = CameraFrameStore()
+        monitor = NativeCameraMonitor(
+            config,
+            store,
+            SimpleNamespace(enabled=False),
+            SimpleNamespace(enabled=False),
+        )
+        with patch.object(monitor, "_open_camera", side_effect=lambda _: FakeCapture()):
+            monitor.start()
+            deadline = time.monotonic() + 1.5
+            while (
+                monitor.status()["active_count"] < 2
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            status = monitor.status()
+            monitor.stop()
+        self.assertEqual(status["configured_count"], 2)
+        self.assertEqual(status["active_count"], 2)
+        self.assertEqual(store.status()["frame_source"], "native")
 
 
 class PersonPresenceMonitorTests(unittest.TestCase):
@@ -1232,6 +1289,17 @@ class OnlineSearchToolsTests(unittest.TestCase):
 
 
 class StreamingSpeechTests(unittest.TestCase):
+    def test_half_duplex_mode_does_not_listen_to_its_own_speaker(self) -> None:
+        assistant = VoiceAssistant.__new__(VoiceAssistant)
+        assistant.config = SimpleNamespace(barge_in_during_playback=False)
+        assistant.interrupt_audio_queue = queue.Queue()
+        assistant.barge_in_enabled = threading.Event()
+        assistant.playback_cancel = threading.Event()
+        assistant._interrupt_lock = threading.Lock()
+        assistant._interrupt_action = None
+        assistant._begin_interruptible_playback()
+        self.assertFalse(assistant.barge_in_enabled.is_set())
+
     def test_model_runs_in_worker_but_audio_plays_on_calling_thread(self) -> None:
         caller_thread = threading.current_thread().name
         model_threads: list[str] = []

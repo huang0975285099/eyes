@@ -11,7 +11,7 @@ $ErrorLog = Join-Path $ProjectDir 'logs\assistant-error.log'
 Set-Location -LiteralPath $ProjectDir
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8:replace'
-$env:XIAOBU_NO_BROWSER = '1'
+$env:LAOYE_NO_BROWSER = '1'
 
 $AssistantArguments = @()
 if ($AssistantArgumentsBase64) {

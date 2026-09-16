@@ -43,10 +43,15 @@ class WindowsNotificationService:
                 pass
 
     def stop(self) -> None:
-        try:
-            self._queue.put_nowait(None)
-        except queue.Full:
-            pass
+        while True:
+            try:
+                self._queue.put_nowait(None)
+                break
+            except queue.Full:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
         self._thread.join(timeout=2)
 
     def _fallback(self, title: str, message: str) -> None:

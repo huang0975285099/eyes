@@ -526,7 +526,11 @@ class CameraDashboard:
                 print(f"摄像头页面 IPv6 监听不可用：{error}", file=sys.stderr)
         print(f"摄像头页面：{self.url}")
         self.native_camera.start()
-        if self.config.open_browser and os.environ.get("XIAOBU_NO_BROWSER") != "1":
+        browser_disabled = (
+            os.environ.get("LAOYE_NO_BROWSER") == "1"
+            or os.environ.get("XIAOBU_NO_BROWSER") == "1"
+        )
+        if self.config.open_browser and not browser_disabled:
             threading.Timer(0.8, lambda: webbrowser.open(self.url)).start()
 
     def stop(self) -> None:
