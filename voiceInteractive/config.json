@@ -58,6 +58,18 @@
   "yolo_confidence": 0.35,
   "yolo_image_size": 640,
   "yolo_timeout_seconds": 30.0,
+  "face_recognition_enabled": false,
+  "face_python_executable": "C:/Users/Administrator/AppData/Local/Programs/Python/Python314/python.exe",
+  "face_detector_model_path": "models/face/face_detection_yunet_2023mar.onnx",
+  "face_recognizer_model_path": "models/face/face_recognition_sface_2021dec.onnx",
+  "face_database_path": "data/faces/faces.db",
+  "face_detector_score_threshold": 0.88,
+  "face_match_threshold": 0.48,
+  "face_match_margin": 0.05,
+  "face_min_size": 80,
+  "face_min_blur": 35.0,
+  "face_result_max_age_seconds": 5.0,
+  "face_timeout_seconds": 20.0,
   "model_path": "models/vosk-model-small-cn-0.22",
   "model_url": "https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip"
 }

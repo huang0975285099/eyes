@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 
+from face_service import FaceDatabase, describe_position
+
 from voice_assistant import (
     build_accent_aware_question,
     build_proxy_opener,
@@ -33,6 +35,7 @@ from voice_assistant import (
     is_weather_follow_up,
     is_vision_command,
     is_vision_follow_up,
+    is_person_location_query,
     ModelRouter,
     normalize_text,
     OllamaClient,
@@ -66,6 +69,12 @@ class TextTests(unittest.TestCase):
         self.assertTrue(is_time_command("现在 几点 了"))
         self.assertTrue(is_time_command("几点？"))
         self.assertFalse(is_time_command("今天天气怎么样"))
+
+    def test_person_location_query(self) -> None:
+        self.assertTrue(is_person_location_query("王二在哪里"))
+        self.assertTrue(is_person_location_query("张三在什么位置"))
+        self.assertFalse(is_person_location_query("王二是谁"))
+
 
     def test_accented_recognition_uses_actionable_alternative(self) -> None:
         payload = json.dumps(
@@ -218,6 +227,42 @@ class TextTests(unittest.TestCase):
             format_time_zh(datetime(2026, 9, 12, 13, 30)),
             "现在是中午一点三十分。",
         )
+
+
+class FaceDatabaseTests(unittest.TestCase):
+    def test_person_samples_resolution_and_delete(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            database = FaceDatabase(Path(temp_dir) / "faces.db")
+            try:
+                person = database.add_person("王二", ["小王", "王师傅"])
+                self.assertEqual(database.resolve_person("小王在哪")["id"], person["id"])
+                vector = np.array([0.6, 0.8], dtype=np.float32)
+                sample_id = database.add_sample(
+                    person["id"], vector, b"jpeg bytes", 0.95, 88.0
+                )
+                self.assertGreater(sample_id, 0)
+                self.assertEqual(database.list_people()[0]["sample_count"], 1)
+                stored = database.embeddings()[0][2]
+                np.testing.assert_allclose(stored, vector)
+                self.assertTrue(database.delete_person(person["id"]))
+                self.assertEqual(database.list_people(), [])
+            finally:
+                database.close()
+
+    def test_duplicate_person_is_rejected(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            database = FaceDatabase(Path(temp_dir) / "faces.db")
+            try:
+                database.add_person("张三")
+                with self.assertRaisesRegex(ValueError, "已经存在"):
+                    database.add_person("张三")
+            finally:
+                database.close()
+
+    def test_position_description(self) -> None:
+        self.assertIn("左侧", describe_position([20, 20, 100, 100], 1000, 600))
+        self.assertIn("中间", describe_position([450, 20, 100, 100], 1000, 600))
+        self.assertIn("右侧", describe_position([820, 20, 100, 100], 1000, 600))
 
 
 class AudioTests(unittest.TestCase):

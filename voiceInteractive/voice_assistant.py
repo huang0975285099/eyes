@@ -34,6 +34,8 @@ import numpy as np
 import sounddevice as sd
 from vosk import KaldiRecognizer, Model, SetLogLevel
 
+from face_service import FaceRecognitionService
+
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = APP_DIR / "config.json"
@@ -98,6 +100,18 @@ class Config:
     yolo_confidence: float
     yolo_image_size: int
     yolo_timeout_seconds: float
+    face_recognition_enabled: bool
+    face_python_executable: str
+    face_detector_model_path: Path
+    face_recognizer_model_path: Path
+    face_database_path: Path
+    face_detector_score_threshold: float
+    face_match_threshold: float
+    face_match_margin: float
+    face_min_size: int
+    face_min_blur: float
+    face_result_max_age_seconds: float
+    face_timeout_seconds: float
     model_path: Path
     model_url: str
 
@@ -129,6 +143,25 @@ def load_config(path: Path) -> Config:
     yolo_model_path = Path(raw.get("yolo_model_path", "models/yolov8n.pt"))
     if not yolo_model_path.is_absolute():
         yolo_model_path = APP_DIR / yolo_model_path
+    face_detector_model_path = Path(
+        raw.get(
+            "face_detector_model_path",
+            "models/face/face_detection_yunet_2023mar.onnx",
+        )
+    )
+    if not face_detector_model_path.is_absolute():
+        face_detector_model_path = APP_DIR / face_detector_model_path
+    face_recognizer_model_path = Path(
+        raw.get(
+            "face_recognizer_model_path",
+            "models/face/face_recognition_sface_2021dec.onnx",
+        )
+    )
+    if not face_recognizer_model_path.is_absolute():
+        face_recognizer_model_path = APP_DIR / face_recognizer_model_path
+    face_database_path = Path(raw.get("face_database_path", "data/faces/faces.db"))
+    if not face_database_path.is_absolute():
+        face_database_path = APP_DIR / face_database_path
     return Config(
         input_device=raw.get("input_device", "Deli-1080P-Camera-Audio"),
         output_device=raw.get("output_device", "Deli-1080P-Camera Audio"),
@@ -218,6 +251,30 @@ def load_config(path: Path) -> Config:
         yolo_image_size=max(320, min(1280, int(raw.get("yolo_image_size", 640)))),
         yolo_timeout_seconds=max(
             2.0, float(raw.get("yolo_timeout_seconds", 30.0))
+        ),
+        face_recognition_enabled=bool(raw.get("face_recognition_enabled", False)),
+        face_python_executable=str(
+            raw.get("face_python_executable", raw.get("yolo_python_executable", "python"))
+        ).strip(),
+        face_detector_model_path=face_detector_model_path,
+        face_recognizer_model_path=face_recognizer_model_path,
+        face_database_path=face_database_path,
+        face_detector_score_threshold=max(
+            0.5, min(0.99, float(raw.get("face_detector_score_threshold", 0.88)))
+        ),
+        face_match_threshold=max(
+            0.1, min(0.95, float(raw.get("face_match_threshold", 0.48)))
+        ),
+        face_match_margin=max(
+            0.0, min(0.5, float(raw.get("face_match_margin", 0.05)))
+        ),
+        face_min_size=max(40, int(raw.get("face_min_size", 80))),
+        face_min_blur=max(0.0, float(raw.get("face_min_blur", 35.0))),
+        face_result_max_age_seconds=max(
+            2.0, float(raw.get("face_result_max_age_seconds", 5.0))
+        ),
+        face_timeout_seconds=max(
+            2.0, float(raw.get("face_timeout_seconds", 20.0))
         ),
         model_path=model_path,
         model_url=raw.get("model_url", DEFAULT_MODEL_URL),
@@ -662,6 +719,11 @@ def is_vision_follow_up(text: str) -> bool:
     )
 
 
+def is_person_location_query(text: str) -> bool:
+    normalized = normalize_text(text)
+    return any(phrase in normalized for phrase in ("在哪", "在哪里", "哪边", "什么位置"))
+
+
 def select_actionable_recognition(
     alternatives: list[str], wake_phrases: tuple[str, ...], state: str
 ) -> str:
@@ -680,6 +742,7 @@ def select_actionable_recognition(
                 is_exit_command,
                 is_end_conversation_command,
                 is_vision_command,
+                is_person_location_query,
             )
         )
 
@@ -2638,12 +2701,14 @@ class DashboardHTTPServer(ThreadingHTTPServer):
         config: Config,
         model_router: ModelRouter,
         presence_monitor: PersonPresenceMonitor,
+        face_service: FaceRecognitionService,
     ):
         super().__init__(address, handler)
         self.store = store
         self.config = config
         self.model_router = model_router
         self.presence_monitor = presence_monitor
+        self.face_service = face_service
 
 
 class DashboardHTTPServerV6(DashboardHTTPServer):
@@ -2657,6 +2722,7 @@ class DashboardHTTPServerV6(DashboardHTTPServer):
 class DashboardHandler(BaseHTTPRequestHandler):
     server: DashboardHTTPServer
     MAX_FRAME_BYTES = 5 * 1024 * 1024
+    MAX_VIDEO_BYTES = 80 * 1024 * 1024
 
     def log_message(self, format: str, *args) -> None:
         return
@@ -2708,11 +2774,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "enabled": self.server.store.scene_broadcast_enabled(),
                         "cooldown_seconds": self.server.config.scene_broadcast_cooldown_seconds,
                     },
+                    "face_recognition": {
+                        "enabled": self.server.face_service.enabled,
+                        "recommended_samples": 15,
+                    },
                 }
             )
             return
         if request_path == "/api/status":
-            self._send_json(self.server.store.status())
+            status = self.server.store.status()
+            status["face_recognition"] = self.server.face_service.status()
+            self._send_json(status)
+            return
+        if request_path == "/api/people":
+            self._send_json({"people": self.server.face_service.database.list_people()})
             return
         if request_path == "/api/snapshot":
             snapshot_id, frame = self.server.store.analysis_snapshot()
@@ -2801,6 +2876,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
             return
+        if request_path == "/api/face-recognition":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0 or content_length > 1024:
+                    raise ValueError("无效的请求内容")
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                enabled = payload.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled 必须是布尔值")
+                self.server.face_service.set_enabled(enabled)
+                self._send_json({"ok": True, "enabled": enabled})
+            except (ValueError, json.JSONDecodeError) as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if request_path == "/api/people":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0 or content_length > 4096:
+                    raise ValueError("无效的请求内容")
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                if payload.get("consent") is not True:
+                    raise ValueError("录入前必须确认已获得本人同意")
+                person = self.server.face_service.database.add_person(
+                    str(payload.get("name", "")), payload.get("aliases", [])
+                )
+                self._send_json({"ok": True, "person": person}, HTTPStatus.CREATED)
+            except (ValueError, json.JSONDecodeError) as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if request_path == "/api/scene-broadcast":
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -2835,7 +2939,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/snapshot",
             "/api/presence-check",
             "/api/scene-description",
+            "/api/face-recognize",
         }:
+            sample_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/samples", request_path)
+            if sample_match:
+                self._handle_face_sample(sample_match.group(1))
+                return
+            video_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/video", request_path)
+            if video_match:
+                self._handle_face_video(video_match.group(1))
+                return
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
@@ -2867,6 +2980,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 HTTPStatus.ACCEPTED if accepted else HTTPStatus.TOO_MANY_REQUESTS,
             )
             return
+        if request_path == "/api/face-recognize":
+            accepted = self.server.face_service.submit(frame)
+            self._send_json(
+                {"accepted": accepted},
+                HTTPStatus.ACCEPTED if accepted else HTTPStatus.TOO_MANY_REQUESTS,
+            )
+            return
         if request_path == "/api/snapshot":
             try:
                 request_id = int(self.headers.get("X-Snapshot-Request-Id", "0"))
@@ -2889,6 +3009,62 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
+    def _handle_face_sample(self, person_id: str) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+        if content_length <= 0 or content_length > self.MAX_FRAME_BYTES:
+            self._send_json({"ok": False, "error": "无效的照片大小"}, HTTPStatus.BAD_REQUEST)
+            return
+        frame = self.rfile.read(content_length)
+        if not (frame.startswith(b"\xff\xd8") and frame.endswith(b"\xff\xd9")):
+            self._send_json({"ok": False, "error": "只支持JPEG照片"}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            result = self.server.face_service.enroll(person_id, frame)
+            self._send_json({"ok": True, **result}, HTTPStatus.CREATED)
+        except (ValueError, RuntimeError) as error:
+            self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+    def _handle_face_video(self, person_id: str) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+        if content_length <= 0 or content_length > self.MAX_VIDEO_BYTES:
+            self._send_json(
+                {"ok": False, "error": "视频大小无效或超过80MB"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        content_type = self.headers.get("Content-Type", "video/webm").split(";", 1)[0]
+        if content_type not in {"video/webm", "video/mp4", "application/octet-stream"}:
+            self._send_json(
+                {"ok": False, "error": "只支持WebM或MP4视频"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            result = self.server.face_service.enroll_video(
+                person_id, self.rfile.read(content_length), content_type
+            )
+            self._send_json({"ok": True, **result}, HTTPStatus.CREATED)
+        except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+            self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+    def do_DELETE(self) -> None:
+        request_path = self.path.partition("?")[0]
+        person_match = re.fullmatch(r"/api/people/([0-9a-f]{32})", request_path)
+        if not person_match:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        deleted = self.server.face_service.database.delete_person(person_match.group(1))
+        if not deleted:
+            self._send_json({"ok": False, "error": "人员不存在"}, HTTPStatus.NOT_FOUND)
+            return
+        self._send_json({"ok": True})
+
 
 class CameraDashboard:
     def __init__(self, config: Config, model_router: ModelRouter) -> None:
@@ -2907,6 +3083,7 @@ class CameraDashboard:
         self.presence_monitor = PersonPresenceMonitor(
             self.store, person_detector, config.person_monitor_enabled
         )
+        self.face_service = FaceRecognitionService(config)
         self.server: DashboardHTTPServer | None = None
         self.servers: list[DashboardHTTPServer] = []
         self.threads: list[threading.Thread] = []
@@ -2929,6 +3106,7 @@ class CameraDashboard:
             self.config,
             self.model_router,
             self.presence_monitor,
+            self.face_service,
         )
         self.servers.append(self.server)
         thread = threading.Thread(
@@ -2946,6 +3124,7 @@ class CameraDashboard:
                     self.config,
                     self.model_router,
                     self.presence_monitor,
+                    self.face_service,
                 )
                 self.servers.append(ipv6_server)
                 ipv6_thread = threading.Thread(
@@ -2966,6 +3145,7 @@ class CameraDashboard:
             server.shutdown()
             server.server_close()
         self.presence_monitor.close()
+        self.face_service.close()
 
 
 class VoiceAssistant:
@@ -3474,6 +3654,35 @@ class VoiceAssistant:
                         self.dashboard.store.set_assistant_status(
                             self._continuation_status(interrupt_action), response
                         )
+                elif (
+                    state == "command"
+                    and is_final
+                    and self.dashboard is not None
+                    and is_person_location_query(text)
+                    and (answer := self.dashboard.face_service.answer_location(text))
+                    is not None
+                ):
+                    vision_context_active = False
+                    weather_context_active = False
+                    desktop_context_active = False
+                    self.ollama.remember(text, answer)
+                    print(f"[人员位置回答] {answer}")
+                    self.dashboard.store.set_assistant_status("人员位置查询完成", answer)
+                    try:
+                        interrupt_action = self._play_interruptible(
+                            self.speaker.say, answer, self.playback_cancel
+                        )
+                    except Exception as error:
+                        print(f"[语音合成失败] {error}", file=sys.stderr)
+                        self._play(self.speaker.chime, False)
+                        interrupt_action = None
+                    state = "command"
+                    command_deadline = time.monotonic() + self.config.command_timeout_seconds
+                    command_recognizer.Reset()
+                    last_partial = ""
+                    self.dashboard.store.set_assistant_status(
+                        self._continuation_status(interrupt_action), answer
+                    )
                 elif state == "command" and is_time_command(text):
                     vision_context_active = False
                     weather_context_active = False
