@@ -47,6 +47,7 @@ from voice_assistant import (
     is_weather_follow_up,
     is_vision_command,
     is_vision_follow_up,
+    vision_camera_hint,
     is_person_location_query,
     ModelRouter,
     normalize_text,
@@ -188,6 +189,16 @@ class TextTests(unittest.TestCase):
         self.assertTrue(is_vision_follow_up("这个男的是年轻人吗"))
         self.assertTrue(is_vision_follow_up("左边有什么"))
         self.assertFalse(is_vision_follow_up("给我讲一个笑话"))
+
+    def test_vision_camera_hint(self) -> None:
+        self.assertEqual(vision_camera_hint("右眼 看见了 什么"), "right")
+        self.assertEqual(vision_camera_hint("右眼看到什么"), "right")
+        self.assertIsNone(vision_camera_hint("左眼 看见了 什么"))
+        self.assertIsNone(vision_camera_hint("你 看到了 什么"))
+        self.assertIsNone(vision_camera_hint("给我讲一个笑话"))
+        # 右眼问句同时也是视觉指令，左眼问句不应指向辅助摄像头。
+        self.assertTrue(is_vision_command("左眼 看见了 什么"))
+        self.assertTrue(is_vision_command("右眼 看见了 什么"))
 
     def test_conversation_and_application_exit_commands(self) -> None:
         self.assertTrue(is_end_conversation_command("好了，不用了"))
@@ -409,6 +420,39 @@ class AudioTests(unittest.TestCase):
             )
         self.assertEqual(selected.index, 0)
         self.assertIn("3- Deli", selected.name)
+
+    def test_audio_device_matches_localized_name_change(self) -> None:
+        # 配置里保存的是中文名，Windows 重插同型号设备后端点变成英文+编号。
+        devices = [
+            {
+                "name": "Microphone (3- Deli-1080P-Camera-Audio)",
+                "hostapi": 0,
+                "max_input_channels": 1,
+                "max_output_channels": 0,
+                "default_low_input_latency": 0.01,
+                "default_samplerate": 48000,
+            },
+            {
+                "name": "麦克风 (Realtek High Definition Audio)",
+                "hostapi": 0,
+                "max_input_channels": 2,
+                "max_output_channels": 0,
+                "default_low_input_latency": 0.01,
+                "default_samplerate": 48000,
+            },
+        ]
+        with (
+            patch("assistant.platform_utils.sd.query_devices", return_value=devices),
+            patch(
+                "assistant.platform_utils.sd.query_hostapis",
+                return_value={"name": "Windows WASAPI"},
+            ),
+        ):
+            selected = find_audio_device(
+                "麦克风 (Deli-1080P-Camera-Audio)", "input"
+            )
+        self.assertEqual(selected.index, 0)
+        self.assertIn("Deli-1080P-Camera-Audio", selected.name)
 
     def test_resample_pcm_shape_and_edges(self) -> None:
         samples = np.array([[0], [100], [200]], dtype=np.int16)
@@ -812,6 +856,59 @@ class NativeCameraTests(unittest.TestCase):
         self.assertEqual(status["configured_count"], 2)
         self.assertEqual(status["active_count"], 2)
         self.assertEqual(store.status()["frame_source"], "native")
+
+    def test_secondary_camera_id_returns_first_non_primary_camera(self) -> None:
+        class ClosedCapture:
+            def isOpened(self) -> bool:
+                return False
+
+            def release(self) -> None:
+                pass
+
+        config = load_config(DEFAULT_CONFIG)
+        config = replace(
+            config,
+            native_camera_enabled=True,
+            native_cameras=(
+                NativeCameraConfig("front", "Front", 0, True, True),
+                NativeCameraConfig("side", "Side", 1, True, False),
+            ),
+        )
+        monitor = NativeCameraMonitor(
+            config,
+            CameraFrameStore(),
+            SimpleNamespace(enabled=False),
+            SimpleNamespace(enabled=False),
+        )
+        with patch.object(monitor, "_open_camera", return_value=ClosedCapture()):
+            monitor.start()
+            self.assertEqual(monitor.secondary_camera_id(), "side")
+            monitor.stop()
+
+    def test_secondary_camera_id_returns_none_without_secondary_camera(self) -> None:
+        class ClosedCapture:
+            def isOpened(self) -> bool:
+                return False
+
+            def release(self) -> None:
+                pass
+
+        config = load_config(DEFAULT_CONFIG)
+        config = replace(
+            config,
+            native_camera_enabled=True,
+            native_cameras=(NativeCameraConfig("front", "Front", 0, True, True),),
+        )
+        monitor = NativeCameraMonitor(
+            config,
+            CameraFrameStore(),
+            SimpleNamespace(enabled=False),
+            SimpleNamespace(enabled=False),
+        )
+        with patch.object(monitor, "_open_camera", return_value=ClosedCapture()):
+            monitor.start()
+            self.assertIsNone(monitor.secondary_camera_id())
+            monitor.stop()
 
     def test_preview_reads_camera_while_monitoring_is_disabled(self) -> None:
         class FakeCapture:

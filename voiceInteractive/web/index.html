@@ -225,12 +225,21 @@
     input[type="text"] { min-height: 42px; border: 1px solid #29463e; border-radius: 11px; padding: 0 12px; background: #081512; color: #e9f7f2; font: inherit; }
     .consent { grid-column: 1 / -1; color: #9bb1aa; font-size: 13px; line-height: 1.45; }
     .people-list { display: grid; gap: 10px; margin-top: 18px; }
+    .people-tools { display: grid; margin-top: 14px; }
     .person-row { border: 1px solid #29463e; border-radius: 13px; padding: 12px; background: rgba(255,255,255,.02); }
     .person-top { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .person-name { font-weight: 700; }
     .person-meta { color: #819b93; font-size: 12px; margin-top: 4px; }
     .person-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
     .person-actions button { min-height: 36px; padding: 0 11px; font-size: 13px; }
+    .person-edit { display: grid; gap: 8px; margin-top: 10px; }
+    .person-edit-actions { display: flex; gap: 8px; }
+    .person-samples { margin-top: 10px; border-top: 1px dashed #29463e; padding-top: 10px; }
+    .sample-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; }
+    .sample-cell { position: relative; }
+    .sample-image { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 9px; border: 1px solid #29463e; background: #081512; }
+    .sample-remove { position: absolute; top: 4px; right: 4px; min-height: 24px; width: 26px; padding: 0; border-radius: 8px; background: rgba(10,25,22,.85); color: #e6aaa3; border-color: rgba(230,115,103,.35); }
+    .sample-note { color: #819b93; font-size: 12px; }
     .danger-button { background: transparent; color: #e6aaa3; border-color: rgba(230,115,103,.35); }
     .recording { background: #d65c54 !important; color: white !important; }
     .face-message { min-height: 21px; color: #9bb1aa; margin: 12px 0 0; font-size: 13px; line-height: 1.55; }
@@ -414,6 +423,9 @@
       <label class="consent"><input id="personConsentInput" type="checkbox"> 已获得本人同意，并知晓照片、视频和人脸特征仅保存在本机</label>
       <button id="addPersonButton" type="button">新增人员</button>
     </div>
+    <div class="people-tools">
+      <input id="personSearchInput" type="text" placeholder="搜索姓名或别名" aria-label="搜索人员">
+    </div>
     <p id="peopleMessage" class="face-message">每人建议保留10～18张清晰样本；背面、模糊和多人画面会自动跳过。</p>
     <div id="peopleList" class="people-list"></div>
   </dialog>
@@ -473,6 +485,7 @@
     const addPersonButton = document.querySelector('#addPersonButton');
     const peopleMessage = document.querySelector('#peopleMessage');
     const peopleList = document.querySelector('#peopleList');
+    const personSearchInput = document.querySelector('#personSearchInput');
     const snapshotPanel = document.querySelector('#snapshotPanel');
     const snapshotImage = document.querySelector('#snapshotImage');
     const shutdownButton = document.querySelector('#shutdownButton');
@@ -787,48 +800,208 @@
       peopleMessage.classList.toggle('error', error);
     }
 
+    let currentPeople = [];
+
+    function personMetaText(person) {
+      const aliases = person.aliases?.length ? ` · 别名：${person.aliases.join('、')}` : '';
+      return `${person.sample_count} 张有效样本${aliases}`;
+    }
+
+    function filteredPeople() {
+      const keyword = personSearchInput.value.trim().toLowerCase();
+      if (!keyword) return currentPeople;
+      return currentPeople.filter((person) => {
+        const haystack = [person.name, ...(person.aliases || [])].join(' ').toLowerCase();
+        return haystack.includes(keyword);
+      });
+    }
+
     function renderPeople(people) {
+      currentPeople = people;
+      renderPeopleRows();
+    }
+
+    function renderPeopleRows() {
+      // 人脸采集进行中时按钮状态依赖DOM节点，避免重绘导致引用失效。
+      if (faceRecorder?.state === 'recording') return;
       peopleList.replaceChildren();
+      const people = filteredPeople();
       if (!people.length) {
         const empty = document.createElement('div');
         empty.className = 'person-meta';
-        empty.textContent = '人员库还是空的，先新增一个人。';
+        empty.textContent = currentPeople.length
+          ? '没有匹配的人员，换个关键词试试。'
+          : '人员库还是空的，先新增一个人。';
         peopleList.append(empty);
         return;
       }
-      people.forEach((person) => {
-        const row = document.createElement('div');
-        row.className = 'person-row';
-        const top = document.createElement('div');
-        top.className = 'person-top';
-        const identity = document.createElement('div');
-        const name = document.createElement('div');
-        name.className = 'person-name';
-        name.textContent = person.name;
-        const meta = document.createElement('div');
-        meta.className = 'person-meta';
-        const aliases = person.aliases?.length ? ` · 别名：${person.aliases.join('、')}` : '';
-        meta.textContent = `${person.sample_count} 张有效样本${aliases}`;
-        identity.append(name, meta);
-        top.append(identity);
-        const actions = document.createElement('div');
-        actions.className = 'person-actions';
-        const record = document.createElement('button');
-        record.type = 'button';
-        record.dataset.action = 'record';
-        record.dataset.personId = person.id;
-        record.textContent = '开始人脸采集';
+      people.forEach((person) => peopleList.append(buildPersonRow(person)));
+    }
+
+    function buildPersonRow(person) {
+      const row = document.createElement('div');
+      row.className = 'person-row';
+      row.dataset.personId = person.id;
+      const top = document.createElement('div');
+      top.className = 'person-top';
+      const identity = document.createElement('div');
+      const name = document.createElement('div');
+      name.className = 'person-name';
+      name.textContent = person.name;
+      const meta = document.createElement('div');
+      meta.className = 'person-meta';
+      meta.textContent = personMetaText(person);
+      identity.append(name, meta);
+      top.append(identity);
+      const actions = document.createElement('div');
+      actions.className = 'person-actions';
+      const record = document.createElement('button');
+      record.type = 'button';
+      record.dataset.action = 'record';
+      record.dataset.personId = person.id;
+      record.textContent = '开始人脸采集';
+      const samples = document.createElement('button');
+      samples.type = 'button';
+      samples.className = 'secondary-button';
+      samples.dataset.action = 'samples';
+      samples.dataset.personId = person.id;
+      samples.textContent = '查看样本';
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'secondary-button';
+      edit.dataset.action = 'edit';
+      edit.dataset.personId = person.id;
+      edit.textContent = '编辑';
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'danger-button';
+      remove.dataset.action = 'delete';
+      remove.dataset.personId = person.id;
+      remove.dataset.personName = person.name;
+      remove.textContent = '删除';
+      actions.append(record, samples, edit, remove);
+      row.append(top, actions);
+      return row;
+    }
+
+    function renderPersonEdit(row, person) {
+      if (faceRecorder?.state === 'recording') {
+        setPeopleMessage('人脸采集进行中，请先结束采集再编辑人员。', true);
+        return;
+      }
+      const form = document.createElement('div');
+      form.className = 'person-edit';
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.maxLength = 30;
+      nameInput.value = person.name;
+      nameInput.setAttribute('aria-label', '姓名');
+      const aliasesInput = document.createElement('input');
+      aliasesInput.type = 'text';
+      aliasesInput.maxLength = 100;
+      aliasesInput.value = (person.aliases || []).join('、');
+      aliasesInput.setAttribute('aria-label', '别名');
+      const actions = document.createElement('div');
+      actions.className = 'person-edit-actions';
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.textContent = '保存';
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'secondary-button';
+      cancel.textContent = '取消';
+      actions.append(save, cancel);
+      form.append(nameInput, aliasesInput, actions);
+      row.replaceChildren(form);
+      const submit = async () => {
+        save.disabled = true;
+        cancel.disabled = true;
+        try {
+          const response = await fetch(`/api/people/${person.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: nameInput.value, aliases: aliasesInput.value }),
+          });
+          const result = await response.json();
+          if (!response.ok || !result.ok) throw new Error(result.error || '保存失败');
+          setPeopleMessage(`已保存${result.person.name}的信息。`);
+          const index = currentPeople.findIndex((item) => item.id === person.id);
+          if (index >= 0) currentPeople[index] = { ...currentPeople[index], ...result.person };
+          renderPeopleRows();
+        } catch (error) {
+          setPeopleMessage(error.message || '保存失败', true);
+          save.disabled = false;
+          cancel.disabled = false;
+        }
+      };
+      save.addEventListener('click', () => void submit());
+      cancel.addEventListener('click', renderPeopleRows);
+      nameInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') void submit();
+      });
+      nameInput.focus();
+    }
+
+    async function loadSamplesPanel(panel, personId) {
+      const note = document.createElement('div');
+      note.className = 'sample-note';
+      note.textContent = '正在加载样本…';
+      panel.replaceChildren(note);
+      try {
+        const response = await fetch(`/api/people/${personId}/samples`, { cache: 'no-store' });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '读取样本失败');
+        renderSamplesPanel(panel, personId, result.samples || []);
+      } catch (error) {
+        note.textContent = error.message || '读取样本失败';
+        panel.replaceChildren(note);
+      }
+    }
+
+    function renderSamplesPanel(panel, personId, samples) {
+      panel.replaceChildren();
+      if (!samples.length) {
+        const note = document.createElement('div');
+        note.className = 'sample-note';
+        note.textContent = '还没有样本，先进行人脸采集。';
+        panel.append(note);
+        return;
+      }
+      const grid = document.createElement('div');
+      grid.className = 'sample-grid';
+      samples.forEach((sample) => {
+        const cell = document.createElement('div');
+        cell.className = 'sample-cell';
+        cell.title = `采集时间：${sample.created_at} · 清晰度：${sample.blur} · 置信度：${sample.confidence}`;
+        const image = document.createElement('img');
+        image.className = 'sample-image';
+        image.src = `/api/people/${personId}/samples/${sample.id}/photo`;
+        image.alt = `${sample.created_at} 的人脸样本`;
+        image.loading = 'lazy';
         const remove = document.createElement('button');
         remove.type = 'button';
-        remove.className = 'danger-button';
-        remove.dataset.action = 'delete';
-        remove.dataset.personId = person.id;
-        remove.dataset.personName = person.name;
-        remove.textContent = '删除';
-        actions.append(record, remove);
-        row.append(top, actions);
-        peopleList.append(row);
+        remove.className = 'sample-remove';
+        remove.dataset.action = 'delete-sample';
+        remove.dataset.personId = personId;
+        remove.dataset.sampleId = String(sample.id);
+        remove.textContent = '×';
+        remove.setAttribute('aria-label', '删除这张样本');
+        cell.append(image, remove);
+        grid.append(cell);
       });
+      panel.append(grid);
+    }
+
+    function toggleSamplesPanel(row, personId) {
+      const existing = row.querySelector('.person-samples');
+      if (existing) {
+        existing.remove();
+        return;
+      }
+      const panel = document.createElement('div');
+      panel.className = 'person-samples';
+      row.append(panel);
+      void loadSamplesPanel(panel, personId);
     }
 
     async function loadPeople() {
@@ -1306,6 +1479,12 @@
       if (faceRecorder?.state === 'recording') void stopFaceRecording();
       peopleDialog.close();
     });
+    personSearchInput.addEventListener('input', renderPeopleRows);
+    [personNameInput, personAliasesInput].forEach((input) => {
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !addPersonButton.disabled) addPersonButton.click();
+      });
+    });
     addPersonButton.addEventListener('click', async () => {
       addPersonButton.disabled = true;
       try {
@@ -1336,6 +1515,44 @@
       if (!button) return;
       if (button.dataset.action === 'record') {
         startFaceRecording(button.dataset.personId, button);
+        return;
+      }
+      if (button.dataset.action === 'samples') {
+        const row = button.closest('.person-row');
+        if (row) toggleSamplesPanel(row, button.dataset.personId);
+        return;
+      }
+      if (button.dataset.action === 'edit') {
+        const row = button.closest('.person-row');
+        const person = currentPeople.find((item) => item.id === button.dataset.personId);
+        if (row && person) renderPersonEdit(row, person);
+        return;
+      }
+      if (button.dataset.action === 'delete-sample') {
+        const personId = button.dataset.personId;
+        const row = button.closest('.person-row');
+        if (!confirm('确定删除这张人脸样本吗？删除后无法恢复。')) return;
+        button.disabled = true;
+        try {
+          const response = await fetch(
+            `/api/people/${personId}/samples/${button.dataset.sampleId}`,
+            { method: 'DELETE' },
+          );
+          const result = await response.json();
+          if (!response.ok || !result.ok) throw new Error(result.error || '删除样本失败');
+          const person = currentPeople.find((item) => item.id === personId);
+          if (person) {
+            person.sample_count = Math.max(0, (person.sample_count || 0) - 1);
+            const meta = row?.querySelector('.person-meta');
+            if (meta) meta.textContent = personMetaText(person);
+          }
+          const panel = row?.querySelector('.person-samples');
+          if (panel) await loadSamplesPanel(panel, personId);
+          setPeopleMessage('样本已删除。');
+        } catch (error) {
+          setPeopleMessage(error.message || '删除样本失败', true);
+          button.disabled = false;
+        }
         return;
       }
       if (button.dataset.action === 'delete') {

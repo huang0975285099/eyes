@@ -308,6 +308,14 @@ class NativeCameraMonitor:
         with self._lock:
             return camera_id in self._cameras
 
+    def secondary_camera_id(self) -> str | None:
+        """返回第一个非主摄像头的已启用摄像头 ID（右眼）。"""
+        with self._lock:
+            for camera_id, runtime in self._cameras.items():
+                if not runtime.config.primary:
+                    return camera_id
+            return None
+
     def add_event_listener(self, callback: Callable[[dict], None]) -> None:
         self._listeners.append(callback)
 
@@ -484,15 +492,30 @@ class NativeCameraMonitor:
             }
 
     def _open_camera(self, camera: NativeCameraConfig) -> cv2.VideoCapture:
-        capture = cv2.VideoCapture(camera.index, cv2.CAP_DSHOW)
+        mjpg = cv2.VideoWriter_fourcc(*"MJPG")
+        format_params = [
+            cv2.CAP_PROP_FOURCC,
+            mjpg,
+            cv2.CAP_PROP_FRAME_WIDTH,
+            self.config.native_camera_width,
+            cv2.CAP_PROP_FRAME_HEIGHT,
+            self.config.native_camera_height,
+        ]
+        # 打开阶段直接协商 MJPG 压缩格式：两路默认的未压缩画面会超出同一 USB
+        # 控制器的带宽，导致同型号双摄中的第二路打不开。
+        capture = cv2.VideoCapture(camera.index, cv2.CAP_DSHOW, format_params)
+        if not capture.isOpened():
+            capture.release()
+            capture = cv2.VideoCapture(camera.index, cv2.CAP_MSMF, format_params)
+        if not capture.isOpened():
+            # 个别设备不接受打开时指定格式，退回默认协商流程。
+            capture.release()
+            capture = cv2.VideoCapture(camera.index, cv2.CAP_DSHOW)
         if not capture.isOpened():
             capture.release()
             capture = cv2.VideoCapture(camera.index, cv2.CAP_MSMF)
         if capture.isOpened():
-            capture.set(
-                cv2.CAP_PROP_FOURCC,
-                cv2.VideoWriter_fourcc(*"MJPG"),
-            )
+            capture.set(cv2.CAP_PROP_FOURCC, mjpg)
             capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.native_camera_width)
             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.native_camera_height)
             capture.set(cv2.CAP_PROP_FPS, self.config.native_camera_fps)

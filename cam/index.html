@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>双摄像头画面</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111;
+    color: #eee;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 16px;
+    min-height: 100vh;
+  }
+  h1 { font-size: 18px; margin-bottom: 12px; font-weight: 600; }
+  #status { font-size: 13px; color: #8ab4f8; margin-bottom: 12px; min-height: 18px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+  .btn {
+    background: #2d7ff9;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .btn:hover { background: #1e6ee0; }
+  .btn.warn { background: #d93025; }
+  select {
+    background: #1e1e1e;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 14px;
+  }
+  #cameras {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
+  }
+  .cam-box {
+    background: #000;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #333;
+  }
+  .cam-box.fail { border-color: #d93025; }
+  .cam-box video { width: 100%; display: block; background: #000; min-height: 180px; }
+  .cam-label {
+    font-size: 13px;
+    padding: 6px 10px;
+    background: #1e1e1e;
+    color: #ccc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cam-label .err { color: #ff7b72; }
+  .cam-retry {
+    font-size: 12px;
+    padding: 6px 10px 10px;
+    background: #1e1e1e;
+  }
+  .cam-retry button {
+    background: #333;
+    color: #eee;
+    border: 1px solid #555;
+    border-radius: 5px;
+    padding: 4px 12px;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+  <h1>USB 双摄像头实时画面</h1>
+  <div id="status">正在获取摄像头权限并检测设备...</div>
+  <div class="toolbar">
+    <button class="btn" id="openAllBtn">打开全部摄像头</button>
+    <select id="devSel" title="选择单个摄像头打开"></select>
+    <button class="btn" id="openOneBtn">打开所选摄像头</button>
+    <select id="resSel" title="分辨率">
+      <option value="1280">1280x720</option>
+      <option value="960">960x540</option>
+      <option value="640" selected>640x480</option>
+      <option value="320">320x240</option>
+    </select>
+  </div>
+  <div id="cameras"></div>
+
+<script>
+const camStreams = new Map(); // deviceId -> stream
+
+function getRes() {
+  const w = +document.getElementById('resSel').value;
+  const h = w === 960 ? 540 : (w === 1280 ? 720 : (w === 640 ? 480 : 240));
+  return { w, h };
+}
+
+async function openCam(deviceId, label, replaceBox) {
+  const container = document.getElementById('cameras');
+  // 先停掉该设备的旧流
+  if (camStreams.has(deviceId)) {
+    camStreams.get(deviceId).getTracks().forEach(t => t.stop());
+    camStreams.delete(deviceId);
+  }
+
+  const box = replaceBox || document.createElement('div');
+  box.className = 'cam-box';
+  box.innerHTML = '';
+
+  const video = document.createElement('video');
+  video.autoplay = true;
+  video.playsInline = true;
+  video.muted = true;
+  box.appendChild(video);
+
+  const labelDiv = document.createElement('div');
+  labelDiv.className = 'cam-label';
+  labelDiv.textContent = label || 'USB Camera';
+  box.appendChild(labelDiv);
+
+  const retryDiv = document.createElement('div');
+  retryDiv.className = 'cam-retry';
+  retryDiv.style.display = 'none';
+  const retryBtn = document.createElement('button');
+  retryBtn.textContent = '重试此摄像头';
+  retryBtn.onclick = () => openCam(deviceId, label, box);
+  retryDiv.appendChild(retryBtn);
+  box.appendChild(retryDiv);
+
+  if (!replaceBox) container.appendChild(box);
+
+  const { w, h } = getRes();
+  // 依次尝试所选分辨率 -> 更低分辨率
+  const attempts = [
+    { width: { exact: w }, height: { exact: h } },
+    { width: { ideal: w }, height: { ideal: h } },
+    { width: { ideal: 640 }, height: { ideal: 480 } },
+    {} // 交给浏览器任意格式
+  ];
+
+  let lastErr = null;
+  for (const v of attempts) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: deviceId }, ...v }
+      });
+      video.srcObject = stream;
+      camStreams.set(deviceId, stream);
+      labelDiv.textContent = label || 'USB Camera';
+      box.className = 'cam-box';
+      retryDiv.style.display = 'none';
+      return true;
+    } catch (e) {
+      lastErr = e;
+      // OverconstrainedError 说明分辨率不支持，继续降级；其他错误也继续尝试
+    }
+  }
+  // 全部失败
+  box.className = 'cam-box fail';
+  retryDiv.style.display = 'block';
+  const errText = document.createElement('div');
+  errText.innerHTML = `<span class="err">打开失败: ${lastErr ? lastErr.name + ' ' + (lastErr.message || '') : '未知错误'}</span>`;
+  retryDiv.insertBefore(errText, retryBtn);
+  return false;
+}
+
+async function start(openAll = true) {
+  const status = document.getElementById('status');
+  const sel = document.getElementById('devSel');
+
+  try {
+    // 先请求权限（否则拿不到设备名和 deviceId）
+    const tmp = await navigator.mediaDevices.getUserMedia({ video: true });
+    tmp.getTracks().forEach(t => t.stop());
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === 'videoinput');
+
+    sel.innerHTML = '';
+    cams.forEach((c, i) => {
+      const o = document.createElement('option');
+      o.value = c.deviceId;
+      o.textContent = `#${i + 1} ${c.label || 'USB Camera'}`;
+      sel.appendChild(o);
+    });
+
+    if (cams.length === 0) {
+      status.textContent = '未检测到任何摄像头。请检查 Windows 设备管理器中是否识别到两个设备。';
+      return;
+    }
+    if (cams.length === 1) {
+      status.textContent = '⚠ 浏览器只检测到 1 个摄像头（共枚举到 ' + cams.length + ' 个视频设备）。请确认第二个摄像头在 Windows"相机"或"设备管理器"里可用，且没有被其他程序占用；也可以换一个 USB 口（尽量直插主板后置接口）后点击"打开全部摄像头"。';
+    } else {
+      status.textContent = `检测到 ${cams.length} 个摄像头，正在打开...`;
+    }
+
+    if (openAll) {
+      let ok = 0;
+      for (const c of cams) {
+        if (await openCam(c.deviceId, c.label)) ok++;
+      }
+      status.textContent = `检测到 ${cams.length} 个摄像头，成功打开 ${ok} 个。` +
+        (ok < cams.length ? '失败的摄像头见红色边框卡片（常见原因：USB 带宽不足或被占用，可降低分辨率后点重试）。' : '');
+    }
+  } catch (err) {
+    status.textContent = `无法访问摄像头: ${err.message}`;
+  }
+}
+
+document.getElementById('openAllBtn').addEventListener('click', () => start(true));
+document.getElementById('openOneBtn').addEventListener('click', () => {
+  const sel = document.getElementById('devSel');
+  if (sel.value) openCam(sel.value, sel.options[sel.selectedIndex].textContent.replace(/^#\d+\s*/, ''));
+});
+document.getElementById('resSel').addEventListener('change', () => start(true));
+start(true);
+</script>
+</body>
+</html>

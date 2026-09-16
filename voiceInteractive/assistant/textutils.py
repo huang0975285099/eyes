@@ -289,7 +289,10 @@ def interruption_action(text: str, wake_phrases: tuple[str, ...]) -> str | None:
 
 def is_vision_command(text: str) -> bool:
     normalized = normalize_text(text)
-    return ("看到" in normalized and "什么" in normalized) or any(
+    return (
+        "什么" in normalized
+        and ("看到" in normalized or "看见" in normalized)
+    ) or any(
         phrase in normalized
         for phrase in (
             "你看到了什么",
@@ -301,8 +304,30 @@ def is_vision_command(text: str) -> bool:
             "看看前面",
             "看一下前面",
             "你能看到什么",
+            # 询问画面中人员身份的问句也走视觉分支，与人员库匹配后回答。
+            "画面里的人是谁",
+            "画面里的人是",
+            "画面里有谁",
+            "摄像头里的人是谁",
+            "摄像头里有谁",
+            "镜头里的人是谁",
+            "镜头里有谁",
+            "这个人是谁",
+            "这位是谁",
+            "那位是谁",
+            "里面是谁",
+            "他是谁",
+            "她是谁",
         )
     )
+
+
+def vision_camera_hint(text: str) -> str | None:
+    """返回视觉问题指向的眼睛：'right' 表示右眼（辅助摄像头），None 表示主摄像头。"""
+    normalized = normalize_text(text)
+    if "右眼" in normalized:
+        return "right"
+    return None
 
 
 def is_vision_follow_up(text: str) -> bool:

@@ -1,6 +1,6 @@
 {
-  "input_device": "Microphone (2- Deli-1080P-Camera-Audio)",
-  "output_device": "Speakers (2- Deli-1080P-Camera Audio)",
+  "input_device": "麦克风 (Deli-1080P-Camera-Audio)",
+  "output_device": "Speakers (Deli-1080P-Camera Audio)",
   "wake_phrases": [
     "老 叶 老 叶",
     "老爷 老爷"

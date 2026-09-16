@@ -77,6 +77,7 @@ from assistant.textutils import (
     select_actionable_recognition,
     strip_code_fence,
     take_speech_segments,
+    vision_camera_hint,
 )
 from assistant.tools import DesktopTools, OnlineSearchTools
 
@@ -136,6 +137,7 @@ __all__ = [
     "select_actionable_recognition",
     "strip_code_fence",
     "take_speech_segments",
+    "vision_camera_hint",
 ]
 
 

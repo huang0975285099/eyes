@@ -173,6 +173,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if request_path == "/api/people":
             self._send_json({"people": self.server.face_service.database.list_people()})
             return
+        samples_match = re.fullmatch(
+            r"/api/people/([0-9a-f]{32})/samples", request_path
+        )
+        if samples_match:
+            database = self.server.face_service.database
+            if database.get_person(samples_match.group(1)) is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self._send_json(
+                {"samples": database.list_samples(samples_match.group(1))}
+            )
+            return
+        sample_photo_match = re.fullmatch(
+            r"/api/people/([0-9a-f]{32})/samples/(\d+)/photo", request_path
+        )
+        if sample_photo_match:
+            photo_path = self.server.face_service.database.sample_photo_path(
+                sample_photo_match.group(1), int(sample_photo_match.group(2))
+            )
+            if photo_path is None or not photo_path.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            body = photo_path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if request_path == "/api/snapshot":
             snapshot_id, frame = self.server.store.analysis_snapshot()
             if frame is None:
@@ -572,8 +602,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
             self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
 
+    def do_PUT(self) -> None:
+        request_path = self.path.partition("?")[0]
+        person_match = re.fullmatch(r"/api/people/([0-9a-f]{32})", request_path)
+        if not person_match:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if content_length <= 0 or content_length > 4096:
+                raise ValueError("无效的请求内容")
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+            person = self.server.face_service.database.update_person(
+                person_match.group(1), str(payload.get("name", "")), payload.get("aliases", [])
+            )
+            self._send_json({"ok": True, "person": person})
+        except (ValueError, json.JSONDecodeError) as error:
+            self._send_json(
+                {"ok": False, "error": str(error)},
+                HTTPStatus.BAD_REQUEST,
+            )
+
     def do_DELETE(self) -> None:
         request_path = self.path.partition("?")[0]
+        sample_match = re.fullmatch(
+            r"/api/people/([0-9a-f]{32})/samples/(\d+)", request_path
+        )
+        if sample_match:
+            deleted = self.server.face_service.database.delete_sample(
+                sample_match.group(1), int(sample_match.group(2))
+            )
+            if not deleted:
+                self._send_json({"ok": False, "error": "样本不存在"}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_json({"ok": True})
+            return
         person_match = re.fullmatch(r"/api/people/([0-9a-f]{32})", request_path)
         if not person_match:
             self.send_error(HTTPStatus.NOT_FOUND)

@@ -32,6 +32,7 @@ from .textutils import (
     is_weather_follow_up,
     recognition_alternatives,
     select_actionable_recognition,
+    vision_camera_hint,
 )
 from .tools import DesktopTools, OnlineSearchTools
 
@@ -361,6 +362,30 @@ class VoiceAssistant:
             )
         return True
 
+    def _secondary_camera_id(self) -> str | None:
+        """返回辅助摄像头（右眼）ID；未配置辅助摄像头时返回 None。"""
+        monitor = getattr(self.dashboard, "native_camera", None)
+        if monitor is None:
+            return None
+        return monitor.secondary_camera_id()
+
+    def _request_right_eye_frame(self) -> tuple[bytes | None, str | None]:
+        """从辅助摄像头（右眼）取一帧；失败时返回友好提示。"""
+        monitor = self.dashboard.native_camera
+        camera_id = self._secondary_camera_id()
+        if monitor is None or camera_id is None:
+            return None, "当前没有可用的辅助摄像头。"
+        try:
+            frame = monitor.preview_frame(
+                camera_id, self.config.camera_snapshot_timeout_seconds
+            )
+        except Exception as error:
+            print(f"[右眼取帧失败] {error}", file=sys.stderr)
+            return None, "辅助摄像头暂时取不到画面，请确认摄像头已连接。"
+        if frame is None:
+            return None, "辅助摄像头暂时取不到画面，请确认摄像头已连接。"
+        return frame, None
+
     def run(self) -> None:
         sample_rate = self.input_device.sample_rate
         wake_recognizer = _recognizer(
@@ -384,6 +409,7 @@ class VoiceAssistant:
         last_partial = ""
         final_recognition_candidates: list[str] = []
         vision_context_active = False
+        vision_eye = "primary"
         weather_context_active = False
         desktop_context_active = False
 
@@ -774,17 +800,35 @@ class VoiceAssistant:
                     weather_context_active = False
                     answer_was_streamed = False
                     interrupt_action = None
+                    if is_vision_command(text):
+                        # 新的视觉问题：右眼且存在辅助摄像头时用右眼；
+                        # 左眼、默认问句以及单摄配置统一回退主摄像头。
+                        if (
+                            vision_camera_hint(text) == "right"
+                            and self._secondary_camera_id() is not None
+                        ):
+                            vision_eye = "right"
+                        else:
+                            vision_eye = "primary"
+                    missing_camera_note: str | None = None
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status(
                             "正在拍摄本次分析快照"
                         )
+                    if vision_eye == "right":
+                        image_bytes, missing_camera_note = (
+                            self._request_right_eye_frame()
+                        )
+                    elif self.dashboard:
                         image_bytes = self.dashboard.store.request_snapshot(
                             self.config.camera_snapshot_timeout_seconds
                         )
                     else:
                         image_bytes = None
                     if image_bytes is None:
-                        answer = "没有拍到同步画面，请确认摄像头网页已打开并允许权限。"
+                        answer = missing_camera_note or (
+                            "没有拍到同步画面，请确认摄像头网页已打开并允许权限。"
+                        )
                         self.ollama.remember(text, answer)
                         vision_context_active = False
                     else:

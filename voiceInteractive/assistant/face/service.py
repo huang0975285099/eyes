@@ -147,6 +147,49 @@ class FaceDatabase:
             "sample_count": 0,
         }
 
+    def update_person(self, person_id: str, name: str, aliases=None) -> dict:
+        clean_name = _clean_name(name)
+        name_key = _identity_key(clean_name)
+        clean_aliases = [
+            item for item in _clean_aliases(aliases or [])
+            if _identity_key(item) != name_key
+        ]
+        requested_keys = {_identity_key(item) for item in [clean_name, *clean_aliases]}
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT id FROM people WHERE id=? AND enabled=1", (person_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("没有找到要修改的人员")
+            existing_rows = self._connection.execute(
+                "SELECT id, name, aliases_json FROM people WHERE enabled=1"
+            ).fetchall()
+            for existing_id, existing_name, aliases_json in existing_rows:
+                if existing_id == person_id:
+                    continue
+                if _identity_key(existing_name) == name_key:
+                    raise ValueError(f"人员“{clean_name}”已经存在")
+                existing_values = [existing_name, *json.loads(aliases_json)]
+                conflict = next(
+                    (
+                        item
+                        for item in existing_values
+                        if _identity_key(item) in requested_keys
+                    ),
+                    None,
+                )
+                if conflict is not None:
+                    raise ValueError(f"姓名或别名“{conflict}”已经被其他人员使用")
+            self._connection.execute(
+                "UPDATE people SET name=?, aliases_json=? WHERE id=?",
+                (clean_name, json.dumps(clean_aliases, ensure_ascii=False), person_id),
+            )
+            self._connection.commit()
+        person = self.get_person(person_id)
+        if person is None:
+            raise ValueError("没有找到要修改的人员")
+        return person
+
     def get_person(self, person_id: str) -> dict | None:
         return next((p for p in self.list_people() if p["id"] == person_id), None)
 
@@ -191,6 +234,55 @@ class FaceDatabase:
         except Exception:
             image_path.unlink(missing_ok=True)
             raise
+
+    def list_samples(self, person_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT id, confidence, blur, created_at
+                FROM face_samples
+                WHERE person_id=?
+                ORDER BY id DESC
+                """,
+                (person_id,),
+            ).fetchall()
+        return [
+            {
+                "id": int(row[0]),
+                "confidence": round(float(row[1]), 3),
+                "blur": round(float(row[2]), 1),
+                "created_at": row[3],
+            }
+            for row in rows
+        ]
+
+    def sample_photo_path(self, person_id: str, sample_id: int) -> Path | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT image_path FROM face_samples WHERE id=? AND person_id=?",
+                (sample_id, person_id),
+            ).fetchone()
+        if row is None:
+            return None
+        photo_path = (self.database_path.parent / row[0]).resolve()
+        if not photo_path.is_relative_to(self.photos_dir.resolve()):
+            return None
+        return photo_path
+
+    def delete_sample(self, person_id: str, sample_id: int) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT image_path FROM face_samples WHERE id=? AND person_id=?",
+                (sample_id, person_id),
+            ).fetchone()
+            if row is None:
+                return False
+            self._connection.execute("DELETE FROM face_samples WHERE id=?", (sample_id,))
+            self._connection.commit()
+        photo_path = (self.database_path.parent / row[0]).resolve()
+        if photo_path.is_relative_to(self.photos_dir.resolve()):
+            photo_path.unlink(missing_ok=True)
+        return True
 
     def embeddings(self) -> list[tuple[str, str, np.ndarray]]:
         with self._lock:
@@ -609,6 +701,22 @@ class FaceRecognitionService:
         if match:
             return f"{person['name']}在{match['position']}。"
         return f"当前画面没有确认到{person['name']}，可能没有正对镜头，或者不在画面内。"
+
+    def known_people_summary(self) -> list[dict]:
+        """返回最近一帧里已确认的人员（姓名与位置），供视觉问答引用。
+
+        结果过期或没有识别到已知人员时返回空列表，调用方据此跳过提示。
+        """
+        with self._lock:
+            age = time.time() - self._result_time if self._result_time else None
+            if not self.enabled or age is None or age > self.config.face_result_max_age_seconds:
+                return []
+            results = list(self._results)
+        return [
+            {"name": item["name"], "position": item["position"]}
+            for item in results
+            if item["known"]
+        ]
 
     def status(self) -> dict:
         with self._lock:
