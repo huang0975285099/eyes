@@ -22,12 +22,15 @@ class CameraFrameStore:
         self.shutdown_event = threading.Event()
         self._frame: bytes | None = None
         self._frame_time = 0.0
+        self._frame_source = ""
+        self._browser_frame_time = 0.0
         self._snapshot_request_id = 0
         self._pending_snapshot_request_id: int | None = None
         self._analysis_snapshot_id = 0
         self._analysis_snapshot: bytes | None = None
         self._assistant_status = "等待摄像头连接"
         self._last_answer = ""
+        self._tray_active = False
         self._presence_enabled = True
         self._presence_initialized = False
         self._person_present = False
@@ -50,10 +53,19 @@ class CameraFrameStore:
         self._scene_broadcast_snapshot: bytes | None = None
         self._last_scene_description = ""
 
-    def update_frame(self, frame: bytes) -> None:
+    def update_frame(self, frame: bytes, source: str = "browser") -> None:
         with self._lock:
             self._frame = frame
             self._frame_time = time.time()
+            self._frame_source = source
+            if source == "browser":
+                self._browser_frame_time = self._frame_time
+
+    def browser_frame_age_seconds(self) -> float | None:
+        with self._lock:
+            if self._browser_frame_time <= 0:
+                return None
+            return time.time() - self._browser_frame_time
 
     def latest_frame(self, max_age_seconds: float) -> bytes | None:
         with self._lock:
@@ -65,6 +77,16 @@ class CameraFrameStore:
         """Ask the browser for a new frame and wait only for that exact capture."""
         deadline = time.monotonic() + timeout_seconds
         with self._snapshot_ready:
+            # 后台本机摄像头每秒都会提供新帧，不必再等待一个不存在的浏览器响应。
+            if (
+                self._frame_source == "native"
+                and self._frame is not None
+                and time.time() - self._frame_time <= timeout_seconds
+            ):
+                self._analysis_snapshot = self._frame
+                self._snapshot_request_id += 1
+                self._analysis_snapshot_id = self._snapshot_request_id
+                return self._analysis_snapshot
             self._snapshot_request_id += 1
             request_id = self._snapshot_request_id
             self._pending_snapshot_request_id = request_id
@@ -254,12 +276,17 @@ class CameraFrameStore:
             if answer is not None:
                 self._last_answer = answer
 
+    def set_tray_active(self, active: bool) -> None:
+        with self._lock:
+            self._tray_active = active
+
     def status(self) -> dict:
         with self._lock:
             age = time.time() - self._frame_time if self._frame else None
             return {
                 "camera_ready": self._frame is not None and age is not None and age < 4.0,
                 "frame_age_seconds": round(age, 1) if age is not None else None,
+                "frame_source": self._frame_source,
                 "snapshot_request_id": self._snapshot_request_id,
                 "analysis_snapshot_id": self._analysis_snapshot_id,
                 "snapshot_pending": self._pending_snapshot_request_id is not None,
@@ -283,6 +310,7 @@ class CameraFrameStore:
                 "last_scene_description": self._last_scene_description,
                 "assistant_status": self._assistant_status,
                 "last_answer": self._last_answer,
+                "tray_active": self._tray_active,
             }
 
     def request_shutdown(self) -> None:

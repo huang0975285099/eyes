@@ -17,6 +17,7 @@ from .camera import CameraFrameStore, PersonPresenceMonitor, YoloPersonDetector
 from .config import Config
 from .face import FaceRecognitionService
 from .llm import ModelRouter
+from .native_camera import NativeCameraMonitor
 from .paths import APP_DIR
 
 
@@ -33,6 +34,7 @@ class DashboardHTTPServer(ThreadingHTTPServer):
         model_router: ModelRouter,
         presence_monitor: PersonPresenceMonitor,
         face_service: FaceRecognitionService,
+        native_camera: NativeCameraMonitor,
     ):
         super().__init__(address, handler)
         self.store = store
@@ -40,6 +42,7 @@ class DashboardHTTPServer(ThreadingHTTPServer):
         self.model_router = model_router
         self.presence_monitor = presence_monitor
         self.face_service = face_service
+        self.native_camera = native_camera
 
 
 class DashboardHTTPServerV6(DashboardHTTPServer):
@@ -109,13 +112,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "enabled": self.server.face_service.enabled,
                         "recommended_samples": 15,
                     },
+                    "native_camera": {
+                        "enabled": self.server.native_camera.enabled,
+                        "fallback_seconds": self.server.config.native_camera_fallback_seconds,
+                        "retention_days": self.server.config.native_camera_event_retention_days,
+                    },
                 }
             )
             return
         if request_path == "/api/status":
             status = self.server.store.status()
             status["face_recognition"] = self.server.face_service.status()
+            status["native_camera"] = self.server.native_camera.status()
             self._send_json(status)
+            return
+        if request_path.startswith("/api/motion-events/"):
+            filename = request_path.removeprefix("/api/motion-events/")
+            path = self.server.native_camera.archive.resolve(filename)
+            if path is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            body = path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
             return
         if request_path == "/api/people":
             self._send_json({"people": self.server.face_service.database.list_people()})
@@ -206,6 +229,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     {"ok": False, "error": str(error)},
                     HTTPStatus.BAD_REQUEST,
                 )
+            return
+        if request_path == "/api/native-camera":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0 or content_length > 1024:
+                    raise ValueError("无效的请求内容")
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                enabled = payload.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled 必须是布尔值")
+                self.server.native_camera.set_enabled(enabled)
+                self._send_json({"ok": True, "enabled": enabled})
+            except (ValueError, json.JSONDecodeError) as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if request_path == "/api/camera-client":
+            self.server.native_camera.claim_for_browser()
+            self._send_json({"ok": True})
             return
         if request_path == "/api/face-recognition":
             try:
@@ -415,6 +456,9 @@ class CameraDashboard:
             self.store, person_detector, config.person_monitor_enabled
         )
         self.face_service = FaceRecognitionService(config)
+        self.native_camera = NativeCameraMonitor(
+            config, self.store, self.presence_monitor, self.face_service
+        )
         self.server: DashboardHTTPServer | None = None
         self.servers: list[DashboardHTTPServer] = []
         self.threads: list[threading.Thread] = []
@@ -438,6 +482,7 @@ class CameraDashboard:
             self.model_router,
             self.presence_monitor,
             self.face_service,
+            self.native_camera,
         )
         self.servers.append(self.server)
         thread = threading.Thread(
@@ -456,6 +501,7 @@ class CameraDashboard:
                     self.model_router,
                     self.presence_monitor,
                     self.face_service,
+                    self.native_camera,
                 )
                 self.servers.append(ipv6_server)
                 ipv6_thread = threading.Thread(
@@ -468,10 +514,12 @@ class CameraDashboard:
             except OSError as error:
                 print(f"摄像头页面 IPv6 监听不可用：{error}", file=sys.stderr)
         print(f"摄像头页面：{self.url}")
+        self.native_camera.start()
         if self.config.open_browser and os.environ.get("XIAOBU_NO_BROWSER") != "1":
             threading.Timer(0.8, lambda: webbrowser.open(self.url)).start()
 
     def stop(self) -> None:
+        self.native_camera.stop()
         for server in self.servers:
             server.shutdown()
             server.server_close()

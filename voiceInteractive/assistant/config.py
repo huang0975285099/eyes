@@ -50,9 +50,19 @@ class Config:
     web_host: str
     web_port: int
     open_browser: bool
+    tray_enabled: bool
+    tray_notifications_enabled: bool
     camera_name_keywords: tuple[str, ...]
     camera_frame_max_age_seconds: float
     camera_snapshot_timeout_seconds: float
+    native_camera_enabled: bool
+    native_camera_index: int
+    native_camera_fallback_seconds: float
+    native_camera_width: int
+    native_camera_height: int
+    native_camera_fps: int
+    native_camera_save_snapshots: bool
+    native_camera_event_retention_days: int
     person_monitor_enabled: bool
     person_alert_voice: bool
     person_detector: str
@@ -176,6 +186,10 @@ def load_config(path: Path) -> Config:
         web_host=str(raw.get("web_host", "127.0.0.1")),
         web_port=int(raw.get("web_port", 8765)),
         open_browser=bool(raw.get("open_browser", True)),
+        tray_enabled=bool(raw.get("tray_enabled", True)),
+        tray_notifications_enabled=bool(
+            raw.get("tray_notifications_enabled", True)
+        ),
         camera_name_keywords=tuple(
             raw.get("camera_name_keywords", ["Deli", "1080P", "MM101S"])
         ),
@@ -184,6 +198,20 @@ def load_config(path: Path) -> Config:
         ),
         camera_snapshot_timeout_seconds=max(
             0.5, float(raw.get("camera_snapshot_timeout_seconds", 3.0))
+        ),
+        native_camera_enabled=bool(raw.get("native_camera_enabled", True)),
+        native_camera_index=max(0, min(9, int(raw.get("native_camera_index", 0)))),
+        native_camera_fallback_seconds=max(
+            2.0, float(raw.get("native_camera_fallback_seconds", 5.0))
+        ),
+        native_camera_width=max(320, int(raw.get("native_camera_width", 1280))),
+        native_camera_height=max(240, int(raw.get("native_camera_height", 720))),
+        native_camera_fps=max(1, min(30, int(raw.get("native_camera_fps", 5)))),
+        native_camera_save_snapshots=bool(
+            raw.get("native_camera_save_snapshots", True)
+        ),
+        native_camera_event_retention_days=max(
+            1, int(raw.get("native_camera_event_retention_days", 7))
         ),
         person_monitor_enabled=bool(raw.get("person_monitor_enabled", True)),
         person_alert_voice=bool(raw.get("person_alert_voice", True)),

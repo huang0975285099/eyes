@@ -12,10 +12,18 @@ import unittest
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
+import cv2
 import voice_assistant as voice_assistant_module
 
 from face_service import FaceDatabase, describe_position, match_face_embeddings
 from assistant.face import FaceRecognitionService
+from assistant.config import DEFAULT_CONFIG, load_config
+from assistant.native_camera import (
+    MotionDetector,
+    MotionEventArchive,
+    MotionSettings,
+    NativeCameraMonitor,
+)
 
 from voice_assistant import (
     build_accent_aware_question,
@@ -468,6 +476,8 @@ class CameraFrameStoreTests(unittest.TestCase):
         status = store.status()
         self.assertTrue(status["camera_ready"])
         self.assertEqual(status["last_answer"], "回答")
+        store.set_tray_active(True)
+        self.assertTrue(store.status()["tray_active"])
 
     def test_shutdown_request(self) -> None:
         store = CameraFrameStore()
@@ -475,6 +485,21 @@ class CameraFrameStoreTests(unittest.TestCase):
         store.request_shutdown()
         self.assertTrue(store.shutdown_event.is_set())
         self.assertEqual(store.status()["assistant_status"], "正在关闭语音助手")
+
+    def test_native_frame_answers_snapshot_without_waiting_for_browser(self) -> None:
+        store = CameraFrameStore()
+        store.update_frame(b"native jpeg", source="native")
+        started = time.monotonic()
+        self.assertEqual(store.request_snapshot(0.5), b"native jpeg")
+        self.assertLess(time.monotonic() - started, 0.1)
+        self.assertEqual(store.status()["frame_source"], "native")
+
+    def test_browser_frame_age_tracks_only_browser_frames(self) -> None:
+        store = CameraFrameStore()
+        store.update_frame(b"native", source="native")
+        self.assertIsNone(store.browser_frame_age_seconds())
+        store.update_frame(b"browser")
+        self.assertIsNotNone(store.browser_frame_age_seconds())
 
     def test_requested_snapshot_is_the_frame_used_for_analysis(self) -> None:
         store = CameraFrameStore()
@@ -556,6 +581,69 @@ class CameraFrameStoreTests(unittest.TestCase):
         store.set_scene_broadcast_enabled(False)
         self.assertFalse(store.finish_scene_broadcast(2, b"late", "不应播报"))
         self.assertEqual(store.status()["scene_broadcast_status"], "动态画面播报已关闭")
+
+
+class NativeCameraTests(unittest.TestCase):
+    def test_sustained_change_triggers_after_warmup(self) -> None:
+        detector = MotionDetector()
+        settings = MotionSettings(70, 0.5, 3, 1.0)
+        base = np.zeros((360, 640, 3), dtype=np.uint8)
+        detector.process(base, settings, 100.0, 0.0)
+        changed = base.copy()
+        cv2.rectangle(changed, (80, 80), (220, 220), (255, 255, 255), -1)
+        results = [
+            detector.process(changed, settings, 102.0 + index, 0.0)
+            for index in range(3)
+        ]
+        self.assertFalse(results[0][1])
+        self.assertFalse(results[1][1])
+        self.assertTrue(results[2][1])
+        self.assertGreater(results[2][0], 0.5)
+
+    def test_motion_event_archive_rejects_path_traversal(self) -> None:
+        with TemporaryDirectory() as temporary:
+            with patch("assistant.native_camera.APP_DIR", Path(temporary)):
+                archive = MotionEventArchive(7, True)
+                event = archive.record(b"jpeg", 2.5)
+                filename = str(event["snapshot_url"]).rsplit("/", 1)[-1]
+                self.assertIsNotNone(archive.resolve(filename))
+                self.assertIsNone(archive.resolve("../faces/faces.db"))
+
+    def test_monitor_releases_camera_when_browser_claims_it(self) -> None:
+        class FakeCapture:
+            def __init__(self) -> None:
+                self.opened = True
+                self.released = threading.Event()
+
+            def isOpened(self) -> bool:
+                return self.opened
+
+            def read(self):
+                return True, np.zeros((90, 160, 3), dtype=np.uint8)
+
+            def release(self) -> None:
+                self.opened = False
+                self.released.set()
+
+        store = CameraFrameStore()
+        presence = SimpleNamespace(enabled=False)
+        face = SimpleNamespace(enabled=False)
+        monitor = NativeCameraMonitor(load_config(DEFAULT_CONFIG), store, presence, face)
+        capture = FakeCapture()
+        with patch.object(monitor, "_open_camera", return_value=capture):
+            monitor.start()
+            deadline = time.monotonic() + 1.5
+            while (
+                store.status()["frame_source"] != "native"
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            self.assertTrue(monitor.status()["active"])
+            self.assertEqual(store.status()["frame_source"], "native")
+            monitor.claim_for_browser(2.0)
+            self.assertTrue(capture.released.wait(1.0))
+            self.assertFalse(monitor.status()["active"])
+            monitor.stop()
 
 
 class PersonPresenceMonitorTests(unittest.TestCase):

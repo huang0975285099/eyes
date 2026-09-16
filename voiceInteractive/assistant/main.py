@@ -20,6 +20,7 @@ from .platform_utils import (
 from .speaker import Speaker
 from .textutils import ensure_model
 from .tools import OnlineSearchTools
+from .tray import SystemTray
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--test-speaker", action="store_true", help="从配置的扬声器播放测试语音"
     )
+    parser.add_argument("--no-tray", action="store_true", help="不显示 Windows 托盘图标")
     return parser
 
 
@@ -91,8 +93,17 @@ def main() -> int:
     print("正在加载离线中文识别模型……")
     model = Model(str(model_path))
     dashboard = CameraDashboard(config, ollama) if config.web_enabled else None
+    tray = None
     if dashboard:
         dashboard.start()
+        if config.tray_enabled and not args.no_tray:
+            try:
+                tray = SystemTray(dashboard, config.tray_notifications_enabled)
+                tray.start()
+                dashboard.store.set_tray_active(True)
+                print("系统托盘：已启动")
+            except Exception as error:
+                print(f"系统托盘启动失败，语音助手仍可继续运行：{error}", file=sys.stderr)
     try:
         VoiceAssistant(
             config,
@@ -104,6 +115,10 @@ def main() -> int:
             dashboard,
         ).run()
     finally:
+        if tray:
+            if dashboard:
+                dashboard.store.set_tray_active(False)
+            tray.stop()
         if dashboard:
             dashboard.stop()
     return 0

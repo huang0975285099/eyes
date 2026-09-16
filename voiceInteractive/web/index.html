@@ -266,6 +266,19 @@
           <small id="presenceDetail" class="presence-detail">本地检测画面变化，模型确认是否有人</small>
           <img id="presenceImage" class="snapshot-image presence-image" hidden alt="检测到有人时的画面快照">
         </div>
+        <div id="nativeCameraPanel">
+          <div class="presence-heading">
+            <div class="label">后台摄像头接管</div>
+            <label class="presence-switch">
+              <input id="nativeCameraToggle" type="checkbox" role="switch" aria-label="开启后台摄像头接管">
+              <span class="presence-track" aria-hidden="true"></span>
+              <span id="nativeCameraToggleText">已关闭</span>
+            </label>
+          </div>
+          <p id="nativeCameraState" class="presence-state">正在初始化</p>
+          <small id="nativeCameraDetail" class="presence-detail">关闭网页后自动接管摄像头，继续在本机监测</small>
+          <img id="nativeCameraImage" class="snapshot-image presence-image" hidden alt="后台监测最近一次变化快照">
+        </div>
         <div id="sceneBroadcastPanel">
           <div class="presence-heading">
             <div class="label">动态画面播报</div>
@@ -337,6 +350,11 @@
     const presenceState = document.querySelector('#presenceState');
     const presenceDetail = document.querySelector('#presenceDetail');
     const presenceImage = document.querySelector('#presenceImage');
+    const nativeCameraToggle = document.querySelector('#nativeCameraToggle');
+    const nativeCameraToggleText = document.querySelector('#nativeCameraToggleText');
+    const nativeCameraState = document.querySelector('#nativeCameraState');
+    const nativeCameraDetail = document.querySelector('#nativeCameraDetail');
+    const nativeCameraImage = document.querySelector('#nativeCameraImage');
     const sceneBroadcastToggle = document.querySelector('#sceneBroadcastToggle');
     const sceneBroadcastToggleText = document.querySelector('#sceneBroadcastToggleText');
     const sceneBroadcastState = document.querySelector('#sceneBroadcastState');
@@ -366,6 +384,7 @@
     let displayedSnapshotId = 0;
     let displayedPresenceEventId = 0;
     let displayedSceneBroadcastEventId = 0;
+    let displayedNativeCameraEventId = '';
     let presenceRequestInFlight = false;
     let sceneBroadcastRequestInFlight = false;
     let faceRecognitionRequestInFlight = false;
@@ -392,6 +411,7 @@
       cooldown_seconds: 12,
     };
     let faceRecognitionSettings = { enabled: false };
+    let nativeCameraSettings = { enabled: true, retention_days: 7 };
     const presenceCanvas = document.createElement('canvas');
     presenceCanvas.width = 160;
     presenceCanvas.height = 90;
@@ -429,6 +449,12 @@
       presenceSettings.enabled = Boolean(enabled);
       presenceToggle.checked = presenceSettings.enabled;
       presenceToggleText.textContent = presenceSettings.enabled ? '已开启' : '已关闭';
+    }
+
+    function syncNativeCameraToggle(enabled) {
+      nativeCameraSettings.enabled = Boolean(enabled);
+      nativeCameraToggle.checked = nativeCameraSettings.enabled;
+      nativeCameraToggleText.textContent = nativeCameraSettings.enabled ? '已开启' : '已关闭';
     }
 
     function syncSceneBroadcastToggle(enabled) {
@@ -500,6 +526,8 @@
     async function connectCamera(deviceId = '') {
       if (stream) stream.getTracks().forEach((track) => track.stop());
       setCameraStatus('正在连接', false);
+      await fetch('/api/camera-client', { method: 'POST' });
+      await new Promise((resolve) => setTimeout(resolve, 350));
       const videoConstraints = deviceId
         ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
         : { width: { ideal: 1280 }, height: { ideal: 720 } };
@@ -821,8 +849,13 @@
         const status = await response.json();
         assistantState.textContent = status.assistant_status;
         if (status.last_answer) lastAnswer.textContent = status.last_answer;
+        const presenceWasEnabled = presenceSettings.enabled;
+        const sceneWasEnabled = sceneBroadcastSettings.enabled;
         syncPresenceToggle(status.presence_enabled);
         syncSceneBroadcastToggle(status.scene_broadcast_enabled);
+        if ((!presenceWasEnabled && status.presence_enabled) || (!sceneWasEnabled && status.scene_broadcast_enabled)) {
+          resetPresenceDetection();
+        }
         presenceState.textContent = status.presence_status || '等待动态监测';
         presenceState.classList.toggle(
           'alert',
@@ -857,6 +890,23 @@
         faceRecognitionState.classList.toggle('alert', Boolean(faceStatus.faces?.some((face) => face.known)));
         faceRecognitionDetail.textContent = faceStatus.error || '识别只在本机完成，照片和特征保存在本地';
         drawFaceOverlay(faceStatus.faces || []);
+        const nativeStatus = status.native_camera || {};
+        syncNativeCameraToggle(nativeStatus.enabled);
+        nativeCameraState.textContent = nativeStatus.state || '等待后台监控';
+        nativeCameraState.classList.toggle('alert', Boolean(nativeStatus.active));
+        nativeCameraDetail.textContent = nativeStatus.error || (
+          nativeStatus.active
+            ? `后台正在监测 · ${Number(nativeStatus.fps || 0).toFixed(1)} FPS`
+            : '网页使用摄像头时后台待机，网页关闭后自动接管'
+        );
+        const latestNativeEvent = nativeStatus.events?.[0];
+        if (latestNativeEvent?.id && latestNativeEvent.id !== displayedNativeCameraEventId) {
+          displayedNativeCameraEventId = latestNativeEvent.id;
+          if (latestNativeEvent.snapshot_url) {
+            nativeCameraImage.src = latestNativeEvent.snapshot_url;
+            nativeCameraImage.hidden = false;
+          }
+        }
         const requestedSnapshotId = Number(status.snapshot_request_id || 0);
         if (
           status.snapshot_pending &&
@@ -883,6 +933,26 @@
 
     connectButton.addEventListener('click', () => connectCamera(cameraSelect.value));
     cameraSelect.addEventListener('change', () => connectCamera(cameraSelect.value));
+    nativeCameraToggle.addEventListener('change', async () => {
+      const enabled = nativeCameraToggle.checked;
+      nativeCameraToggle.disabled = true;
+      nativeCameraToggleText.textContent = enabled ? '开启中' : '关闭中';
+      try {
+        const response = await fetch('/api/native-camera', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || '设置失败');
+        syncNativeCameraToggle(result.enabled);
+      } catch (error) {
+        syncNativeCameraToggle(!enabled);
+        nativeCameraDetail.textContent = error.message || '设置失败';
+      } finally {
+        nativeCameraToggle.disabled = false;
+      }
+    });
     presenceToggle.addEventListener('change', async () => {
       const enabled = presenceToggle.checked;
       presenceToggle.disabled = true;
@@ -1054,9 +1124,11 @@
         presenceSettings = { ...presenceSettings, ...(config.person_monitor || {}) };
         sceneBroadcastSettings = { ...sceneBroadcastSettings, ...(config.scene_broadcast || {}) };
         faceRecognitionSettings = { ...faceRecognitionSettings, ...(config.face_recognition || {}) };
+        nativeCameraSettings = { ...nativeCameraSettings, ...(config.native_camera || {}) };
         syncPresenceToggle(presenceSettings.enabled);
         syncSceneBroadcastToggle(sceneBroadcastSettings.enabled);
         syncFaceRecognitionToggle(faceRecognitionSettings.enabled);
+        syncNativeCameraToggle(nativeCameraSettings.enabled);
         if (!presenceSettings.enabled) {
           presenceState.textContent = '动态人物监测已关闭';
           presenceDetail.textContent = '开启后，有人进入画面时会语音提示';
