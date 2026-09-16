@@ -19,6 +19,7 @@ from .face import FaceRecognitionService
 from .llm import ModelRouter
 from .native_camera import NativeCameraMonitor
 from .paths import APP_DIR
+from .platform_utils import audio_device_options, find_audio_device
 
 
 class DashboardHTTPServer(ThreadingHTTPServer):
@@ -82,6 +83,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if request_path == "/api/config":
+            input_options = audio_device_options("input")
+            output_options = audio_device_options("output")
+            selected_input = find_audio_device(
+                self.server.config.input_device, "input"
+            )
+            selected_output = find_audio_device(
+                self.server.config.output_device, "output"
+            )
             self._send_json(
                 {
                     "camera_name_keywords": self.server.config.camera_name_keywords,
@@ -127,6 +136,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             }
                             for camera in self.server.config.native_cameras
                         ],
+                    },
+                    "audio": {
+                        "input_options": input_options,
+                        "output_options": output_options,
+                        "selected_input_index": selected_input.index,
+                        "selected_output_index": selected_output.index,
+                        "restart_required": True,
                     },
                 }
             )
@@ -210,7 +226,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 content_length = int(self.headers.get("Content-Length", "0"))
                 if content_length <= 0 or content_length > 1024:
                     raise ValueError("无效的请求内容")
-                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                payload = json.loads(
+                    self.rfile.read(content_length).decode("utf-8")
+                )
                 model_info = self.server.model_router.switch(
                     str(payload.get("provider", ""))
                 )
@@ -219,6 +237,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json({"ok": True, "model": model_info})
             except (ValueError, RuntimeError, json.JSONDecodeError) as error:
+                self._send_json(
+                    {"ok": False, "error": str(error)},
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
+        if request_path == "/api/audio-devices":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0 or content_length > 4096:
+                    raise ValueError("无效的请求内容")
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                input_selector = payload.get("input_device")
+                output_selector = payload.get("output_device")
+                if isinstance(input_selector, bool) or not isinstance(
+                    input_selector, (str, int)
+                ):
+                    raise ValueError("请选择有效的麦克风")
+                if isinstance(output_selector, bool) or not isinstance(
+                    output_selector, (str, int)
+                ):
+                    raise ValueError("请选择有效的扬声器")
+                input_device = find_audio_device(input_selector, "input")
+                output_device = find_audio_device(output_selector, "output")
+                config_path = self.server.model_router.config_path
+                raw = json.loads(config_path.read_text(encoding="utf-8"))
+                raw["input_device"] = input_selector
+                raw["output_device"] = output_selector
+                temporary_path = config_path.with_suffix(config_path.suffix + ".tmp")
+                temporary_path.write_text(
+                    json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(temporary_path, config_path)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "restart_required": True,
+                        "input": {
+                            "index": input_device.index,
+                            "name": input_device.name,
+                        },
+                        "output": {
+                            "index": output_device.index,
+                            "name": output_device.name,
+                        },
+                    }
+                )
+            except (ValueError, RuntimeError, OSError, json.JSONDecodeError) as error:
                 self._send_json(
                     {"ok": False, "error": str(error)},
                     HTTPStatus.BAD_REQUEST,
@@ -256,7 +322,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if request_path == "/api/camera-client":
-            self.server.native_camera.claim_for_browser()
+            connected_count = None
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if 0 < content_length <= 1024:
+                    payload = json.loads(
+                        self.rfile.read(content_length).decode("utf-8")
+                    )
+                    if isinstance(payload.get("connected_count"), int):
+                        connected_count = max(
+                            0, min(20, payload["connected_count"])
+                        )
+            except (ValueError, json.JSONDecodeError):
+                connected_count = None
+            self.server.native_camera.claim_for_browser(
+                connected_count=connected_count
+            )
             self._send_json({"ok": True})
             return
         if request_path == "/api/face-recognition":

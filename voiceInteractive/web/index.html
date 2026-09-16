@@ -21,7 +21,7 @@
         #07110f;
     }
     main {
-      width: min(1180px, calc(100% - 32px));
+      width: min(1440px, calc(100% - 32px));
       margin: 0 auto;
       padding: 28px 0 36px;
     }
@@ -56,16 +56,24 @@
     }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: #66756f; }
     .live-pill.ready .dot { background: #42e3b5; box-shadow: 0 0 14px #42e3b5; }
-    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 310px; gap: 18px; }
-    .camera-card, .side-card {
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 350px; gap: 18px; align-items: start; }
+    .workspace { min-width: 0; display: grid; gap: 18px; }
+    .camera-card, .side-card, .feature-card {
       border: 1px solid rgba(111, 150, 140, .2);
       border-radius: 20px;
       background: rgba(9, 23, 20, .78);
       box-shadow: 0 18px 60px rgba(0, 0, 0, .3);
       overflow: hidden;
     }
+    .camera-card { padding: 14px; }
+    .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding: 3px 3px 13px; }
+    .section-heading h2 { margin: 4px 0 0; font-size: 19px; }
+    .section-note { color: #78928a; font-size: 12px; text-align: right; }
+    .camera-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .camera-pane { position: relative; min-width: 0; overflow: hidden; border: 1px solid #203b34; border-radius: 15px; background: #020504; }
     .video-wrap { position: relative; aspect-ratio: 16 / 9; background: #020504; }
     video { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .camera-badge { position: absolute; z-index: 2; left: 10px; top: 10px; padding: 5px 9px; border-radius: 999px; background: rgba(3, 17, 14, .78); border: 1px solid rgba(95, 231, 191, .25); color: #d9f8ef; font-size: 11px; backdrop-filter: blur(8px); }
     .face-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
     .empty {
       position: absolute;
@@ -76,13 +84,15 @@
       text-align: center;
       padding: 24px;
     }
-    .camera-card.connected .empty { display: none; }
+    .camera-pane.connected .empty { display: none; }
     .controls {
-      display: flex;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
       gap: 10px;
-      padding: 13px;
-      border-top: 1px solid rgba(111, 150, 140, .15);
+      padding-top: 13px;
     }
+    .control-field { display: grid; gap: 5px; min-width: 0; }
+    .control-field span { color: #829a93; font-size: 11px; }
     select, button {
       min-height: 42px;
       border-radius: 11px;
@@ -99,6 +109,9 @@
     }
     button:hover { background: #4cdbb3; }
     .side-card { padding: 20px; display: flex; flex-direction: column; gap: 24px; }
+    .feature-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .feature-card { padding: 16px; min-height: 150px; }
+    .feature-card .snapshot-image { max-height: 160px; }
     .label { color: #779089; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
     .assistant-state { margin: 8px 0 0; font-size: 21px; line-height: 1.35; }
     .answer {
@@ -112,6 +125,10 @@
     .model-row button { white-space: nowrap; }
     .model-message { margin: 7px 0 0; min-height: 20px; color: #8fa69f; font-size: 12px; }
     .model-message.error { color: #e6aaa3; }
+    .audio-grid { display: grid; gap: 10px; margin-top: 10px; }
+    .audio-grid label { display: grid; gap: 5px; color: #849c95; font-size: 12px; }
+    .audio-grid select { width: 100%; }
+    .audio-grid button { width: 100%; }
     .presence-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .presence-switch { display: inline-flex; align-items: center; gap: 8px; color: #9eb4ad; font-size: 12px; cursor: pointer; }
     .presence-switch input { position: absolute; opacity: 0; pointer-events: none; }
@@ -201,8 +218,14 @@
       .layout { grid-template-columns: 1fr; }
       .side-card { min-height: 270px; }
     }
+    @media (max-width: 700px) {
+      .camera-grid, .feature-grid { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: 1fr; }
+      .section-heading { align-items: start; flex-direction: column; }
+      .section-note { text-align: left; }
+    }
     @media (max-width: 560px) {
-      main { width: min(100% - 20px, 1180px); padding-top: 18px; }
+      main { width: min(100% - 20px, 1440px); padding-top: 18px; }
       header { align-items: flex-start; }
       .subtitle { display: none; }
       .controls { flex-direction: column; }
@@ -224,15 +247,89 @@
     </header>
 
     <section class="layout">
-      <div id="cameraCard" class="camera-card">
-        <div class="video-wrap">
-          <video id="video" autoplay muted playsinline></video>
-          <canvas id="faceOverlay" class="face-overlay" aria-hidden="true"></canvas>
-          <div id="empty" class="empty">请允许浏览器访问摄像头<br>仅在视觉提问时提交同步快照</div>
+      <div class="workspace">
+        <div id="cameraCard" class="camera-card">
+          <div class="section-heading">
+            <div><div class="label">实时监控</div><h2>双摄像头画面</h2></div>
+            <div class="section-note">主画面用于视觉问答、人物与人脸识别</div>
+          </div>
+          <div class="camera-grid">
+            <div id="primaryCameraPane" class="camera-pane">
+              <div class="video-wrap">
+                <span id="primaryCameraBadge" class="camera-badge">主摄像头</span>
+                <video id="video" autoplay muted playsinline></video>
+                <canvas id="faceOverlay" class="face-overlay" aria-hidden="true"></canvas>
+                <div id="empty" class="empty">请允许浏览器访问主摄像头</div>
+              </div>
+            </div>
+            <div id="secondaryCameraPane" class="camera-pane">
+              <div class="video-wrap">
+                <span id="secondaryCameraBadge" class="camera-badge">辅助摄像头</span>
+                <video id="secondaryVideo" autoplay muted playsinline></video>
+                <div id="secondaryEmpty" class="empty">正在等待第二个摄像头</div>
+              </div>
+            </div>
+          </div>
+          <div class="controls">
+            <label class="control-field"><span>主摄像头</span><select id="cameraSelect" aria-label="选择主摄像头"><option>正在查找摄像头…</option></select></label>
+            <label class="control-field"><span>辅助摄像头</span><select id="secondaryCameraSelect" aria-label="选择辅助摄像头"><option value="">不显示第二路</option></select></label>
+            <button id="connectButton" type="button">重新连接</button>
+          </div>
         </div>
-        <div class="controls">
-          <select id="cameraSelect" aria-label="选择摄像头"><option>正在查找摄像头…</option></select>
-          <button id="connectButton" type="button">连接摄像头</button>
+
+        <div class="feature-grid">
+          <div id="presencePanel" class="feature-card">
+            <div class="presence-heading">
+              <div class="label">动态人物监测</div>
+              <label class="presence-switch">
+                <input id="presenceToggle" type="checkbox" role="switch" aria-label="开启动态人物监测">
+                <span class="presence-track" aria-hidden="true"></span>
+                <span id="presenceToggleText">已关闭</span>
+              </label>
+            </div>
+            <p id="presenceState" class="presence-state">正在初始化</p>
+            <small id="presenceDetail" class="presence-detail">主画面变化后，模型确认是否有人</small>
+            <img id="presenceImage" class="snapshot-image presence-image" hidden alt="检测到有人时的画面快照">
+          </div>
+          <div id="nativeCameraPanel" class="feature-card">
+            <div class="presence-heading">
+              <div class="label">后台摄像头接管</div>
+              <label class="presence-switch">
+                <input id="nativeCameraToggle" type="checkbox" role="switch" aria-label="开启后台摄像头接管">
+                <span class="presence-track" aria-hidden="true"></span>
+                <span id="nativeCameraToggleText">已关闭</span>
+              </label>
+            </div>
+            <p id="nativeCameraState" class="presence-state">正在初始化</p>
+            <small id="nativeCameraDetail" class="presence-detail">关闭网页后接管全部已配置摄像头</small>
+            <img id="nativeCameraImage" class="snapshot-image presence-image" hidden alt="后台监测最近一次变化快照">
+          </div>
+          <div id="sceneBroadcastPanel" class="feature-card">
+            <div class="presence-heading">
+              <div class="label">动态画面播报</div>
+              <label class="presence-switch">
+                <input id="sceneBroadcastToggle" type="checkbox" role="switch" aria-label="开启动态画面播报">
+                <span class="presence-track" aria-hidden="true"></span>
+                <span id="sceneBroadcastToggleText">已关闭</span>
+              </label>
+            </div>
+            <p id="sceneBroadcastState" class="presence-state">动态画面播报已关闭</p>
+            <small id="sceneBroadcastDetail" class="presence-detail">主画面变化时抓拍、描述并播报</small>
+            <img id="sceneBroadcastImage" class="snapshot-image presence-image" hidden alt="动态播报所分析的画面快照">
+          </div>
+          <div id="faceRecognitionPanel" class="feature-card">
+            <div class="presence-heading">
+              <div class="label">人脸识别</div>
+              <label class="presence-switch">
+                <input id="faceRecognitionToggle" type="checkbox" role="switch" aria-label="开启人脸识别">
+                <span class="presence-track" aria-hidden="true"></span>
+                <span id="faceRecognitionToggleText">已关闭</span>
+              </label>
+            </div>
+            <p id="faceRecognitionState" class="presence-state">人脸识别已关闭</p>
+            <small id="faceRecognitionDetail" class="presence-detail">识别只在本机完成，数据保存在本地</small>
+            <button id="managePeopleButton" class="secondary-button" type="button" style="width:100%;margin-top:10px">管理人员库</button>
+          </div>
         </div>
       </div>
 
@@ -253,57 +350,14 @@
           </div>
           <p id="modelMessage" class="model-message"></p>
         </div>
-        <div id="presencePanel">
-          <div class="presence-heading">
-            <div class="label">动态人物监测</div>
-            <label class="presence-switch">
-              <input id="presenceToggle" type="checkbox" role="switch" aria-label="开启动态人物监测">
-              <span class="presence-track" aria-hidden="true"></span>
-              <span id="presenceToggleText">已关闭</span>
-            </label>
+        <div id="audioPanel">
+          <div class="label">摄像头音频</div>
+          <div class="audio-grid">
+            <label>监听麦克风<select id="audioInputSelect" aria-label="选择监听麦克风"></select></label>
+            <label>回答扬声器<select id="audioOutputSelect" aria-label="选择回答扬声器"></select></label>
+            <button id="saveAudioButton" class="secondary-button" type="button">保存音频设备</button>
           </div>
-          <p id="presenceState" class="presence-state">正在初始化</p>
-          <small id="presenceDetail" class="presence-detail">本地检测画面变化，模型确认是否有人</small>
-          <img id="presenceImage" class="snapshot-image presence-image" hidden alt="检测到有人时的画面快照">
-        </div>
-        <div id="nativeCameraPanel">
-          <div class="presence-heading">
-            <div class="label">后台摄像头接管</div>
-            <label class="presence-switch">
-              <input id="nativeCameraToggle" type="checkbox" role="switch" aria-label="开启后台摄像头接管">
-              <span class="presence-track" aria-hidden="true"></span>
-              <span id="nativeCameraToggleText">已关闭</span>
-            </label>
-          </div>
-          <p id="nativeCameraState" class="presence-state">正在初始化</p>
-          <small id="nativeCameraDetail" class="presence-detail">关闭网页后自动接管摄像头，继续在本机监测</small>
-          <img id="nativeCameraImage" class="snapshot-image presence-image" hidden alt="后台监测最近一次变化快照">
-        </div>
-        <div id="sceneBroadcastPanel">
-          <div class="presence-heading">
-            <div class="label">动态画面播报</div>
-            <label class="presence-switch">
-              <input id="sceneBroadcastToggle" type="checkbox" role="switch" aria-label="开启动态画面播报">
-              <span class="presence-track" aria-hidden="true"></span>
-              <span id="sceneBroadcastToggleText">已关闭</span>
-            </label>
-          </div>
-          <p id="sceneBroadcastState" class="presence-state">动态画面播报已关闭</p>
-          <small id="sceneBroadcastDetail" class="presence-detail">开启后，画面变化时会抓拍、描述并播报</small>
-          <img id="sceneBroadcastImage" class="snapshot-image presence-image" hidden alt="动态播报所分析的画面快照">
-        </div>
-        <div id="faceRecognitionPanel">
-          <div class="presence-heading">
-            <div class="label">人脸识别</div>
-            <label class="presence-switch">
-              <input id="faceRecognitionToggle" type="checkbox" role="switch" aria-label="开启人脸识别">
-              <span class="presence-track" aria-hidden="true"></span>
-              <span id="faceRecognitionToggleText">已关闭</span>
-            </label>
-          </div>
-          <p id="faceRecognitionState" class="presence-state">人脸识别已关闭</p>
-          <small id="faceRecognitionDetail" class="presence-detail">识别只在本机完成，照片和特征保存在本地</small>
-          <button id="managePeopleButton" class="secondary-button" type="button" style="width:100%;margin-top:10px">管理人员库</button>
+          <p id="audioMessage" class="model-message">保存后重启老叶生效</p>
         </div>
         <div id="snapshotPanel" class="snapshot-panel" hidden>
           <div class="label">本次分析快照</div>
@@ -311,7 +365,7 @@
         </div>
         <div class="hint">
           <strong>使用方法</strong>
-          首次说“老叶老叶”即可连续交流；支持天气查询，播报时说“停一下”可打断，空闲30秒后需再次唤醒。
+          说“老叶老叶”开始交流。视觉问答、人物监测和人脸识别使用主摄像头；两个画面只在本机显示。
           <button id="shutdownButton" class="shutdown-button" type="button">关闭老叶助手</button>
         </div>
       </aside>
@@ -335,9 +389,16 @@
 
   <script>
     const video = document.querySelector('#video');
+    const secondaryVideo = document.querySelector('#secondaryVideo');
     const cameraSelect = document.querySelector('#cameraSelect');
+    const secondaryCameraSelect = document.querySelector('#secondaryCameraSelect');
     const connectButton = document.querySelector('#connectButton');
     const cameraCard = document.querySelector('#cameraCard');
+    const primaryCameraPane = document.querySelector('#primaryCameraPane');
+    const secondaryCameraPane = document.querySelector('#secondaryCameraPane');
+    const primaryCameraBadge = document.querySelector('#primaryCameraBadge');
+    const secondaryCameraBadge = document.querySelector('#secondaryCameraBadge');
+    const secondaryEmpty = document.querySelector('#secondaryEmpty');
     const livePill = document.querySelector('#livePill');
     const cameraState = document.querySelector('#cameraState');
     const assistantState = document.querySelector('#assistantState');
@@ -345,6 +406,10 @@
     const modelSelect = document.querySelector('#modelSelect');
     const switchModelButton = document.querySelector('#switchModelButton');
     const modelMessage = document.querySelector('#modelMessage');
+    const audioInputSelect = document.querySelector('#audioInputSelect');
+    const audioOutputSelect = document.querySelector('#audioOutputSelect');
+    const saveAudioButton = document.querySelector('#saveAudioButton');
+    const audioMessage = document.querySelector('#audioMessage');
     const presenceToggle = document.querySelector('#presenceToggle');
     const presenceToggleText = document.querySelector('#presenceToggleText');
     const presenceState = document.querySelector('#presenceState');
@@ -378,6 +443,7 @@
     const snapshotImage = document.querySelector('#snapshotImage');
     const shutdownButton = document.querySelector('#shutdownButton');
     let stream = null;
+    let secondaryStream = null;
     let sendingFrame = false;
     let snapshotRequestInFlight = 0;
     let lastSnapshotRequestId = 0;
@@ -422,6 +488,7 @@
       cameraState.textContent = text;
       livePill.classList.toggle('ready', ready);
       cameraCard.classList.toggle('connected', ready);
+      primaryCameraPane.classList.toggle('connected', ready);
     }
 
     function resetPresenceDetection() {
@@ -473,6 +540,21 @@
       }
     }
 
+    function fillAudioSelect(select, options, selectedIndex) {
+      select.replaceChildren();
+      options.forEach((device) => {
+        const option = document.createElement('option');
+        option.value = JSON.stringify(device.selector);
+        option.textContent = `${device.name} · ${device.host_api}`;
+        option.selected = Number(device.index) === Number(selectedIndex);
+        select.append(option);
+      });
+    }
+
+    function selectedAudioValue(select) {
+      return JSON.parse(select.value);
+    }
+
     function drawFaceOverlay(faces) {
       const displayWidth = faceOverlay.clientWidth;
       const displayHeight = faceOverlay.clientHeight;
@@ -506,49 +588,124 @@
       });
     }
 
-    async function enumerateCameras() {
+    function cameraDisplayName(cameras, camera) {
+      const fallbackIndex = cameras.indexOf(camera) + 1;
+      const base = camera?.label || `摄像头 ${fallbackIndex}`;
+      const sameName = cameras.filter((item) => (item.label || '') === (camera?.label || ''));
+      if (camera?.label && sameName.length > 1) {
+        return `${base} · ${sameName.indexOf(camera) + 1}`;
+      }
+      return base;
+    }
+
+    async function enumerateCameras(primaryId = '', secondaryId = '') {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const cameras = devices.filter((device) => device.kind === 'videoinput');
       cameraSelect.replaceChildren();
+      secondaryCameraSelect.replaceChildren();
+      const disabledOption = document.createElement('option');
+      disabledOption.value = '';
+      disabledOption.textContent = '不显示第二路';
+      secondaryCameraSelect.append(disabledOption);
       cameras.forEach((camera, index) => {
         const option = document.createElement('option');
         option.value = camera.deviceId;
-        option.textContent = camera.label || `摄像头 ${index + 1}`;
+        option.textContent = cameraDisplayName(cameras, camera) || `摄像头 ${index + 1}`;
         cameraSelect.append(option);
+        const secondaryOption = option.cloneNode(true);
+        secondaryCameraSelect.append(secondaryOption);
       });
       const preferred = cameras.find((camera) =>
         preferredKeywords.some((keyword) => camera.label.toLowerCase().includes(keyword.toLowerCase()))
       );
-      if (preferred) cameraSelect.value = preferred.deviceId;
+      if (primaryId && cameras.some((camera) => camera.deviceId === primaryId)) {
+        cameraSelect.value = primaryId;
+      } else if (preferred) {
+        cameraSelect.value = preferred.deviceId;
+      }
+      if (secondaryId && cameras.some((camera) => camera.deviceId === secondaryId)) {
+        secondaryCameraSelect.value = secondaryId;
+      }
       return cameras;
     }
 
-    async function connectCamera(deviceId = '') {
+    function stopCameraStreams() {
       if (stream) stream.getTracks().forEach((track) => track.stop());
-      setCameraStatus('正在连接', false);
-      await fetch('/api/camera-client', { method: 'POST' });
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      const videoConstraints = deviceId
+      if (secondaryStream) secondaryStream.getTracks().forEach((track) => track.stop());
+      stream = null;
+      secondaryStream = null;
+      video.srcObject = null;
+      secondaryVideo.srcObject = null;
+      primaryCameraPane.classList.remove('connected');
+      secondaryCameraPane.classList.remove('connected');
+    }
+
+    function cameraConstraints(deviceId = '') {
+      return deviceId
         ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
         : { width: { ideal: 1280 }, height: { ideal: 720 } };
+    }
+
+    async function connectCameras(primaryId = '', secondaryId = null) {
+      stopCameraStreams();
+      setCameraStatus('正在连接', false);
+      secondaryEmpty.textContent = '正在连接辅助摄像头';
+      await fetch('/api/camera-client', { method: 'POST' });
+      await new Promise((resolve) => setTimeout(resolve, 350));
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
+        stream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints(primaryId), audio: false });
         video.srcObject = stream;
         await video.play();
+        primaryCameraPane.classList.add('connected');
         resetPresenceDetection();
-        const cameras = await enumerateCameras();
         const activeId = stream.getVideoTracks()[0]?.getSettings().deviceId;
-        if (!deviceId) {
-          const preferred = cameras.find((camera) =>
+        const cameras = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = cameras.filter((device) => device.kind === 'videoinput');
+        if (!primaryId) {
+          const preferred = videoDevices.find((camera) =>
             preferredKeywords.some((keyword) => camera.label.toLowerCase().includes(keyword.toLowerCase()))
           );
           if (preferred && preferred.deviceId !== activeId) {
-            cameraSelect.value = preferred.deviceId;
-            return connectCamera(preferred.deviceId);
+            const second = videoDevices.find((camera) => camera.deviceId !== preferred.deviceId);
+            return connectCameras(preferred.deviceId, second?.deviceId || '');
           }
         }
-        if (activeId) cameraSelect.value = activeId;
-        setCameraStatus('画面已连接', true);
+        let selectedSecondaryId = secondaryId;
+        if (selectedSecondaryId === null) {
+          selectedSecondaryId = videoDevices.find((camera) => camera.deviceId !== activeId)?.deviceId || '';
+        } else if (selectedSecondaryId === activeId) {
+          selectedSecondaryId = videoDevices.find((camera) => camera.deviceId !== activeId)?.deviceId || '';
+        }
+        await enumerateCameras(activeId, selectedSecondaryId);
+        const primaryDevice = videoDevices.find((camera) => camera.deviceId === activeId);
+        primaryCameraBadge.textContent = `主摄像头 · ${cameraDisplayName(videoDevices, primaryDevice)}`;
+
+        let connectedCount = 1;
+        if (selectedSecondaryId) {
+          try {
+            secondaryStream = await navigator.mediaDevices.getUserMedia({
+              video: cameraConstraints(selectedSecondaryId),
+              audio: false,
+            });
+            secondaryVideo.srcObject = secondaryStream;
+            await secondaryVideo.play();
+            secondaryCameraPane.classList.add('connected');
+            const secondaryDevice = videoDevices.find((camera) => camera.deviceId === selectedSecondaryId);
+            secondaryCameraBadge.textContent = `辅助摄像头 · ${cameraDisplayName(videoDevices, secondaryDevice)}`;
+            connectedCount = 2;
+          } catch (secondaryError) {
+            console.error(secondaryError);
+            secondaryEmpty.textContent = '辅助摄像头无法打开，请检查是否被其他程序占用';
+          }
+        } else {
+          secondaryEmpty.textContent = '未选择辅助摄像头';
+        }
+        await fetch('/api/camera-client', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ connected_count: connectedCount }),
+        });
+        setCameraStatus(`已连接 ${connectedCount} 个画面`, true);
       } catch (error) {
         console.error(error);
         setCameraStatus('需要摄像头权限', false);
@@ -923,7 +1080,7 @@
         }
         if (stream && !status.camera_ready) cameraState.textContent = '正在同步画面';
         if (stream && status.camera_ready) {
-          cameraState.textContent = '画面已连接';
+          cameraState.textContent = `已连接 ${secondaryStream ? 2 : 1} 个画面`;
           livePill.classList.add('ready');
         }
       } catch (error) {
@@ -931,8 +1088,32 @@
       }
     }
 
-    connectButton.addEventListener('click', () => connectCamera(cameraSelect.value));
-    cameraSelect.addEventListener('change', () => connectCamera(cameraSelect.value));
+    connectButton.addEventListener('click', () => connectCameras(cameraSelect.value, secondaryCameraSelect.value));
+    cameraSelect.addEventListener('change', () => connectCameras(cameraSelect.value, secondaryCameraSelect.value));
+    secondaryCameraSelect.addEventListener('change', () => connectCameras(cameraSelect.value, secondaryCameraSelect.value));
+    saveAudioButton.addEventListener('click', async () => {
+      saveAudioButton.disabled = true;
+      audioMessage.classList.remove('error');
+      audioMessage.textContent = '正在保存音频设备…';
+      try {
+        const response = await fetch('/api/audio-devices', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            input_device: selectedAudioValue(audioInputSelect),
+            output_device: selectedAudioValue(audioOutputSelect),
+          }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || '保存失败');
+        audioMessage.textContent = `已保存：从“${result.output.name}”播报。请停止并重新启动老叶后生效。`;
+      } catch (error) {
+        audioMessage.classList.add('error');
+        audioMessage.textContent = error.message || '音频设备保存失败';
+      } finally {
+        saveAudioButton.disabled = false;
+      }
+    });
     nativeCameraToggle.addEventListener('change', async () => {
       const enabled = nativeCameraToggle.checked;
       nativeCameraToggle.disabled = true;
@@ -1105,10 +1286,7 @@
       assistantState.textContent = '正在安全关闭';
       try {
         await fetch('/api/shutdown', { method: 'POST' });
-        if (stream) {
-          stream.getTracks().forEach((track) => track.stop());
-          stream = null;
-        }
+        stopCameraStreams();
         setCameraStatus('服务已关闭', false);
         assistantState.textContent = '老叶语音助手已关闭';
       } catch (_) {
@@ -1125,6 +1303,16 @@
         sceneBroadcastSettings = { ...sceneBroadcastSettings, ...(config.scene_broadcast || {}) };
         faceRecognitionSettings = { ...faceRecognitionSettings, ...(config.face_recognition || {}) };
         nativeCameraSettings = { ...nativeCameraSettings, ...(config.native_camera || {}) };
+        fillAudioSelect(
+          audioInputSelect,
+          config.audio?.input_options || [],
+          config.audio?.selected_input_index,
+        );
+        fillAudioSelect(
+          audioOutputSelect,
+          config.audio?.output_options || [],
+          config.audio?.selected_output_index,
+        );
         syncPresenceToggle(presenceSettings.enabled);
         syncSceneBroadcastToggle(sceneBroadcastSettings.enabled);
         syncFaceRecognitionToggle(faceRecognitionSettings.enabled);
@@ -1155,7 +1343,7 @@
         setCameraStatus('浏览器不支持摄像头', false);
         return;
       }
-      await connectCamera();
+      await connectCameras();
       setInterval(sendCurrentFrame, 1000);
       setInterval(monitorPresenceMotion, 500);
       setInterval(sendFaceRecognitionFrame, 1200);

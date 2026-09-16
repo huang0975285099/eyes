@@ -286,6 +286,7 @@ class NativeCameraMonitor:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._browser_claim_until = 0.0
+        self._browser_connected_count = 0
         self._listeners: list[Callable[[dict], None]] = []
         self._cameras = {
             camera.id: _CameraRuntime(camera)
@@ -308,10 +309,14 @@ class NativeCameraMonitor:
                 runtime.state = "等待后台监控" if enabled else "后台摄像头接管已关闭"
                 runtime.error = ""
 
-    def claim_for_browser(self, seconds: float = 12.0) -> None:
+    def claim_for_browser(
+        self, seconds: float = 12.0, connected_count: int | None = None
+    ) -> None:
         """暂时释放全部设备，让网页选择并独占其中一个摄像头。"""
         with self._lock:
             self._browser_claim_until = time.monotonic() + max(2.0, seconds)
+            if connected_count is not None:
+                self._browser_connected_count = max(0, connected_count)
             for runtime in self._cameras.values():
                 runtime.state = "正在把摄像头交给网页"
 
@@ -337,6 +342,7 @@ class NativeCameraMonitor:
             self._release_camera(runtime)
 
     def status(self) -> dict:
+        browser_frame_age = self.store.browser_frame_age_seconds()
         with self._lock:
             cameras = [
                 {
@@ -382,6 +388,12 @@ class NativeCameraMonitor:
                     (camera["last_frame_at"] for camera in cameras), default=0.0
                 ),
                 "browser_claimed": time.monotonic() < self._browser_claim_until,
+                "browser_connected_count": (
+                    self._browser_connected_count
+                    if browser_frame_age is not None
+                    and browser_frame_age < self.config.native_camera_fallback_seconds
+                    else 0
+                ),
                 "cameras": cameras,
                 "events": self.archive.events(),
             }

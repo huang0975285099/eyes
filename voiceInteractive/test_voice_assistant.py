@@ -25,6 +25,7 @@ from assistant.native_camera import (
     MotionSettings,
     NativeCameraMonitor,
 )
+from assistant.platform_utils import audio_device_options
 
 from voice_assistant import (
     build_accent_aware_question,
@@ -358,6 +359,25 @@ class FaceVoiceQueryTests(unittest.TestCase):
 
 
 class AudioTests(unittest.TestCase):
+    def test_dashboard_audio_choices_prefer_wasapi_and_keep_cameras_distinct(self) -> None:
+        devices = [
+            {"name": "Deli", "hostapi": 0, "max_input_channels": 1, "max_output_channels": 0},
+            {"name": "Deli", "hostapi": 1, "max_input_channels": 1, "max_output_channels": 0},
+            {"name": "2- Deli", "hostapi": 1, "max_input_channels": 1, "max_output_channels": 0},
+        ]
+        with (
+            patch("assistant.platform_utils.sd.query_devices", return_value=devices),
+            patch(
+                "assistant.platform_utils.sd.query_hostapis",
+                side_effect=lambda index: {
+                    "name": "Windows WASAPI" if index == 1 else "MME"
+                },
+            ),
+        ):
+            options = audio_device_options("input")
+        self.assertEqual([item["name"] for item in options], ["Deli", "2- Deli"])
+        self.assertEqual([item["selector"] for item in options], ["Deli", "2- Deli"])
+
     def test_resample_pcm_shape_and_edges(self) -> None:
         samples = np.array([[0], [100], [200]], dtype=np.int16)
         result = resample_pcm(samples, 3, 6)
@@ -642,7 +662,9 @@ class NativeCameraTests(unittest.TestCase):
         store = CameraFrameStore()
         presence = SimpleNamespace(enabled=False)
         face = SimpleNamespace(enabled=False)
-        monitor = NativeCameraMonitor(load_config(DEFAULT_CONFIG), store, presence, face)
+        config = load_config(DEFAULT_CONFIG)
+        config = replace(config, native_cameras=(config.native_cameras[0],))
+        monitor = NativeCameraMonitor(config, store, presence, face)
         capture = FakeCapture()
         with patch.object(monitor, "_open_camera", return_value=capture):
             monitor.start()

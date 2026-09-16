@@ -1,6 +1,6 @@
 {
-  "input_device": "Deli-1080P-Camera-Audio",
-  "output_device": "Deli-1080P-Camera Audio",
+  "input_device": "Microphone (2- Deli-1080P-Camera-Audio)",
+  "output_device": "Speakers (2- Deli-1080P-Camera Audio)",
   "wake_phrases": [
     "老 叶 老 叶",
     "老爷 老爷"
@@ -54,6 +54,13 @@
       "index": 0,
       "enabled": true,
       "primary": true
+    },
+    {
+      "id": "camera_2",
+      "name": "Deli MM101S 2",
+      "index": 1,
+      "enabled": true,
+      "primary": false
     }
   ],
   "native_camera_fallback_seconds": 5.0,

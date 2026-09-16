@@ -78,6 +78,39 @@ def list_audio_devices() -> None:
             print(f"  [{index:>2}] {device['name']} ({_host_api_name(device['hostapi'])})")
 
 
+def audio_device_options(direction: str) -> list[dict]:
+    """Return concise device choices for the dashboard, preferring WASAPI."""
+    if direction not in {"input", "output"}:
+        raise ValueError(f"未知设备方向：{direction}")
+    channel_key = f"max_{direction}_channels"
+    options = [
+        {
+            "index": index,
+            "name": str(device["name"]),
+            "host_api": _host_api_name(int(device["hostapi"])),
+        }
+        for index, device in enumerate(sd.query_devices())
+        if int(device[channel_key]) > 0
+    ]
+    wasapi = [item for item in options if item["host_api"] == "Windows WASAPI"]
+    displayed = wasapi or options
+    name_counts = {
+        name: sum(1 for item in displayed if item["name"] == name)
+        for name in {item["name"] for item in displayed}
+    }
+    return [
+        {
+            **item,
+            # A stable name survives PortAudio index changes. Fall back to the
+            # numeric index only when Windows exposes two truly identical names.
+            "selector": (
+                item["name"] if name_counts[item["name"]] == 1 else item["index"]
+            ),
+        }
+        for item in displayed
+    ]
+
+
 def find_audio_device(selector: str | int, direction: str) -> AudioDevice:
     if direction not in {"input", "output"}:
         raise ValueError(f"未知设备方向：{direction}")
