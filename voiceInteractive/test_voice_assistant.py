@@ -12,8 +12,10 @@ import unittest
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
+import voice_assistant as voice_assistant_module
 
-from face_service import FaceDatabase, describe_position
+from face_service import FaceDatabase, describe_position, match_face_embeddings
+from assistant.face import FaceRecognitionService
 
 from voice_assistant import (
     build_accent_aware_question,
@@ -57,6 +59,18 @@ from voice_assistant import (
 
 
 class TextTests(unittest.TestCase):
+    def test_compatibility_entry_keeps_previous_private_helpers(self) -> None:
+        for name in (
+            "_host_api_name",
+            "_safe_extract_zip",
+            "_recognizer",
+            "_result_text",
+        ):
+            self.assertTrue(hasattr(voice_assistant_module, name), name)
+
+    def test_face_service_compatibility_entry_uses_packaged_implementation(self) -> None:
+        self.assertEqual(FaceRecognitionService.__module__, "assistant.face.service")
+
     def test_normalize_and_wake(self) -> None:
         wake_phrases = ("老 叶 老 叶", "老爷 老爷")
         self.assertEqual(normalize_text(" 老叶，老叶！ "), "老叶老叶")
@@ -259,10 +273,79 @@ class FaceDatabaseTests(unittest.TestCase):
             finally:
                 database.close()
 
+    def test_aliases_cannot_resolve_to_two_people(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            database = FaceDatabase(Path(temp_dir) / "faces.db")
+            try:
+                database.add_person("王二", ["王师傅"])
+                with self.assertRaisesRegex(ValueError, "已经被其他人员使用"):
+                    database.add_person("张三", ["王师傅"])
+                with self.assertRaisesRegex(ValueError, "已经被其他人员使用"):
+                    database.add_person("王师傅")
+                with self.assertRaisesRegex(ValueError, "已经存在"):
+                    database.add_person("王 二")
+            finally:
+                database.close()
+
     def test_position_description(self) -> None:
         self.assertIn("左侧", describe_position([20, 20, 100, 100], 1000, 600))
         self.assertIn("中间", describe_position([450, 20, 100, 100], 1000, 600))
         self.assertIn("右侧", describe_position([820, 20, 100, 100], 1000, 600))
+
+    def test_frame_assigns_each_identity_only_once(self) -> None:
+        samples = [
+            ("a", "张三", np.array([1.0, 0.0], dtype=np.float32)),
+            ("b", "李四", np.array([0.0, 1.0], dtype=np.float32)),
+        ]
+        distinct = match_face_embeddings(
+            [
+                np.array([1.0, 0.0], dtype=np.float32),
+                np.array([0.0, 1.0], dtype=np.float32),
+            ],
+            samples,
+            0.48,
+            0.05,
+        )
+        self.assertEqual([item["person_id"] for item in distinct], ["a", "b"])
+
+        duplicate = match_face_embeddings(
+            [
+                np.array([1.0, 0.0], dtype=np.float32),
+                np.array([0.99, 0.01], dtype=np.float32),
+            ],
+            samples,
+            0.48,
+            0.05,
+        )
+        self.assertEqual(sum(item["person_id"] == "a" for item in duplicate), 1)
+
+    def test_single_bad_sample_does_not_dominate_multiple_samples(self) -> None:
+        samples = [
+            ("a", "张三", np.array([1.0, 0.0], dtype=np.float32)),
+            ("a", "张三", np.array([-1.0, 0.0], dtype=np.float32)),
+            ("a", "张三", np.array([-1.0, 0.0], dtype=np.float32)),
+        ]
+        result = match_face_embeddings(
+            [np.array([1.0, 0.0], dtype=np.float32)],
+            samples,
+            0.48,
+            0.05,
+        )
+        self.assertFalse(result[0]["known"])
+
+
+class FaceVoiceQueryTests(unittest.TestCase):
+    def test_location_query_uses_an_alternative_with_a_known_name(self) -> None:
+        assistant = object.__new__(VoiceAssistant)
+        face_service = Mock()
+        face_service.answer_location.side_effect = lambda text: (
+            "王二在画面右侧。" if "王二" in text else None
+        )
+        assistant.dashboard = SimpleNamespace(face_service=face_service)
+        result = assistant._person_location_response(
+            "王儿在哪", ["王儿在哪", "王二在哪"]
+        )
+        self.assertEqual(result, ("王二在哪", "王二在画面右侧。"))
 
 
 class AudioTests(unittest.TestCase):

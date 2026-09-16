@@ -1,6 +1,6 @@
-"""兼容入口；新代码请从 ``assistant.face`` 导入。"""
+"""本地人脸人员库、识别服务与视频样本提取。"""
 
-from assistant.face import (
+from .service import (
     FaceDatabase,
     FaceRecognitionService,
     OpenCVFaceExtractor,
