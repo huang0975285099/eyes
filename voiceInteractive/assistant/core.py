@@ -6,6 +6,7 @@ import queue
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import sounddevice as sd
@@ -13,6 +14,7 @@ from vosk import KaldiRecognizer, Model
 
 from .config import AudioDevice, Config
 from .dashboard import CameraDashboard
+from .face.service import mark_target_face
 from .llm import ModelRouter, OllamaClient, OnlineQwenClient
 from .speaker import Speaker
 from .textutils import (
@@ -31,6 +33,7 @@ from .textutils import (
     is_vision_follow_up,
     is_weather_command,
     is_weather_follow_up,
+    normalize_text,
     recognition_alternatives,
     select_actionable_recognition,
     vision_camera_hint,
@@ -317,6 +320,7 @@ class VoiceAssistant:
     ) -> tuple[str, str] | None:
         if self.dashboard is None:
             return None
+        face_service = self.dashboard.face_service
         seen: set[str] = set()
         for candidate in [primary_text, *recognition_candidates]:
             normalized = candidate.strip()
@@ -325,10 +329,102 @@ class VoiceAssistant:
             seen.add(normalized)
             if not is_person_location_query(candidate):
                 continue
-            answer = self.dashboard.face_service.answer_location(candidate)
-            if answer is not None:
+            person = face_service.database.resolve_person(candidate)
+            if person is None:
+                continue
+            wants_right_eye = vision_camera_hint(candidate) == "right"
+            monitor = self.dashboard.native_camera
+            primary_id = monitor.primary_camera_id()
+            secondary_id = monitor.secondary_camera_id()
+            if wants_right_eye and secondary_id is None:
+                return candidate, "当前没有配置辅助摄像头，无法查看右眼画面。"
+            camera_specs = []
+            if not wants_right_eye and primary_id is not None:
+                camera_specs.append(("主摄像头", primary_id))
+            if secondary_id is not None and (wants_right_eye or "左眼" not in normalize_text(candidate)):
+                camera_specs.append(("辅助摄像头", secondary_id))
+            if not camera_specs:
+                return candidate, "当前没有配置可用的摄像头。"
+
+            self.dashboard.store.set_assistant_status("正在从摄像头连续取帧")
+            with ThreadPoolExecutor(max_workers=len(camera_specs)) as pool:
+                pending = [
+                    (label, pool.submit(self._capture_eye_frames, camera_id, label))
+                    for label, camera_id in camera_specs
+                ]
+                captures = [(label, *future.result()) for label, future in pending]
+
+            self.dashboard.store.set_assistant_status("正在核对本地人员库")
+            checked = []
+            for label, frames, camera_error in captures:
+                if camera_error or not frames:
+                    checked.append((label, frames, None, camera_error or "取不到画面"))
+                    continue
+                try:
+                    result = face_service.identify_frames(frames)
+                    checked.append((label, frames, result, None))
+                except Exception as error:
+                    print(f"[{label}人员定位失败] {error}", file=sys.stderr)
+                    checked.append((label, frames, None, "本地人脸识别失败"))
+
+            found = [
+                (label, frames, match)
+                for label, frames, result, _ in checked
+                if result is not None
+                for match in result["matches"]
+                if match["person_id"] == person["id"]
+            ]
+            if found:
+                locations = "；".join(
+                    f"{label}的{match['position']}" for label, _, match in found
+                )
+                answer = f"根据本地人员库，{person['name']}在{locations}。"
+                label, frames, match = found[0]
+                source_frame = frames[match["frame_index"]]
+                try:
+                    marked_frame = mark_target_face(source_frame, match["bbox"])
+                    self.dashboard.store.record_analysis_snapshot(marked_frame)
+                    self.dashboard.store.set_assistant_status("正在描述人员周围环境")
+                    detail = self.ollama.describe_target_context(marked_frame).strip()
+                    if detail and "不清楚" not in detail and person["name"] not in detail:
+                        answer += f" 周围参照：{detail.rstrip('。')}。"
+                except Exception as error:
+                    print(f"[场景化人员位置描述失败] {error}", file=sys.stderr)
+                    self.dashboard.store.record_analysis_snapshot(source_frame)
                 return candidate, answer
+
+            for _, frames, _, _ in checked:
+                if frames:
+                    self.dashboard.store.record_analysis_snapshot(frames[-1])
+                    break
+            details = []
+            for label, frames, result, camera_error in checked:
+                if camera_error:
+                    details.append(f"{label}{camera_error}")
+                elif result["no_samples"]:
+                    details.append("本地人员库没有人脸样本")
+                elif len(frames) < 2:
+                    details.append(f"{label}取帧不足，未完成连续确认")
+                elif result["quality_rejected"]:
+                    details.append(f"{label}人脸不够清晰或过小")
+                elif not result["face_count"]:
+                    details.append(f"{label}未检测到清晰人脸")
+                else:
+                    details.append(f"{label}未可靠匹配")
+            return candidate, f"当前无法确认{person['name']}的位置。{'；'.join(dict.fromkeys(details))}。"
         return None
+
+    def _capture_eye_frames(
+        self, camera_id: str, label: str
+    ) -> tuple[list[bytes], str | None]:
+        try:
+            frames = self.dashboard.native_camera.capture_frames(
+                camera_id, 3, self.config.camera_snapshot_timeout_seconds
+            )
+        except Exception as error:
+            print(f"[{label}连续取帧失败] {error}", file=sys.stderr)
+            return [], "暂时取不到画面"
+        return (frames, None) if frames else ([], "暂时取不到画面")
 
     def _broadcast_pending_scene(self) -> bool:
         if not self.dashboard:
@@ -414,6 +510,10 @@ class VoiceAssistant:
         if result["no_samples"]:
             return "本地人员库还没有人脸样本，暂时无法确认画面中是谁。"
         face_count = result["face_count"]
+        if result.get("frame_count", 2) < 2:
+            return "当前只取得一帧，无法连续确认画面中是谁。"
+        if result.get("quality_rejected") and not result["matches"]:
+            return "当前人脸画面不够清晰或人脸太小，无法可靠确认是谁。"
         if not face_count:
             return "当前画面没有检测到清晰人脸，无法确认是谁。"
         matches = result["matches"]
@@ -429,8 +529,6 @@ class VoiceAssistant:
     def _local_identity_note(result: dict | None) -> str:
         if not result or result["no_samples"] or not result["face_count"]:
             return ""
-        if not result["matches"]:
-            return "画面中的人尚未与本地人员库可靠匹配。"
         return VoiceAssistant._local_identity_answer(result)
 
     @staticmethod
@@ -698,7 +796,6 @@ class VoiceAssistant:
                     vision_context_active = False
                     weather_context_active = False
                     desktop_context_active = False
-                    self.ollama.remember(resolved_text, answer)
                     if resolved_text != text:
                         print(f"[人员姓名纠错] {text} -> {resolved_text}")
                     print(f"[人员位置回答] {answer}")
@@ -871,20 +968,27 @@ class VoiceAssistant:
                         else:
                             vision_eye = "primary"
                     missing_camera_note: str | None = None
+                    image_frames: list[bytes] = []
                     if self.dashboard:
                         self.dashboard.store.set_assistant_status(
                             "正在拍摄本次分析快照"
                         )
-                    if vision_eye == "right":
-                        image_bytes, missing_camera_note = (
-                            self._request_right_eye_frame()
+                        monitor = self.dashboard.native_camera
+                        camera_id = (
+                            monitor.secondary_camera_id()
+                            if vision_eye == "right"
+                            else monitor.primary_camera_id()
                         )
-                    elif self.dashboard:
-                        image_bytes, missing_camera_note = (
-                            self._request_primary_eye_frame()
-                        )
-                    else:
-                        image_bytes = None
+                        if camera_id is None:
+                            missing_camera_note = "当前没有配置可用的摄像头。"
+                        else:
+                            image_frames, missing_camera_note = self._capture_eye_frames(
+                                camera_id,
+                                "辅助摄像头" if vision_eye == "right" else "主摄像头",
+                            )
+                    image_bytes = image_frames[-1] if image_frames else None
+                    if image_bytes is not None:
+                        self.dashboard.store.record_analysis_snapshot(image_bytes)
                     if image_bytes is None:
                         answer = missing_camera_note or (
                             "没有拍到同步画面，请确认摄像头网页已打开并允许权限。"
@@ -899,8 +1003,8 @@ class VoiceAssistant:
                         identity_error = None
                         if self.dashboard:
                             try:
-                                identity_result = self.dashboard.face_service.identify_snapshot(
-                                    image_bytes
+                                identity_result = self.dashboard.face_service.identify_frames(
+                                    image_frames
                                 )
                             except Exception as error:
                                 identity_error = str(error)

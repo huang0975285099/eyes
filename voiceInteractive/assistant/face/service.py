@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 
+import cv2
 import numpy as np
 
 from ..paths import APP_DIR
@@ -45,6 +46,9 @@ def _clean_aliases(values) -> list[str]:
             aliases.append(alias)
             seen.add(key)
     return aliases[:10]
+
+
+VIDEO_FILENAME = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{8}\.(?:webm|mp4)\Z")
 
 
 class FaceDatabase:
@@ -284,6 +288,57 @@ class FaceDatabase:
             photo_path.unlink(missing_ok=True)
         return True
 
+    def _videos_dir(self, person_id: str) -> Path | None:
+        if not re.fullmatch(r"[0-9a-f]{32}", person_id) or self.get_person(person_id) is None:
+            return None
+        photos_root = self.photos_dir.resolve()
+        person_dir = (photos_root / person_id).resolve()
+        videos_dir = (person_dir / "videos").resolve()
+        if person_dir.parent != photos_root or videos_dir.parent != person_dir:
+            return None
+        return videos_dir
+
+    def list_videos(self, person_id: str) -> list[dict]:
+        videos_dir = self._videos_dir(person_id)
+        if videos_dir is None or not videos_dir.is_dir():
+            return []
+        videos = []
+        for entry in videos_dir.iterdir():
+            if not VIDEO_FILENAME.fullmatch(entry.name):
+                continue
+            path = entry.resolve()
+            if path.parent != videos_dir or not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            videos.append({
+                "filename": entry.name,
+                "size_bytes": stat.st_size,
+                "created_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        return sorted(videos, key=lambda item: item["filename"], reverse=True)
+
+    def video_path(self, person_id: str, filename: str) -> Path | None:
+        if not VIDEO_FILENAME.fullmatch(filename):
+            return None
+        videos_dir = self._videos_dir(person_id)
+        if videos_dir is None:
+            return None
+        path = videos_dir / filename
+        return path if path.resolve().parent == videos_dir and path.is_file() else None
+
+    def delete_video(self, person_id: str, filename: str) -> bool:
+        path = self.video_path(person_id, filename)
+        if path is None:
+            return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
     def embeddings(self) -> list[tuple[str, str, np.ndarray]]:
         with self._lock:
             rows = self._connection.execute(
@@ -447,6 +502,19 @@ def describe_position(bbox: list[float], width: int, height: int) -> str:
     face_ratio = box_width * box_height / max(1, width * height)
     distance = "，离摄像头较近" if face_ratio >= 0.075 else "，距离摄像头较远" if face_ratio <= 0.012 else ""
     return horizontal + distance
+
+
+def mark_target_face(image_bytes: bytes, bbox: list[float]) -> bytes:
+    """Mark only the locally matched face; never write the person's name on it."""
+    frame = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("无法解码人员定位画面")
+    x, y, width, height = [int(round(value)) for value in bbox]
+    cv2.rectangle(frame, (x - 4, y - 4), (x + width + 4, y + height + 4), (0, 255, 0), 4)
+    ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        raise ValueError("无法标注人员定位画面")
+    return encoded.tobytes()
 
 
 def match_face_embeddings(
@@ -693,10 +761,16 @@ class FaceRecognitionService:
         """
         samples = self.database.embeddings()
         if not samples:
-            return {"face_count": 0, "matches": [], "no_samples": True}
+            return {"face_count": 0, "matches": [], "no_samples": True, "quality_rejected": 0}
         extracted = self.extractor.extract(image_bytes)
         faces = extracted.get("faces", [])
-        vectors = [np.asarray(face["embedding"], dtype=np.float32) for face in faces]
+        eligible_faces = [
+            face for face in faces
+            if min(face["bbox"][2:4]) >= self.config.face_min_size
+            and float(face.get("blur", 100.0)) >= self.config.face_min_blur
+            and 25.0 <= float(face.get("brightness", 128.0)) <= 245.0
+        ]
+        vectors = [np.asarray(face["embedding"], dtype=np.float32) for face in eligible_faces]
         matched = match_face_embeddings(
             vectors,
             samples,
@@ -706,13 +780,74 @@ class FaceRecognitionService:
         width, height = int(extracted["width"]), int(extracted["height"])
         matches = [
             {
+                "person_id": match["person_id"],
                 "name": match["name"],
                 "position": describe_position(face["bbox"], width, height),
+                "bbox": [float(value) for value in face["bbox"]],
             }
-            for face, match in zip(faces, matched)
+            for face, match in zip(eligible_faces, matched)
             if match["known"]
         ]
-        return {"face_count": len(faces), "matches": matches, "no_samples": False}
+        return {
+            "face_count": len(faces), "matches": matches, "no_samples": False,
+            "quality_rejected": len(faces) - len(eligible_faces),
+        }
+
+    def identify_frames(self, image_frames: list[bytes]) -> dict:
+        """Require an identity in at least two distinct captured frames."""
+        if not image_frames:
+            return {
+                "face_count": 0, "matches": [], "no_samples": False,
+                "quality_rejected": 0, "frame_count": 0,
+            }
+        results = [self.identify_snapshot(frame) for frame in image_frames]
+        votes: dict[str, list[tuple[int, dict]]] = {}
+        for frame_index, result in enumerate(results):
+            for match in result["matches"]:
+                votes.setdefault(match["person_id"], []).append((frame_index, match))
+        matches = []
+        for observations in votes.values():
+            if len(observations) < 2 or observations[-1][0] != len(image_frames) - 1:
+                continue
+            frame_index, match = observations[-1]
+            matches.append({**match, "frame_index": frame_index, "confirmations": len(observations)})
+        return {
+            "face_count": max(result["face_count"] for result in results),
+            "matches": matches,
+            "no_samples": all(result["no_samples"] for result in results),
+            "quality_rejected": max(result["quality_rejected"] for result in results),
+            "frame_count": len(image_frames),
+        }
+
+    @staticmethod
+    def answer_location_result(person: dict, result: dict, camera_label: str) -> str:
+        """Describe a locally confirmed match without inferring absence from failure."""
+        name = person["name"]
+        if result["no_samples"]:
+            return f"本地人员库还没有人脸样本，无法确认{name}的位置。"
+        match = next(
+            (item for item in result["matches"] if item["person_id"] == person["id"]),
+            None,
+        )
+        if match is not None:
+            return f"根据本地人员库，{name}在{camera_label}的{match['position']}。"
+        if result.get("frame_count", 2) < 2:
+            return f"{camera_label}只取得一帧，无法连续确认{name}的位置。"
+        if result.get("quality_rejected", 0):
+            return f"{camera_label}当前人脸画面不够清晰，无法可靠确认{name}的位置。"
+        if not result["face_count"]:
+            return f"{camera_label}当前画面没有检测到清晰人脸，无法确认{name}的位置。"
+        return f"{camera_label}当前画面没有可靠匹配到{name}，无法确认该人员是否在画面内。"
+
+    def answer_location_snapshot(
+        self, text: str, image_bytes: bytes, camera_label: str = "主摄像头"
+    ) -> str | None:
+        """Locate an enrolled person in the exact frame captured for this question."""
+        person = self.database.resolve_person(text)
+        if person is None:
+            return None
+        result = self.identify_snapshot(image_bytes)
+        return self.answer_location_result(person, result, camera_label)
 
     def answer_location(self, text: str) -> str | None:
         person = self.database.resolve_person(text)

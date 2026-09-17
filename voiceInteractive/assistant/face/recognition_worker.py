@@ -64,6 +64,7 @@ def main() -> int:
                             "bbox": [x, y, box_width, box_height],
                             "confidence": float(face[-1]),
                             "blur": round(blur, 2),
+                            "brightness": round(float(gray.mean()), 2),
                             "embedding": feature.tolist(),
                         }
                     )

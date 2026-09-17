@@ -240,6 +240,17 @@
     .sample-image { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 9px; border: 1px solid #29463e; background: #081512; }
     .sample-remove { position: absolute; top: 4px; right: 4px; min-height: 24px; width: 26px; padding: 0; border-radius: 8px; background: rgba(10,25,22,.85); color: #e6aaa3; border-color: rgba(230,115,103,.35); }
     .sample-note { color: #819b93; font-size: 12px; }
+    .sample-section { margin-top: 12px; }
+    .sample-section:first-child { margin-top: 0; }
+    .sample-section h3 { margin: 0 0 8px; color: #c9e9de; font-size: 13px; }
+    .video-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 10px; }
+    .video-card { border: 1px solid #29463e; border-radius: 11px; padding: 8px; background: #081512; }
+    .video-card video { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #020504; border-radius: 7px; }
+    .video-meta { margin: 8px 0; color: #9bb1aa; font-size: 12px; line-height: 1.4; }
+    .video-actions { display: flex; gap: 8px; }
+    .video-actions button, .video-download { min-height: 34px; padding: 0 11px; font-size: 12px; }
+    .video-download { display: inline-flex; align-items: center; justify-content: center; border: 1px solid #31594e; border-radius: 9px; color: #bfe9dc; text-decoration: none; }
+    .video-download:hover { background: rgba(43, 201, 156, .1); }
     .danger-button { background: transparent; color: #e6aaa3; border-color: rgba(230,115,103,.35); }
     .recording { background: #d65c54 !important; color: white !important; }
     .face-message { min-height: 21px; color: #9bb1aa; margin: 12px 0 0; font-size: 13px; line-height: 1.55; }
@@ -977,26 +988,91 @@
     async function loadSamplesPanel(panel, personId) {
       const note = document.createElement('div');
       note.className = 'sample-note';
-      note.textContent = '正在加载样本…';
+      note.textContent = '正在加载视频和人脸样本…';
       panel.replaceChildren(note);
       try {
-        const response = await fetch(`/api/people/${personId}/samples`, { cache: 'no-store' });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || '读取样本失败');
-        renderSamplesPanel(panel, personId, result.samples || []);
+        const [sampleResponse, videoResponse] = await Promise.all([
+          fetch(`/api/people/${personId}/samples`, { cache: 'no-store' }),
+          fetch(`/api/people/${personId}/videos`, { cache: 'no-store' }),
+        ]);
+        const [sampleResult, videoResult] = await Promise.all([
+          sampleResponse.json(), videoResponse.json(),
+        ]);
+        if (!sampleResponse.ok) throw new Error(sampleResult.error || '读取样本失败');
+        if (!videoResponse.ok) throw new Error(videoResult.error || '读取视频失败');
+        renderSamplesPanel(panel, personId, sampleResult.samples || [], videoResult.videos || []);
       } catch (error) {
-        note.textContent = error.message || '读取样本失败';
+        note.textContent = error.message || '读取视频和样本失败';
         panel.replaceChildren(note);
       }
     }
 
-    function renderSamplesPanel(panel, personId, samples) {
+    function renderSamplesPanel(panel, personId, samples, videos) {
       panel.replaceChildren();
+      const videoSection = document.createElement('section');
+      videoSection.className = 'sample-section';
+      const videoTitle = document.createElement('h3');
+      videoTitle.textContent = `采集视频（${videos.length}）`;
+      videoSection.append(videoTitle);
+      if (videos.length) {
+        const videoList = document.createElement('div');
+        videoList.className = 'video-list';
+        videos.forEach((item) => {
+          const card = document.createElement('div');
+          card.className = 'video-card';
+          const source = `/api/people/${personId}/videos/${encodeURIComponent(item.filename)}`;
+          const player = document.createElement('video');
+          player.controls = true;
+          player.preload = 'metadata';
+          player.src = source;
+          player.setAttribute('aria-label', `${item.created_at} 的采集视频`);
+          const meta = document.createElement('div');
+          meta.className = 'video-meta';
+          const size = item.size_bytes >= 1024 * 1024
+            ? `${(item.size_bytes / 1024 / 1024).toFixed(1)} MB`
+            : `${Math.ceil(item.size_bytes / 1024)} KB`;
+          meta.textContent = `${item.created_at} · ${size}`;
+          const actions = document.createElement('div');
+          actions.className = 'video-actions';
+          const download = document.createElement('a');
+          download.className = 'video-download';
+          download.href = source;
+          download.download = item.filename;
+          download.textContent = '下载';
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'danger-button';
+          remove.dataset.action = 'delete-video';
+          remove.dataset.personId = personId;
+          remove.dataset.filename = item.filename;
+          remove.textContent = '删除视频';
+          actions.append(download, remove);
+          card.append(player, meta, actions);
+          videoList.append(card);
+        });
+        videoSection.append(videoList);
+        const note = document.createElement('p');
+        note.className = 'sample-note';
+        note.textContent = '删除原始视频不会删除已提取的人脸样本。';
+        videoSection.append(note);
+      } else {
+        const note = document.createElement('div');
+        note.className = 'sample-note';
+        note.textContent = '暂无录制视频；逐帧采集不会生成视频。';
+        videoSection.append(note);
+      }
+      panel.append(videoSection);
+      const photoSection = document.createElement('section');
+      photoSection.className = 'sample-section';
+      const photoTitle = document.createElement('h3');
+      photoTitle.textContent = `人脸样本（${samples.length}）`;
+      photoSection.append(photoTitle);
       if (!samples.length) {
         const note = document.createElement('div');
         note.className = 'sample-note';
         note.textContent = '还没有样本，先进行人脸采集。';
-        panel.append(note);
+        photoSection.append(note);
+        panel.append(photoSection);
         return;
       }
       const grid = document.createElement('div');
@@ -1021,7 +1097,8 @@
         cell.append(image, remove);
         grid.append(cell);
       });
-      panel.append(grid);
+      photoSection.append(grid);
+      panel.append(photoSection);
     }
 
     function toggleSamplesPanel(row, personId) {
@@ -1721,6 +1798,26 @@
         const row = button.closest('.person-row');
         const person = currentPeople.find((item) => item.id === button.dataset.personId);
         if (row && person) renderPersonEdit(row, person);
+        return;
+      }
+      if (button.dataset.action === 'delete-video') {
+        const personId = button.dataset.personId;
+        if (!confirm('确定删除这段原始视频吗？已提取的人脸样本会保留。删除后视频无法恢复。')) return;
+        button.disabled = true;
+        try {
+          const response = await fetch(
+            `/api/people/${personId}/videos/${encodeURIComponent(button.dataset.filename)}`,
+            { method: 'DELETE' },
+          );
+          const result = await response.json();
+          if (!response.ok || !result.ok) throw new Error(result.error || '删除视频失败');
+          const panel = button.closest('.person-samples');
+          if (panel) await loadSamplesPanel(panel, personId);
+          setPeopleMessage('原始视频已删除，已提取的人脸样本保持不变。');
+        } catch (error) {
+          setPeopleMessage(error.message || '删除视频失败', true);
+          button.disabled = false;
+        }
         return;
       }
       if (button.dataset.action === 'delete-sample') {

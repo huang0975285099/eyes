@@ -408,6 +408,42 @@ class NativeCameraMonitor:
                 runtime.preview_clients = max(0, runtime.preview_clients - 1)
                 self._frame_ready.notify_all()
 
+    def capture_frames(
+        self, camera_id: str, count: int = 3, timeout: float = 4.0
+    ) -> list[bytes]:
+        """Capture distinct recent frames without leaving monitoring enabled."""
+        deadline = time.monotonic() + max(0.1, timeout)
+        with self._frame_ready:
+            runtime = self._cameras.get(camera_id)
+            if runtime is None:
+                raise KeyError(camera_id)
+            runtime.preview_clients += 1
+            recent = time.time() - runtime.last_frame_at < 2.0
+            last_sequence = runtime.frame_sequence - 1 if recent else runtime.frame_sequence
+            self._frame_ready.notify_all()
+            frames: list[bytes] = []
+            try:
+                while len(frames) < max(1, count):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._frame_ready.wait_for(
+                        lambda: self._stop_event.is_set()
+                        or (
+                            runtime.latest_jpeg is not None
+                            and runtime.frame_sequence > last_sequence
+                        ),
+                        timeout=remaining,
+                    )
+                    if self._stop_event.is_set() or runtime.frame_sequence <= last_sequence:
+                        break
+                    frames.append(runtime.latest_jpeg)
+                    last_sequence = runtime.frame_sequence
+                return frames
+            finally:
+                runtime.preview_clients = max(0, runtime.preview_clients - 1)
+                self._frame_ready.notify_all()
+
     def claim_for_browser(
         self, seconds: float = 12.0, connected_count: int | None = None
     ) -> None:

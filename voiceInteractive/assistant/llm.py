@@ -44,7 +44,9 @@ class OllamaClient:
         )
         self.history = self.history[-self._history_message_limit :]
 
-    def _request(self, path: str, payload: dict | None = None) -> dict:
+    def _request(
+        self, path: str, payload: dict | None = None, timeout_seconds: float | None = None
+    ) -> dict:
         data = None
         headers: dict[str, str] = {}
         if payload is not None:
@@ -54,7 +56,8 @@ class OllamaClient:
             f"{self.config.ollama_url}{path}", data=data, headers=headers
         )
         with urllib.request.urlopen(
-            request, timeout=self.config.ollama_timeout_seconds
+            request,
+            timeout=timeout_seconds or self.config.ollama_timeout_seconds,
         ) as response:
             return json.loads(response.read().decode("utf-8"))
 
@@ -255,6 +258,38 @@ class OllamaClient:
             },
         ]
         return self._chat(messages, 0.2, 80).strip()
+
+    def describe_target_context(self, marked_image_bytes: bytes) -> str:
+        """Describe nearby landmarks only, without a name or conversation history."""
+        image_base64 = base64.b64encode(marked_image_bytes).decode("ascii")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "只描述绿色方框标注的人与画面中清楚可见的门、桌子、走廊等参照物的"
+                    "位置关系。只用一句简短中文；看不清就回答'周围参照物不清楚'。"
+                    "不要猜姓名、身份、职业或画面外的位置，不要Markdown。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": "绿色框中的人相对于周围物体在哪里？",
+                "images": [image_base64],
+            },
+        ]
+        response = self._request(
+            "/api/chat",
+            {
+                "model": self.config.ollama_model,
+                "messages": messages,
+                "stream": False,
+                "think": False,
+                "keep_alive": self.config.ollama_keep_alive,
+                "options": {"temperature": 0.1, "num_predict": 70},
+            },
+            timeout_seconds=20.0,
+        )
+        return str(response.get("message", {}).get("content", "")).strip()
 
 
 class OnlineQwenClient:
@@ -652,6 +687,11 @@ class ModelRouter:
 
     def describe_scene(self, image_bytes: bytes) -> str:
         return self._client().describe_scene(image_bytes)
+
+    def describe_target_context(self, marked_image_bytes: bytes) -> str:
+        # Named-person location queries remain local even when general Q&A
+        # currently uses an online model.
+        return self.local.describe_target_context(marked_image_bytes)
 
     def switch(self, provider: str) -> dict[str, str]:
         normalized = self.PROVIDER_ALIASES.get(provider.strip().casefold())

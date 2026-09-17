@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime
+from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
 import queue
@@ -11,6 +12,8 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, Mock, patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import numpy as np
 import cv2
@@ -18,6 +21,8 @@ import voice_assistant as voice_assistant_module
 
 from face_service import FaceDatabase, describe_position, match_face_embeddings
 from assistant.face import FaceRecognitionService
+from assistant.face.service import mark_target_face
+from assistant.dashboard import DashboardHandler
 from assistant.config import DEFAULT_CONFIG, NativeCameraConfig, load_config
 from assistant.native_camera import (
     MotionDetector,
@@ -274,6 +279,47 @@ class TextTests(unittest.TestCase):
 
 
 class FaceDatabaseTests(unittest.TestCase):
+    def test_video_list_playback_range_and_delete_keep_face_samples(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            database = FaceDatabase(Path(temp_dir) / "faces.db")
+            person = database.add_person("王二")
+            database.add_sample(
+                person["id"], np.array([0.6, 0.8], dtype=np.float32), b"jpeg bytes", 0.95, 88.0
+            )
+            video_dir = database.photos_dir / person["id"] / "videos"
+            video_dir.mkdir(parents=True)
+            filename = "20260916-120000-a1b2c3d4.webm"
+            (video_dir / filename).write_bytes(b"0123456789")
+            self.assertEqual(database.list_videos(person["id"])[0]["filename"], filename)
+            self.assertIsNone(database.video_path(person["id"], "../faces.db"))
+            server = ThreadingHTTPServer(("127.0.0.1", 0), DashboardHandler)
+            server.daemon_threads = True
+            server.face_service = SimpleNamespace(database=database)
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            base = f"http://127.0.0.1:{server.server_port}/api/people/{person['id']}/videos"
+            try:
+                with urlopen(base) as response:
+                    self.assertEqual(len(json.load(response)["videos"]), 1)
+                with urlopen(Request(f"{base}/{filename}", headers={"Range": "bytes=2-5"})) as response:
+                    self.assertEqual(response.status, 206)
+                    self.assertEqual(response.headers["Content-Range"], "bytes 2-5/10")
+                    self.assertEqual(response.read(), b"2345")
+                with urlopen(Request(f"{base}/{filename}", method="HEAD")) as response:
+                    self.assertEqual(response.headers["Content-Length"], "10")
+                with self.assertRaises(HTTPError) as invalid_range:
+                    urlopen(Request(f"{base}/{filename}", headers={"Range": "bytes=99-100"}))
+                self.assertEqual(invalid_range.exception.code, 416)
+                with urlopen(Request(f"{base}/{filename}", method="DELETE")) as response:
+                    self.assertTrue(json.load(response)["ok"])
+                self.assertEqual(database.list_videos(person["id"]), [])
+                self.assertEqual(database.list_people()[0]["sample_count"], 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+                database.close()
+
     def test_person_samples_resolution_and_delete(self) -> None:
         with TemporaryDirectory() as temp_dir:
             database = FaceDatabase(Path(temp_dir) / "faces.db")
@@ -365,17 +411,148 @@ class FaceDatabaseTests(unittest.TestCase):
 
 
 class FaceVoiceQueryTests(unittest.TestCase):
-    def test_location_query_uses_an_alternative_with_a_known_name(self) -> None:
+    def test_location_query_searches_both_cameras_automatically(self) -> None:
         assistant = object.__new__(VoiceAssistant)
         face_service = Mock()
-        face_service.answer_location.side_effect = lambda text: (
-            "王二在画面右侧。" if "王二" in text else None
+        face_service.database.resolve_person.return_value = {"id": "person-1", "name": "王二"}
+        face_service.identify_frames.side_effect = lambda frames: {
+            "face_count": 1, "no_samples": False, "quality_rejected": 0,
+            "matches": ([{"person_id": "person-1", "position": "画面左侧",
+                         "bbox": [20, 20, 100, 100], "frame_index": 2}]
+                        if frames[0] == b"side-1" else []),
+        }
+        monitor = SimpleNamespace(
+            primary_camera_id=lambda: "front", secondary_camera_id=lambda: "side",
+            capture_frames=Mock(side_effect=lambda camera_id, count, timeout: (
+                [b"front-1", b"front-2", b"front-3"] if camera_id == "front"
+                else [b"side-1", b"side-2", b"side-3"]
+            )),
         )
-        assistant.dashboard = SimpleNamespace(face_service=face_service)
-        result = assistant._person_location_response(
-            "王儿在哪", ["王儿在哪", "王二在哪"]
+        assistant.dashboard = SimpleNamespace(
+            face_service=face_service, store=CameraFrameStore(), native_camera=monitor
         )
-        self.assertEqual(result, ("王二在哪", "王二在画面右侧。"))
+        assistant.config = SimpleNamespace(camera_snapshot_timeout_seconds=3.0)
+        assistant.ollama = SimpleNamespace(describe_target_context=Mock(return_value="站在门旁边"))
+        with patch("assistant.core.mark_target_face", return_value=b"marked-side"):
+            _, answer = assistant._person_location_response("王二在哪", [])
+        self.assertIn("辅助摄像头的画面左侧", answer)
+        self.assertIn("站在门旁边", answer)
+        self.assertEqual(monitor.capture_frames.call_count, 2)
+        self.assertEqual(assistant.dashboard.store.analysis_snapshot()[1], b"marked-side")
+
+    def test_unavailable_second_camera_is_not_reported_as_person_absent(self) -> None:
+        assistant = object.__new__(VoiceAssistant)
+        face_service = Mock()
+        face_service.database.resolve_person.return_value = {"id": "p1", "name": "王二"}
+        face_service.identify_frames.return_value = {
+            "face_count": 0, "matches": [], "no_samples": False,
+            "quality_rejected": 0,
+        }
+        monitor = SimpleNamespace(
+            primary_camera_id=lambda: "front", secondary_camera_id=lambda: "side",
+            capture_frames=Mock(side_effect=lambda camera_id, count, timeout: (
+                [b"one", b"two", b"three"] if camera_id == "front" else []
+            )),
+        )
+        assistant.dashboard = SimpleNamespace(
+            face_service=face_service, store=CameraFrameStore(), native_camera=monitor
+        )
+        assistant.config = SimpleNamespace(camera_snapshot_timeout_seconds=3.0)
+        _, answer = assistant._person_location_response("王二在哪", [])
+        self.assertIn("主摄像头未检测到清晰人脸", answer)
+        self.assertIn("辅助摄像头暂时取不到画面", answer)
+        self.assertNotIn("王二不在", answer)
+
+    def test_location_query_uses_current_frame_and_an_alternative_with_a_known_name(self) -> None:
+        assistant = object.__new__(VoiceAssistant)
+        face_service = Mock()
+        face_service.database.resolve_person.side_effect = lambda text: (
+            {"id": "person-1", "name": "王二"} if "王二" in text else None
+        )
+        face_service.identify_frames.return_value = {
+            "face_count": 1, "no_samples": False, "quality_rejected": 0,
+            "matches": [{"person_id": "person-1", "position": "画面右侧",
+                         "bbox": [30, 20, 80, 80], "frame_index": 2}],
+        }
+        monitor = SimpleNamespace(
+            primary_camera_id=lambda: "front", secondary_camera_id=lambda: None,
+            capture_frames=Mock(return_value=[b"frame-1", b"frame-2", b"frame-3"]),
+        )
+        assistant.dashboard = SimpleNamespace(
+            face_service=face_service, store=CameraFrameStore(), native_camera=monitor
+        )
+        assistant.config = SimpleNamespace(camera_snapshot_timeout_seconds=3.0)
+        assistant.ollama = SimpleNamespace(describe_target_context=Mock(return_value="靠近门口"))
+        with patch("assistant.core.mark_target_face", return_value=b"marked-frame"):
+            result = assistant._person_location_response(
+                "王儿在哪", ["王儿在哪", "王二在哪"]
+            )
+        self.assertEqual(result[0], "王二在哪")
+        self.assertIn("王二在主摄像头的画面右侧", result[1])
+        self.assertIn("靠近门口", result[1])
+        monitor.capture_frames.assert_called_once_with("front", 3, 3.0)
+        face_service.identify_frames.assert_called_once_with(
+            [b"frame-1", b"frame-2", b"frame-3"]
+        )
+        assistant.ollama.describe_target_context.assert_called_once_with(b"marked-frame")
+        self.assertEqual(assistant.dashboard.store.analysis_snapshot()[1], b"marked-frame")
+
+    def test_location_query_can_use_the_right_camera(self) -> None:
+        assistant = object.__new__(VoiceAssistant)
+        face_service = Mock()
+        face_service.database.resolve_person.return_value = {"id": "person-1", "name": "王二"}
+        face_service.identify_frames.return_value = {
+            "face_count": 1, "no_samples": False, "quality_rejected": 0,
+            "matches": [{"person_id": "person-1", "position": "画面左侧",
+                         "bbox": [30, 20, 80, 80], "frame_index": 2}],
+        }
+        monitor = SimpleNamespace(
+            primary_camera_id=lambda: "front", secondary_camera_id=lambda: "side",
+            capture_frames=Mock(return_value=[b"right-1", b"right-2", b"right-3"]),
+        )
+        assistant.dashboard = SimpleNamespace(face_service=face_service, store=Mock(), native_camera=monitor)
+        assistant.config = SimpleNamespace(camera_snapshot_timeout_seconds=3.0)
+        assistant.ollama = SimpleNamespace(describe_target_context=Mock(return_value="周围参照物不清楚"))
+        with patch("assistant.core.mark_target_face", return_value=b"marked-frame"):
+            result = assistant._person_location_response("右眼里王二在哪", [])
+        self.assertIn("王二在辅助摄像头的画面左侧", result[1])
+        self.assertNotIn("周围参照", result[1])
+        monitor.capture_frames.assert_called_once_with("side", 3, 3.0)
+
+    def test_location_query_reports_unavailable_camera_without_using_old_results(self) -> None:
+        assistant = object.__new__(VoiceAssistant)
+        face_service = Mock()
+        face_service.database.resolve_person.return_value = {"id": "person-1", "name": "王二"}
+        monitor = SimpleNamespace(
+            primary_camera_id=lambda: "front", secondary_camera_id=lambda: None,
+            capture_frames=Mock(return_value=[]),
+        )
+        assistant.dashboard = SimpleNamespace(face_service=face_service, store=Mock(), native_camera=monitor)
+        assistant.config = SimpleNamespace(camera_snapshot_timeout_seconds=3.0)
+        result = assistant._person_location_response("王二在哪", [])
+        self.assertIn("主摄像头暂时取不到画面", result[1])
+        face_service.identify_frames.assert_not_called()
+
+    def test_location_snapshot_requires_matching_person_id_in_exact_frame(self) -> None:
+        service = object.__new__(FaceRecognitionService)
+        service.database = SimpleNamespace(
+            resolve_person=lambda text: {"id": "person-1", "name": "王二"}
+        )
+        service.identify_snapshot = Mock(return_value={
+            "face_count": 2,
+            "matches": [
+                {"person_id": "person-2", "name": "王二", "position": "画面左侧"},
+                {"person_id": "person-1", "name": "王二", "position": "画面右侧"},
+            ],
+            "no_samples": False,
+        })
+        answer = service.answer_location_snapshot("王二在哪", b"current-frame")
+        service.identify_snapshot.assert_called_once_with(b"current-frame")
+        self.assertEqual(answer, "根据本地人员库，王二在主摄像头的画面右侧。")
+        service.identify_snapshot.return_value = {
+            "face_count": 1, "matches": [], "no_samples": False,
+        }
+        self.assertIn("没有可靠匹配", service.answer_location_snapshot("王二在哪", b"next-frame"))
 
     def test_local_identity_answer_requires_reliable_match(self) -> None:
         matched = {
@@ -398,7 +575,10 @@ class FaceVoiceQueryTests(unittest.TestCase):
     def test_identify_snapshot_uses_exact_frame_even_with_live_switch_off(self) -> None:
         service = object.__new__(FaceRecognitionService)
         service.enabled = False
-        service.config = SimpleNamespace(face_match_threshold=0.48, face_match_margin=0.05)
+        service.config = SimpleNamespace(
+            face_match_threshold=0.48, face_match_margin=0.05,
+            face_min_size=80, face_min_blur=35.0,
+        )
         service.database = SimpleNamespace(
             embeddings=lambda: [("person-1", "王二", np.array([1.0, 0.0], dtype=np.float32))]
         )
@@ -412,6 +592,7 @@ class FaceVoiceQueryTests(unittest.TestCase):
         result = service.identify_snapshot(b"current-frame")
         service.extractor.extract.assert_called_once_with(b"current-frame")
         self.assertEqual(result["face_count"], 1)
+        self.assertEqual(result["matches"][0]["person_id"], "person-1")
         self.assertEqual(result["matches"][0]["name"], "王二")
         self.assertIn("左侧", result["matches"][0]["position"])
 
@@ -423,6 +604,49 @@ class FaceVoiceQueryTests(unittest.TestCase):
         self.assertTrue(result["no_samples"])
         self.assertEqual(result["matches"], [])
         service.extractor.extract.assert_not_called()
+
+    def test_identify_frames_needs_two_votes_including_latest_frame(self) -> None:
+        service = object.__new__(FaceRecognitionService)
+        known = {"face_count": 1, "no_samples": False, "quality_rejected": 0,
+                 "matches": [{"person_id": "p1", "name": "王二", "position": "画面左侧",
+                              "bbox": [20, 20, 100, 100]}]}
+        unknown = {"face_count": 1, "no_samples": False, "quality_rejected": 0,
+                   "matches": []}
+        service.identify_snapshot = Mock(side_effect=[known, known, unknown])
+        self.assertEqual(service.identify_frames([b"one", b"two", b"three"])["matches"], [])
+        service.identify_snapshot.side_effect = [known, unknown, known]
+        result = service.identify_frames([b"one", b"two", b"three"])
+        self.assertEqual(result["matches"][0]["frame_index"], 2)
+        self.assertEqual(result["matches"][0]["confirmations"], 2)
+
+    def test_snapshot_rejects_small_blurry_or_badly_lit_faces(self) -> None:
+        service = object.__new__(FaceRecognitionService)
+        service.config = SimpleNamespace(
+            face_match_threshold=0.48, face_match_margin=0.05,
+            face_min_size=80, face_min_blur=35.0,
+        )
+        service.database = SimpleNamespace(embeddings=lambda: [
+            ("p1", "王二", np.array([1.0, 0.0], dtype=np.float32))
+        ])
+        service.extractor = SimpleNamespace(extract=Mock(return_value={
+            "width": 640, "height": 480,
+            "faces": [
+                {"embedding": [1, 0], "bbox": [20, 20, 30, 30], "blur": 90, "brightness": 120},
+                {"embedding": [1, 0], "bbox": [20, 20, 100, 100], "blur": 10, "brightness": 120},
+                {"embedding": [1, 0], "bbox": [20, 20, 100, 100], "blur": 90, "brightness": 10},
+            ],
+        }))
+        result = service.identify_snapshot(b"bad-frames")
+        self.assertEqual(result["face_count"], 3)
+        self.assertEqual(result["quality_rejected"], 3)
+        self.assertEqual(result["matches"], [])
+
+    def test_mark_target_face_adds_box_without_name(self) -> None:
+        ok, original = cv2.imencode(".jpg", np.full((160, 240, 3), 120, dtype=np.uint8))
+        self.assertTrue(ok)
+        marked = mark_target_face(original.tobytes(), [50, 40, 90, 80])
+        image = cv2.imdecode(np.frombuffer(marked, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertGreater(int(image[36, 90, 1]), int(image[36, 90, 0]) + 60)
 
     def test_spoken_question_uses_on_demand_primary_frame(self) -> None:
         assistant = object.__new__(VoiceAssistant)
@@ -809,6 +1033,40 @@ class CameraFrameStoreTests(unittest.TestCase):
 
 
 class NativeCameraTests(unittest.TestCase):
+    def test_on_demand_capture_returns_distinct_frames_without_enabling_monitor(self) -> None:
+        class FakeCapture:
+            def __init__(self) -> None:
+                self.opened = True
+                self.counter = 0
+
+            def isOpened(self) -> bool:
+                return self.opened
+
+            def read(self):
+                self.counter += 1
+                return True, np.full(
+                    (120, 160, 3), 80 + self.counter % 100, dtype=np.uint8
+                )
+
+            def release(self) -> None:
+                self.opened = False
+
+        config = replace(load_config(DEFAULT_CONFIG), native_camera_enabled=False)
+        monitor = NativeCameraMonitor(
+            config, CameraFrameStore(),
+            SimpleNamespace(enabled=False), SimpleNamespace(enabled=False),
+        )
+        with patch.object(monitor, "_open_camera", side_effect=lambda _: FakeCapture()):
+            monitor.start()
+            try:
+                frames = monitor.capture_frames(monitor.primary_camera_id(), 3, 2.0)
+                self.assertFalse(monitor.enabled)
+            finally:
+                monitor.stop()
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(len(set(frames)), 3)
+        self.assertEqual(monitor.status()["cameras"][0]["preview_clients"], 0)
+
     def test_config_accepts_multiple_native_cameras(self) -> None:
         with TemporaryDirectory() as temporary:
             raw = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
@@ -1183,6 +1441,18 @@ class OllamaClientTests(unittest.TestCase):
         self.assertEqual(payload["messages"][-1]["images"], ["anBlZw=="])
         self.assertEqual(self.client.history, [])
 
+    def test_target_context_uses_marked_image_without_name_or_history(self) -> None:
+        self.client.remember("王二在哪", "王二在画面左侧")
+        self.client._request = Mock(return_value={"message": {"content": "在门口旁边。"}})
+        answer = self.client.describe_target_context(b"marked")
+        path, payload = self.client._request.call_args.args
+        self.assertEqual(answer, "在门口旁边。")
+        self.assertEqual(path, "/api/chat")
+        self.assertNotIn("王二", str(payload["messages"]))
+        self.assertEqual(payload["messages"][-1]["images"], ["bWFya2Vk"])
+        self.assertEqual(self.client._request.call_args.kwargs["timeout_seconds"], 20.0)
+        self.assertEqual(len(self.client.history), 2)
+
     def test_warm_up_loads_model_without_thinking(self) -> None:
         self.client.warm_up()
         path, payload = self.client._request.call_args.args
@@ -1326,6 +1596,12 @@ class ModelRouterTests(unittest.TestCase):
             self.router.switch("ollama")
         self.assertEqual(self.router.info()["provider"], "online")
         self.router._persist_provider.assert_not_called()
+
+    def test_named_person_context_stays_local_when_online_model_selected(self) -> None:
+        self.router.local.describe_target_context.return_value = "在门口旁边。"
+        self.assertEqual(self.router.describe_target_context(b"marked"), "在门口旁边。")
+        self.router.local.describe_target_context.assert_called_once_with(b"marked")
+        self.router.online.describe_target_context.assert_not_called()
 
 
 class DesktopToolsTests(unittest.TestCase):

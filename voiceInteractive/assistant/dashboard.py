@@ -173,6 +173,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if request_path == "/api/people":
             self._send_json({"people": self.server.face_service.database.list_people()})
             return
+        videos_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/videos", request_path)
+        if videos_match:
+            database = self.server.face_service.database
+            if database.get_person(videos_match.group(1)) is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self._send_json({"videos": database.list_videos(videos_match.group(1))})
+            return
+        video_match = re.fullmatch(
+            r"/api/people/([0-9a-f]{32})/videos/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}\.(?:webm|mp4))",
+            request_path,
+        )
+        if video_match:
+            self._send_face_video(video_match.group(1), video_match.group(2))
+            return
         samples_match = re.fullmatch(
             r"/api/people/([0-9a-f]{32})/samples", request_path
         )
@@ -271,6 +286,74 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.end_headers()
         self.wfile.write(frame)
+
+    def _send_face_video(self, person_id: str, filename: str, head_only: bool = False) -> None:
+        path = self.server.face_service.database.video_path(person_id, filename)
+        if path is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        try:
+            size = path.stat().st_size
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        start, end = 0, size - 1
+        range_header = self.headers.get("Range")
+        if range_header:
+            match = (
+                re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+                if len(range_header) <= 80 else None
+            )
+            if match and (match.group(1) or match.group(2)):
+                if match.group(1):
+                    start = int(match.group(1))
+                    end = int(match.group(2)) if match.group(2) else size - 1
+                else:
+                    suffix = int(match.group(2))
+                    start = max(0, size - suffix)
+                    end = size - 1
+            if not match or size == 0 or start >= size or end < start:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            end = min(end, size - 1)
+        length = max(0, end - start + 1)
+        self.send_response(HTTPStatus.PARTIAL_CONTENT if range_header else HTTPStatus.OK)
+        self.send_header("Content-Type", "video/mp4" if filename.endswith(".mp4") else "video/webm")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if range_header:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if head_only:
+            return
+        try:
+            with path.open("rb") as source:
+                source.seek(start)
+                remaining = length
+                while remaining:
+                    chunk = source.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except OSError:
+            return
+
+    def do_HEAD(self) -> None:
+        request_path = self.path.partition("?")[0]
+        video_match = re.fullmatch(
+            r"/api/people/([0-9a-f]{32})/videos/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}\.(?:webm|mp4))",
+            request_path,
+        )
+        if video_match:
+            self._send_face_video(video_match.group(1), video_match.group(2), head_only=True)
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def _send_camera_stream(self, camera_id: str) -> None:
         if not self.server.native_camera.has_camera(camera_id):
@@ -625,6 +708,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         request_path = self.path.partition("?")[0]
+        video_match = re.fullmatch(
+            r"/api/people/([0-9a-f]{32})/videos/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}\.(?:webm|mp4))",
+            request_path,
+        )
+        if video_match:
+            try:
+                deleted = self.server.face_service.database.delete_video(
+                    video_match.group(1), video_match.group(2)
+                )
+            except OSError as error:
+                self._send_json({"ok": False, "error": f"视频正在使用或无法删除：{error}"}, HTTPStatus.CONFLICT)
+                return
+            if not deleted:
+                self._send_json({"ok": False, "error": "视频不存在"}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_json({"ok": True})
+            return
         sample_match = re.fullmatch(
             r"/api/people/([0-9a-f]{32})/samples/(\d+)", request_path
         )
