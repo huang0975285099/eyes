@@ -308,6 +308,13 @@ class NativeCameraMonitor:
         with self._lock:
             return camera_id in self._cameras
 
+    def primary_camera_id(self) -> str | None:
+        with self._lock:
+            for camera_id, runtime in self._cameras.items():
+                if runtime.config.primary:
+                    return camera_id
+            return next(iter(self._cameras), None)
+
     def secondary_camera_id(self) -> str | None:
         """返回第一个非主摄像头的已启用摄像头 ID（右眼）。"""
         with self._lock:

@@ -685,6 +685,35 @@ class FaceRecognitionService:
         threading.Thread(target=self._recognize, args=(image_bytes,), daemon=True).start()
         return True
 
+    def identify_snapshot(self, image_bytes: bytes) -> dict:
+        """Match the exact Q&A snapshot locally, even when live recognition is off.
+
+        This does not reuse the last live result or change the recognition switch.
+        Names and embeddings remain local; only the caller formats the answer.
+        """
+        samples = self.database.embeddings()
+        if not samples:
+            return {"face_count": 0, "matches": [], "no_samples": True}
+        extracted = self.extractor.extract(image_bytes)
+        faces = extracted.get("faces", [])
+        vectors = [np.asarray(face["embedding"], dtype=np.float32) for face in faces]
+        matched = match_face_embeddings(
+            vectors,
+            samples,
+            self.config.face_match_threshold,
+            self.config.face_match_margin,
+        )
+        width, height = int(extracted["width"]), int(extracted["height"])
+        matches = [
+            {
+                "name": match["name"],
+                "position": describe_position(face["bbox"], width, height),
+            }
+            for face, match in zip(faces, matched)
+            if match["known"]
+        ]
+        return {"face_count": len(faces), "matches": matches, "no_samples": False}
+
     def answer_location(self, text: str) -> str | None:
         person = self.database.resolve_person(text)
         if person is None:

@@ -39,6 +39,7 @@ from voice_assistant import (
     is_desktop_command,
     is_desktop_follow_up,
     is_exit_command,
+    is_person_identity_query,
     interruption_action,
     is_stop_speaking_command,
     is_time_command,
@@ -183,7 +184,15 @@ class TextTests(unittest.TestCase):
         self.assertTrue(is_vision_command("你 看到了 什么"))
         self.assertTrue(is_vision_command("你 看到 的 什么"))
         self.assertTrue(is_vision_command("画面里有什么？"))
+        self.assertTrue(is_vision_command("画面里面的人是谁？"))
         self.assertFalse(is_vision_command("讲一个笑话"))
+
+    def test_identity_question_uses_local_match_path(self) -> None:
+        self.assertTrue(is_person_identity_query("画面里面的人是谁？"))
+        self.assertTrue(is_person_identity_query("摄像头里有谁"))
+        self.assertTrue(is_person_identity_query("这个人是谁"))
+        self.assertFalse(is_person_identity_query("你看到了什么"))
+        self.assertFalse(is_person_identity_query("谁是中国总统"))
 
     def test_vision_follow_up(self) -> None:
         self.assertTrue(is_vision_follow_up("这个男的是年轻人吗"))
@@ -367,6 +376,68 @@ class FaceVoiceQueryTests(unittest.TestCase):
             "王儿在哪", ["王儿在哪", "王二在哪"]
         )
         self.assertEqual(result, ("王二在哪", "王二在画面右侧。"))
+
+    def test_local_identity_answer_requires_reliable_match(self) -> None:
+        matched = {
+            "face_count": 2,
+            "matches": [{"name": "王二", "position": "画面左侧"}],
+            "no_samples": False,
+        }
+        self.assertIn("王二在画面左侧", VoiceAssistant._local_identity_answer(matched))
+        self.assertIn("其他人尚未确认", VoiceAssistant._local_identity_answer(matched))
+        unknown = {"face_count": 1, "matches": [], "no_samples": False}
+        self.assertIn("未能与本地人员库可靠匹配", VoiceAssistant._local_identity_answer(unknown))
+
+    def test_compound_scene_and_identity_question_keeps_both_answers(self) -> None:
+        self.assertTrue(
+            VoiceAssistant._asks_scene_and_identity("你看到了什么，画面里面的人是谁？")
+        )
+        self.assertFalse(VoiceAssistant._asks_scene_and_identity("画面里面的人是谁？"))
+        self.assertFalse(VoiceAssistant._asks_scene_and_identity("你看到了什么？"))
+
+    def test_identify_snapshot_uses_exact_frame_even_with_live_switch_off(self) -> None:
+        service = object.__new__(FaceRecognitionService)
+        service.enabled = False
+        service.config = SimpleNamespace(face_match_threshold=0.48, face_match_margin=0.05)
+        service.database = SimpleNamespace(
+            embeddings=lambda: [("person-1", "王二", np.array([1.0, 0.0], dtype=np.float32))]
+        )
+        service.extractor = SimpleNamespace(
+            extract=Mock(return_value={
+                "width": 1000,
+                "height": 600,
+                "faces": [{"embedding": [1.0, 0.0], "bbox": [20, 20, 100, 100]}],
+            })
+        )
+        result = service.identify_snapshot(b"current-frame")
+        service.extractor.extract.assert_called_once_with(b"current-frame")
+        self.assertEqual(result["face_count"], 1)
+        self.assertEqual(result["matches"][0]["name"], "王二")
+        self.assertIn("左侧", result["matches"][0]["position"])
+
+    def test_identify_snapshot_never_guesses_without_samples(self) -> None:
+        service = object.__new__(FaceRecognitionService)
+        service.database = SimpleNamespace(embeddings=lambda: [])
+        service.extractor = SimpleNamespace(extract=Mock())
+        result = service.identify_snapshot(b"current-frame")
+        self.assertTrue(result["no_samples"])
+        self.assertEqual(result["matches"], [])
+        service.extractor.extract.assert_not_called()
+
+    def test_spoken_question_uses_on_demand_primary_frame(self) -> None:
+        assistant = object.__new__(VoiceAssistant)
+        store = CameraFrameStore()
+        monitor = SimpleNamespace(
+            primary_camera_id=lambda: "front",
+            preview_frame=Mock(return_value=b"exact-current-frame"),
+        )
+        assistant.dashboard = SimpleNamespace(native_camera=monitor, store=store)
+        assistant.config = SimpleNamespace(camera_snapshot_timeout_seconds=3.0)
+        frame, error = assistant._request_primary_eye_frame()
+        self.assertIsNone(error)
+        self.assertEqual(frame, b"exact-current-frame")
+        monitor.preview_frame.assert_called_once_with("front", 3.0)
+        self.assertEqual(store.analysis_snapshot()[1], frame)
 
 
 class AudioTests(unittest.TestCase):
@@ -575,6 +646,11 @@ class CameraFrameStoreTests(unittest.TestCase):
         self.assertEqual(status["last_answer"], "回答")
         store.set_tray_active(True)
         self.assertTrue(store.status()["tray_active"])
+
+    def test_on_demand_analysis_snapshot_uses_exact_frame(self) -> None:
+        store = CameraFrameStore()
+        snapshot_id = store.record_analysis_snapshot(b"spoken-question-frame")
+        self.assertEqual(store.analysis_snapshot(), (snapshot_id, b"spoken-question-frame"))
 
     def test_shutdown_request(self) -> None:
         store = CameraFrameStore()
@@ -882,6 +958,7 @@ class NativeCameraTests(unittest.TestCase):
         )
         with patch.object(monitor, "_open_camera", return_value=ClosedCapture()):
             monitor.start()
+            self.assertEqual(monitor.primary_camera_id(), "front")
             self.assertEqual(monitor.secondary_camera_id(), "side")
             monitor.stop()
 
@@ -1072,6 +1149,18 @@ class OllamaClientTests(unittest.TestCase):
         self.assertIs(payload["stream"], True)
         self.assertEqual(payload["messages"][-1]["images"], ["anBlZw=="])
 
+    def test_vision_appends_local_identity_without_sending_name_to_model(self) -> None:
+        spoken: list[str] = []
+        answer = self.client.ask_vision(
+            "你看到了什么", b"jpeg", spoken.append,
+            local_identity_note="本地人员库识别到王二。",
+        )
+        payload = self.client._stream_request.call_args.args[1]
+        self.assertNotIn("王二", payload["messages"][-1]["content"])
+        self.assertTrue(answer.endswith("本地人员库识别到王二。"))
+        self.assertIn("本地人员库识别到王二。", spoken)
+        self.assertNotIn("王二", self.client.history[-1]["content"])
+
     def test_person_detection_uses_short_non_thinking_vision_request(self) -> None:
         self.client._stream_request = Mock(
             return_value=[{"message": {"content": "PERSON"}}]
@@ -1171,6 +1260,18 @@ class OnlineQwenClientTests(unittest.TestCase):
         self.assertEqual(
             user_content[1]["image_url"]["url"], "data:image/jpeg;base64,anBlZw=="
         )
+
+    def test_online_vision_does_not_receive_or_remember_local_identity(self) -> None:
+        self.client._stream_request = Mock(
+            return_value=[{"choices": [{"delta": {"content": "画面里有人。"}}]}]
+        )
+        answer = self.client.ask_vision(
+            "你看到了什么", b"jpeg", local_identity_note="本地人员库识别到王二。"
+        )
+        payload = self.client._stream_request.call_args.args[1]
+        self.assertNotIn("王二", str(payload["messages"]))
+        self.assertIn("王二", answer)
+        self.assertNotIn("王二", str(self.client.history))
 
     def test_online_person_detection_uses_short_non_thinking_request(self) -> None:
         self.client._stream_request = Mock(

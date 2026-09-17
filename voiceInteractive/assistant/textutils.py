@@ -292,7 +292,7 @@ def is_vision_command(text: str) -> bool:
     return (
         "什么" in normalized
         and ("看到" in normalized or "看见" in normalized)
-    ) or any(
+    ) or is_person_identity_query(text) or any(
         phrase in normalized
         for phrase in (
             "你看到了什么",
@@ -319,6 +319,19 @@ def is_vision_command(text: str) -> bool:
             "他是谁",
             "她是谁",
         )
+    )
+
+
+def is_person_identity_query(text: str) -> bool:
+    """Questions asking who is visible must use the local face database."""
+    normalized = normalize_text(text)
+    if any(phrase in normalized for phrase in ("这个人是谁", "那个人是谁", "这位是谁", "那位是谁")):
+        return True
+    if normalized in {"他是谁", "她是谁", "是谁"}:
+        return True
+    scene_words = ("画面", "镜头", "摄像头", "屏幕", "眼前")
+    return any(word in normalized for word in scene_words) and (
+        "是谁" in normalized or "有谁" in normalized or "谁在" in normalized
     )
 
 

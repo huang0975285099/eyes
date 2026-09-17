@@ -273,6 +273,15 @@ class CameraFrameStore:
         with self._lock:
             return self._analysis_snapshot_id, self._analysis_snapshot
 
+    def record_analysis_snapshot(self, frame: bytes) -> int:
+        """Expose the exact native frame used for a spoken visual answer."""
+        with self._snapshot_ready:
+            self._snapshot_request_id += 1
+            self._analysis_snapshot_id = self._snapshot_request_id
+            self._analysis_snapshot = frame
+            self._snapshot_ready.notify_all()
+            return self._analysis_snapshot_id
+
     def begin_presence_check(self) -> bool:
         with self._lock:
             if not self._presence_enabled or self._presence_checking:

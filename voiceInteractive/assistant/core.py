@@ -24,6 +24,7 @@ from .textutils import (
     is_desktop_command,
     is_end_conversation_command,
     is_exit_command,
+    is_person_identity_query,
     is_person_location_query,
     is_time_command,
     is_vision_command,
@@ -369,6 +370,25 @@ class VoiceAssistant:
             return None
         return monitor.secondary_camera_id()
 
+    def _request_primary_eye_frame(self) -> tuple[bytes | None, str | None]:
+        if self.dashboard is None:
+            return None, "摄像头服务尚未启动。"
+        monitor = self.dashboard.native_camera
+        camera_id = monitor.primary_camera_id()
+        if camera_id is None:
+            return None, "当前没有配置主摄像头。"
+        try:
+            frame = monitor.preview_frame(
+                camera_id, self.config.camera_snapshot_timeout_seconds
+            )
+        except Exception as error:
+            print(f"[主摄像头取帧失败] {error}", file=sys.stderr)
+            return None, "主摄像头暂时取不到画面，请确认摄像头已连接。"
+        if frame is None:
+            return None, "主摄像头暂时取不到画面，请确认摄像头已连接。"
+        self.dashboard.store.record_analysis_snapshot(frame)
+        return frame, None
+
     def _request_right_eye_frame(self) -> tuple[bytes | None, str | None]:
         """从辅助摄像头（右眼）取一帧；失败时返回友好提示。"""
         monitor = self.dashboard.native_camera
@@ -384,7 +404,47 @@ class VoiceAssistant:
             return None, "辅助摄像头暂时取不到画面，请确认摄像头已连接。"
         if frame is None:
             return None, "辅助摄像头暂时取不到画面，请确认摄像头已连接。"
+        self.dashboard.store.record_analysis_snapshot(frame)
         return frame, None
+
+    @staticmethod
+    def _local_identity_answer(result: dict | None, error: str | None = None) -> str:
+        if error or result is None:
+            return "本地人脸识别暂时不可用，无法确认画面中是谁。"
+        if result["no_samples"]:
+            return "本地人员库还没有人脸样本，暂时无法确认画面中是谁。"
+        face_count = result["face_count"]
+        if not face_count:
+            return "当前画面没有检测到清晰人脸，无法确认是谁。"
+        matches = result["matches"]
+        if not matches:
+            return "画面中检测到人脸，但未能与本地人员库可靠匹配。"
+        people = "、".join(f"{item['name']}在{item['position']}" for item in matches)
+        answer = f"根据本地人员库，{people}。"
+        if face_count > len(matches):
+            answer += " 其他人尚未确认身份。"
+        return answer
+
+    @staticmethod
+    def _local_identity_note(result: dict | None) -> str:
+        if not result or result["no_samples"] or not result["face_count"]:
+            return ""
+        if not result["matches"]:
+            return "画面中的人尚未与本地人员库可靠匹配。"
+        return VoiceAssistant._local_identity_answer(result)
+
+    @staticmethod
+    def _asks_scene_and_identity(text: str) -> bool:
+        if not is_person_identity_query(text):
+            return False
+        compact = "".join(text.split())
+        return any(
+            phrase in compact
+            for phrase in (
+                "看到了什么", "看到什么", "看见了什么", "看见什么",
+                "画面里有什么", "画面里面有什么", "镜头里有什么",
+            )
+        )
 
     def run(self) -> None:
         sample_rate = self.input_device.sample_rate
@@ -820,8 +880,8 @@ class VoiceAssistant:
                             self._request_right_eye_frame()
                         )
                     elif self.dashboard:
-                        image_bytes = self.dashboard.store.request_snapshot(
-                            self.config.camera_snapshot_timeout_seconds
+                        image_bytes, missing_camera_note = (
+                            self._request_primary_eye_frame()
                         )
                     else:
                         image_bytes = None
@@ -834,17 +894,46 @@ class VoiceAssistant:
                     else:
                         print("[视觉] 正在分析当前画面……")
                         if self.dashboard:
-                            self.dashboard.store.set_assistant_status("正在分析当前画面")
-                        try:
-                            answer, interrupt_action = self._speak_streamed_answer(
-                                lambda on_segment: self.ollama.ask_vision(
-                                    text,
-                                    image_bytes,
-                                    on_segment,
-                                    self.playback_cancel,
+                            self.dashboard.store.set_assistant_status("正在核对本地人员库")
+                        identity_result = None
+                        identity_error = None
+                        if self.dashboard:
+                            try:
+                                identity_result = self.dashboard.face_service.identify_snapshot(
+                                    image_bytes
                                 )
-                            )
-                            answer_was_streamed = True
+                            except Exception as error:
+                                identity_error = str(error)
+                                print(f"[本地人员匹配失败] {error}", file=sys.stderr)
+                        try:
+                            asks_identity = is_person_identity_query(text)
+                            asks_scene_too = self._asks_scene_and_identity(text)
+                            if asks_identity and not asks_scene_too:
+                                answer = self._local_identity_answer(
+                                    identity_result, identity_error
+                                )
+                            else:
+                                if self.dashboard:
+                                    self.dashboard.store.set_assistant_status("正在分析当前画面")
+                                identity_note = (
+                                    self._local_identity_answer(identity_result, identity_error)
+                                    if asks_identity
+                                    else self._local_identity_note(identity_result)
+                                )
+                                scene_question = (
+                                    "请描述当前画面里看得见的人和环境，不要推断人物身份。"
+                                    if asks_scene_too else text
+                                )
+                                answer, interrupt_action = self._speak_streamed_answer(
+                                    lambda on_segment: self.ollama.ask_vision(
+                                        scene_question,
+                                        image_bytes,
+                                        on_segment,
+                                        self.playback_cancel,
+                                        identity_note,
+                                    )
+                                )
+                                answer_was_streamed = True
                             vision_context_active = True
                         except Exception as error:
                             print(f"[视觉分析失败] {error}", file=sys.stderr)

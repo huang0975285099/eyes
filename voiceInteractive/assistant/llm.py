@@ -196,6 +196,7 @@ class OllamaClient:
         image_bytes: bytes,
         on_segment=None,
         cancel_event: threading.Event | None = None,
+        local_identity_note: str = "",
     ) -> str:
         image_base64 = base64.b64encode(image_bytes).decode("ascii")
         messages: list[dict] = [
@@ -206,13 +207,21 @@ class OllamaClient:
                 "content": (
                     f"{question}\n请根据这张摄像头的当前画面直接回答。"
                     "只描述确实能看到的内容，不确定的地方要明确说明。"
+                    "不要根据外貌猜测人物姓名或身份，本机人员库会单独核对。"
                 ),
                 "images": [image_base64],
             },
         ]
-        answer = self._chat(messages, 0.2, 180, on_segment, cancel_event)
+        model_answer = self._chat(messages, 0.2, 180, on_segment, cancel_event)
+        answer = model_answer
         if cancel_event is None or not cancel_event.is_set():
-            self.remember(question, answer)
+            if local_identity_note:
+                if on_segment is not None:
+                    on_segment(local_identity_note)
+                answer = f"{answer.rstrip()} {local_identity_note}".strip()
+            # Keep local identities out of later model requests too: history is
+            # sent back to the provider on the next turn.
+            self.remember(question, model_answer)
         return answer
 
     def detect_person(self, image_bytes: bytes) -> bool:
@@ -476,6 +485,7 @@ class OnlineQwenClient:
         image_bytes: bytes,
         on_segment=None,
         cancel_event: threading.Event | None = None,
+        local_identity_note: str = "",
     ) -> str:
         image_base64 = base64.b64encode(image_bytes).decode("ascii")
         messages: list[dict] = [
@@ -489,6 +499,7 @@ class OnlineQwenClient:
                         "text": (
                             f"{question}\n请根据这张摄像头的当前画面直接回答。"
                             "只描述确实能看到的内容，不确定的地方要明确说明。"
+                            "不要根据外貌猜测人物姓名或身份，本机人员库会单独核对。"
                         ),
                     },
                     {
@@ -500,9 +511,14 @@ class OnlineQwenClient:
                 ],
             },
         ]
-        answer = self._chat(messages, 0.2, 180, on_segment, cancel_event)
+        model_answer = self._chat(messages, 0.2, 180, on_segment, cancel_event)
+        answer = model_answer
         if cancel_event is None or not cancel_event.is_set():
-            self.remember(question, answer)
+            if local_identity_note:
+                if on_segment is not None:
+                    on_segment(local_identity_note)
+                answer = f"{answer.rstrip()} {local_identity_note}".strip()
+            self.remember(question, model_answer)
         return answer
 
     def detect_person(self, image_bytes: bytes) -> bool:
@@ -625,9 +641,10 @@ class ModelRouter:
         image_bytes: bytes,
         on_segment=None,
         cancel_event: threading.Event | None = None,
+        local_identity_note: str = "",
     ) -> str:
         return self._client().ask_vision(
-            question, image_bytes, on_segment, cancel_event
+            question, image_bytes, on_segment, cancel_event, local_identity_note
         )
 
     def detect_person(self, image_bytes: bytes) -> bool:
