@@ -582,15 +582,49 @@ class FaceRecognitionService:
         self._status = "等待识别" if self.enabled else "人脸识别已关闭"
         self._error = ""
         self._recent_candidates: list[set[str]] = []
+        self._greeting_queue: queue.Queue[str] = queue.Queue(maxsize=4)
+        self._present_ids: set[str] = set()
+        self._greeting_last: dict[str, float] = {}
+        self._generation = 0
+        self._suspended = False
+
+    def _clear_greetings_locked(self) -> None:
+        while True:
+            try:
+                self._greeting_queue.get_nowait()
+            except queue.Empty:
+                return
+
+    def _reset_pending_locked(self, status: str) -> None:
+        # Invalidate a recognition response that may arrive after a switch changed.
+        self._generation += 1
+        self._clear_greetings_locked()
+        self._results = []
+        self._result_time = 0.0
+        self._error = ""
+        self._recent_candidates = []
+        self._present_ids = set()
+        self._status = status
 
     def set_enabled(self, enabled: bool) -> None:
         with self._lock:
             self.enabled = enabled
-            self._results = []
-            self._result_time = 0.0
-            self._error = ""
-            self._recent_candidates = []
-            self._status = "等待识别" if enabled else "人脸识别已关闭"
+            self._reset_pending_locked(
+                "等待识别" if enabled else "人脸识别已关闭"
+            )
+
+    def pause(self) -> None:
+        """Pause pending greetings without changing the user's child switch."""
+        with self._lock:
+            self._suspended = True
+            self._reset_pending_locked(
+                "监控中心已暂停人脸识别" if self.enabled else "人脸识别已关闭"
+            )
+
+    def resume(self) -> None:
+        with self._lock:
+            self._suspended = False
+            self._status = "等待识别" if self.enabled else "人脸识别已关闭"
 
     def enroll(self, person_id: str, image_bytes: bytes) -> dict:
         extracted = self.extractor.extract(image_bytes)
@@ -683,24 +717,38 @@ class FaceRecognitionService:
             video_path.unlink(missing_ok=True)
             raise
 
-    def _recognize(self, image_bytes: bytes) -> None:
+    def _recognize(self, image_bytes: bytes, generation: int | None = None) -> None:
         try:
             extracted = self.extractor.extract(image_bytes)
             samples = self.database.embeddings()
             width, height = int(extracted["width"]), int(extracted["height"])
             faces = extracted.get("faces", [])
-            vectors = [
-                np.asarray(face["embedding"], dtype=np.float32) for face in faces
+            eligible = [
+                min(face["bbox"][2:4]) >= self.config.face_min_size
+                and float(face.get("blur", 100.0)) >= self.config.face_min_blur
+                and 25.0 <= float(face.get("brightness", 128.0)) <= 245.0
+                for face in faces
             ]
-            matches = match_face_embeddings(
+            vectors = [
+                np.asarray(face["embedding"], dtype=np.float32)
+                for face, accepted in zip(faces, eligible)
+                if accepted
+            ]
+            accepted_matches = iter(match_face_embeddings(
                 vectors,
                 samples,
                 self.config.face_match_threshold,
                 self.config.face_match_margin,
-            )
+            ))
             results: list[dict] = []
             current_candidates: set[str] = set()
-            for face, match in zip(faces, matches):
+            for face, accepted in zip(faces, eligible):
+                match = next(accepted_matches) if accepted else {
+                    "person_id": None,
+                    "name": "画面质量不足",
+                    "known": False,
+                    "score": 0.0,
+                }
                 if match["known"]:
                     current_candidates.add(match["person_id"])
                 bbox = [round(float(value), 1) for value in face["bbox"]]
@@ -717,6 +765,10 @@ class FaceRecognitionService:
                     }
                 )
             with self._lock:
+                if generation is not None and generation != self._generation:
+                    return
+                if not self.enabled or self._suspended:
+                    return
                 self._recent_candidates.append(current_candidates)
                 self._recent_candidates = self._recent_candidates[-3:]
                 for item in results:
@@ -736,6 +788,9 @@ class FaceRecognitionService:
                 known_count = sum(1 for item in results if item["known"])
                 self._status = f"识别到{len(results)}张脸，其中{known_count}位已知人员" if results else "当前没有检测到人脸"
                 self._error = ""
+                self._enqueue_greetings(
+                    [item for item in results if item["known"] and item["person_id"]]
+                )
         except Exception as error:
             with self._lock:
                 self._error = str(error)
@@ -744,13 +799,53 @@ class FaceRecognitionService:
             with self._lock:
                 self._busy = False
 
+    def _enqueue_greetings(self, confirmed_items: list[dict]) -> None:
+        """已确认人员首次进入画面且冷却期已过时，把姓名放入迎宾队列。
+
+        队列由语音主循环通过 consume_greeting() 消费；满了会丢弃最旧一条，
+        避免识别线程因无人消费而阻塞。调用方需已持有 _lock。
+        """
+        if not self.config.face_greeting_enabled:
+            self._present_ids = {item["person_id"] for item in confirmed_items}
+            return
+        now = time.time()
+        fresh = [
+            item
+            for item in confirmed_items
+            if item["person_id"] not in self._present_ids
+            and now - self._greeting_last.get(item["person_id"], 0.0)
+            >= self.config.face_greeting_cooldown_seconds
+        ]
+        for item in fresh:
+            self._greeting_last[item["person_id"]] = now
+        self._present_ids = {item["person_id"] for item in confirmed_items}
+        for item in fresh:
+            try:
+                self._greeting_queue.put_nowait(item["name"])
+            except queue.Full:
+                try:
+                    self._greeting_queue.get_nowait()
+                    self._greeting_queue.put_nowait(item["name"])
+                except queue.Empty:
+                    pass
+
+    def consume_greeting(self) -> str | None:
+        """取走一条待播报的迎宾姓名；没有时返回 None。"""
+        try:
+            return self._greeting_queue.get_nowait()
+        except queue.Empty:
+            return None
+
     def submit(self, image_bytes: bytes) -> bool:
         with self._lock:
-            if not self.enabled or self._busy:
+            if not self.enabled or self._suspended or self._busy:
                 return False
             self._busy = True
             self._status = "正在识别人脸"
-        threading.Thread(target=self._recognize, args=(image_bytes,), daemon=True).start()
+            generation = self._generation
+        threading.Thread(
+            target=self._recognize, args=(image_bytes, generation), daemon=True
+        ).start()
         return True
 
     def identify_snapshot(self, image_bytes: bytes) -> dict:
@@ -865,22 +960,6 @@ class FaceRecognitionService:
         if match:
             return f"{person['name']}在{match['position']}。"
         return f"当前画面没有确认到{person['name']}，可能没有正对镜头，或者不在画面内。"
-
-    def known_people_summary(self) -> list[dict]:
-        """返回最近一帧里已确认的人员（姓名与位置），供视觉问答引用。
-
-        结果过期或没有识别到已知人员时返回空列表，调用方据此跳过提示。
-        """
-        with self._lock:
-            age = time.time() - self._result_time if self._result_time else None
-            if not self.enabled or age is None or age > self.config.face_result_max_age_seconds:
-                return []
-            results = list(self._results)
-        return [
-            {"name": item["name"], "position": item["position"]}
-            for item in results
-            if item["known"]
-        ]
 
     def status(self) -> dict:
         with self._lock:

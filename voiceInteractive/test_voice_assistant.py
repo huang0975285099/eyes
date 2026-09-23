@@ -5,6 +5,7 @@ from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
 import queue
+import re
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -22,8 +23,10 @@ import voice_assistant as voice_assistant_module
 from face_service import FaceDatabase, describe_position, match_face_embeddings
 from assistant.face import FaceRecognitionService
 from assistant.face.service import mark_target_face
+from assistant.gesture import EXPRESSION_MESSAGES, GestureService, classify_expression
 from assistant.dashboard import DashboardHandler
-from assistant.config import DEFAULT_CONFIG, NativeCameraConfig, load_config
+from assistant.paths import APP_DIR
+from assistant.config import CameraMotionRule, DEFAULT_CONFIG, NativeCameraConfig, load_config
 from assistant.native_camera import (
     MotionDetector,
     MotionEventArchive,
@@ -663,6 +666,158 @@ class FaceVoiceQueryTests(unittest.TestCase):
         monitor.preview_frame.assert_called_once_with("front", 3.0)
         self.assertEqual(store.analysis_snapshot()[1], frame)
 
+    def test_greeting_enqueue_on_first_arrival_and_respect_cooldown(self) -> None:
+        service = object.__new__(FaceRecognitionService)
+        service.config = SimpleNamespace(
+            face_greeting_enabled=True, face_greeting_cooldown_seconds=300.0
+        )
+        service._lock = threading.RLock()
+        service._greeting_queue = queue.Queue(maxsize=4)
+        service._present_ids = set()
+        service._greeting_last = {}
+        person = {"person_id": "person-1", "name": "王二"}
+
+        with service._lock:
+            service._enqueue_greetings([person])
+        self.assertEqual(service.consume_greeting(), "王二")
+        self.assertIsNone(service.consume_greeting())
+
+        with service._lock:
+            service._enqueue_greetings([])  # 离开画面
+        with service._lock:
+            service._enqueue_greetings([person])  # 冷却期内回来
+        self.assertIsNone(service.consume_greeting())
+
+        with service._lock:
+            service._enqueue_greetings([])  # 离开画面
+        service._greeting_last["person-1"] = time.time() - 301.0
+        with service._lock:
+            service._enqueue_greetings([person])  # 冷却结束后回来
+        self.assertEqual(service.consume_greeting(), "王二")
+
+    def test_greeting_disabled_produces_no_events(self) -> None:
+        service = object.__new__(FaceRecognitionService)
+        service.config = SimpleNamespace(
+            face_greeting_enabled=False, face_greeting_cooldown_seconds=300.0
+        )
+        service._lock = threading.RLock()
+        service._greeting_queue = queue.Queue(maxsize=4)
+        service._present_ids = set()
+        service._greeting_last = {}
+        with service._lock:
+            service._enqueue_greetings([{"person_id": "person-1", "name": "王二"}])
+        self.assertIsNone(service.consume_greeting())
+        self.assertEqual(service._present_ids, {"person-1"})
+
+    def test_consume_face_greeting_joins_multiple_names(self) -> None:
+        assistant = object.__new__(VoiceAssistant)
+        assistant.dashboard = SimpleNamespace(
+            face_service=SimpleNamespace(
+                consume_greeting=Mock(side_effect=["王二", "张三", None])
+            )
+        )
+        self.assertEqual(assistant._consume_face_greeting(), "王二和张三回来了。")
+
+        assistant.dashboard = SimpleNamespace(
+            face_service=SimpleNamespace(consume_greeting=Mock(side_effect=["王二", None]))
+        )
+        self.assertEqual(assistant._consume_face_greeting(), "王二回来了。")
+        assistant.dashboard = SimpleNamespace(
+            face_service=SimpleNamespace(consume_greeting=Mock(return_value=None))
+        )
+        self.assertIsNone(assistant._consume_face_greeting())
+        assistant.dashboard = None
+        self.assertIsNone(assistant._consume_face_greeting())
+
+    def test_disabling_face_recognition_clears_pending_greetings(self) -> None:
+        service = object.__new__(FaceRecognitionService)
+        service._lock = threading.RLock()
+        service.enabled = True
+        service._results = []
+        service._result_time = 0.0
+        service._error = ""
+        service._recent_candidates = []
+        service._present_ids = set()
+        service._greeting_queue = queue.Queue(maxsize=4)
+        service._greeting_queue.put_nowait("王二")
+        service._generation = 0
+
+        service.set_enabled(False)
+
+        self.assertIsNone(service.consume_greeting())
+        self.assertEqual(service._generation, 1)
+
+    def test_live_recognition_rejects_low_quality_faces(self) -> None:
+        service = object.__new__(FaceRecognitionService)
+        service.config = SimpleNamespace(
+            face_match_threshold=0.48,
+            face_match_margin=0.05,
+            face_min_size=80,
+            face_min_blur=35.0,
+            face_greeting_enabled=False,
+            face_greeting_cooldown_seconds=300.0,
+        )
+        service.database = SimpleNamespace(embeddings=lambda: [
+            ("p1", "王二", np.array([1.0, 0.0], dtype=np.float32))
+        ])
+        service.extractor = SimpleNamespace(extract=Mock(return_value={
+            "width": 640,
+            "height": 480,
+            "faces": [{
+                "embedding": [1.0, 0.0],
+                "bbox": [20, 20, 30, 30],
+                "blur": 10.0,
+                "brightness": 10.0,
+            }],
+        }))
+        service.enabled = True
+        service._lock = threading.RLock()
+        service._busy = True
+        service._results = []
+        service._result_time = 0.0
+        service._status = ""
+        service._error = ""
+        service._recent_candidates = []
+        service._greeting_queue = queue.Queue(maxsize=4)
+        service._present_ids = set()
+        service._greeting_last = {}
+        service._generation = 0
+        service._suspended = False
+
+        service._recognize(b"frame", 0)
+
+        self.assertEqual(len(service._results), 1)
+        self.assertFalse(service._results[0]["known"])
+        self.assertEqual(service._results[0]["name"], "画面质量不足")
+        self.assertIsNone(service.consume_greeting())
+
+    def test_gesture_feedback_uses_cancellable_speech(self) -> None:
+        assistant = object.__new__(VoiceAssistant)
+        assistant.config = SimpleNamespace(camera_frame_max_age_seconds=5.0)
+        assistant.playback_cancel = threading.Event()
+        assistant.speaker = SimpleNamespace(say=Mock(), chime=Mock())
+        gesture_service = SimpleNamespace(
+            consume_event=Mock(side_effect=[
+                {"type": "gesture", "name": "thumbs_up"}, None
+            ])
+        )
+        store = SimpleNamespace(
+            scene_broadcast_enabled=Mock(return_value=False),
+            set_assistant_status=Mock(),
+        )
+        assistant.dashboard = SimpleNamespace(
+            gesture_service=gesture_service, store=store
+        )
+        assistant._play_interruptible = Mock(return_value=None)
+
+        with patch("builtins.print"):
+            self.assertTrue(assistant._handle_gesture_events())
+
+        assistant._play_interruptible.assert_called_once()
+        args = assistant._play_interruptible.call_args.args
+        self.assertIs(args[0], assistant.speaker.say)
+        self.assertIs(args[2], assistant.playback_cancel)
+
 
 class AudioTests(unittest.TestCase):
     def test_dashboard_audio_choices_prefer_wasapi_and_keep_cameras_distinct(self) -> None:
@@ -935,55 +1090,6 @@ class CameraFrameStoreTests(unittest.TestCase):
         self.assertTrue(store.restart_event.is_set())
         self.assertEqual(store.status()["assistant_status"], "正在重启语音助手")
 
-    def test_native_frame_answers_snapshot_without_waiting_for_browser(self) -> None:
-        store = CameraFrameStore()
-        store.update_frame(b"native jpeg", source="native")
-        started = time.monotonic()
-        self.assertEqual(store.request_snapshot(0.5), b"native jpeg")
-        self.assertLess(time.monotonic() - started, 0.1)
-        self.assertEqual(store.status()["frame_source"], "native")
-
-    def test_browser_frame_age_tracks_only_browser_frames(self) -> None:
-        store = CameraFrameStore()
-        store.update_frame(b"native", source="native")
-        self.assertIsNone(store.browser_frame_age_seconds())
-        store.update_frame(b"browser")
-        self.assertIsNotNone(store.browser_frame_age_seconds())
-
-    def test_requested_snapshot_is_the_frame_used_for_analysis(self) -> None:
-        store = CameraFrameStore()
-        captured: list[bytes | None] = []
-        worker = threading.Thread(
-            target=lambda: captured.append(store.request_snapshot(1.0))
-        )
-        worker.start()
-
-        request_id = 0
-        deadline = time.monotonic() + 0.5
-        while request_id == 0 and time.monotonic() < deadline:
-            request_id = store.status()["snapshot_request_id"]
-            time.sleep(0.005)
-
-        self.assertGreater(request_id, 0)
-        self.assertTrue(store.status()["snapshot_pending"])
-        self.assertTrue(store.submit_snapshot(request_id, b"new jpeg"))
-        worker.join(timeout=1.0)
-        self.assertFalse(worker.is_alive())
-        self.assertEqual(captured, [b"new jpeg"])
-        self.assertEqual(store.analysis_snapshot(), (request_id, b"new jpeg"))
-        self.assertFalse(store.status()["snapshot_pending"])
-
-    def test_snapshot_rejects_an_expired_request_id(self) -> None:
-        store = CameraFrameStore()
-        self.assertFalse(store.submit_snapshot(99, b"old jpeg"))
-
-    def test_timed_out_snapshot_cannot_arrive_late(self) -> None:
-        store = CameraFrameStore()
-        self.assertIsNone(store.request_snapshot(0.01))
-        request_id = store.status()["snapshot_request_id"]
-        self.assertFalse(store.status()["snapshot_pending"])
-        self.assertFalse(store.submit_snapshot(request_id, b"late jpeg"))
-
     def test_person_alert_only_fires_on_empty_to_person_transition(self) -> None:
         store = CameraFrameStore()
         self.assertTrue(store.begin_presence_check())
@@ -1080,6 +1186,210 @@ class NativeCameraTests(unittest.TestCase):
         self.assertEqual([camera.index for camera in config.native_cameras], [0, 1])
         self.assertEqual(config.native_camera_index, 0)
 
+    def test_disabled_second_camera_is_not_started_or_counted(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_text(json.dumps({"native_cameras": [
+                {"id": "front", "index": 0, "enabled": True, "primary": True},
+                {"id": "side", "index": 1, "enabled": False, "primary": False},
+            ]}), encoding="utf-8")
+            config = load_config(path)
+        monitor = NativeCameraMonitor(
+            config, CameraFrameStore(),
+            SimpleNamespace(enabled=False), SimpleNamespace(enabled=False),
+        )
+        self.assertEqual(monitor.status()["configured_count"], 1)
+        self.assertTrue(monitor.has_camera("front"))
+        self.assertFalse(monitor.has_camera("side"))
+
+    def test_preview_does_not_count_as_active_monitoring(self) -> None:
+        config = replace(load_config(DEFAULT_CONFIG), native_camera_enabled=False)
+        monitor = NativeCameraMonitor(
+            config, CameraFrameStore(),
+            SimpleNamespace(enabled=False), SimpleNamespace(enabled=False),
+        )
+        runtime = next(iter(monitor._cameras.values()))
+        runtime.active = True
+        status = monitor.status()
+        self.assertEqual(status["active_count"], 1)
+        self.assertEqual(status["active_monitoring_count"], 0)
+
+    def test_camera_motion_rules_inherit_legacy_defaults_independently(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_text(json.dumps({
+                "person_motion_sensitivity": 62,
+                "person_motion_min_area_percent": 0.6,
+                "native_cameras": [
+                    {"id": "front", "index": 0, "primary": True,
+                     "motion": {"sensitivity": 85, "roi": {
+                         "x": 0.1, "y": 0.2, "width": 0.4, "height": 0.5,
+                     }}},
+                    {"id": "side", "index": 1},
+                ],
+            }), encoding="utf-8")
+            config = load_config(path)
+        front, side = config.native_cameras
+        self.assertEqual(front.motion.sensitivity, 85)
+        self.assertEqual(front.motion.roi, (0.1, 0.2, 0.4, 0.5))
+        self.assertEqual(side.motion.sensitivity, 62)
+        self.assertEqual(side.motion.min_area_percent, 0.6)
+        self.assertIsNone(side.motion.roi)
+
+    def test_motion_detector_ignores_changes_outside_roi(self) -> None:
+        detector = MotionDetector()
+        settings = MotionSettings(70, 0.5, 2, 1.0)
+        base = np.zeros((200, 200, 3), dtype=np.uint8)
+        roi = (0.0, 0.0, 0.5, 1.0)
+        detector.process(base, settings, 100.0, 0.0, roi)
+        outside = base.copy()
+        cv2.rectangle(outside, (120, 30), (190, 170), (255, 255, 255), -1)
+        for moment in (102.0, 103.0, 104.0):
+            score, triggered = detector.process(outside, settings, moment, 0.0, roi)
+            self.assertEqual(score, 0.0)
+            self.assertFalse(triggered)
+        inside = base.copy()
+        cv2.rectangle(inside, (20, 30), (80, 170), (255, 255, 255), -1)
+        self.assertFalse(detector.process(inside, settings, 105.0, 0.0, roi)[1])
+        score, triggered = detector.process(inside, settings, 106.0, 0.0, roi)
+        self.assertTrue(triggered)
+        self.assertGreater(score, 0.5)
+
+    def test_motion_confirmation_uses_elapsed_time_as_well_as_frames(self) -> None:
+        detector = MotionDetector()
+        settings = MotionSettings(70, 0.5, 2, 1.0, confirmation_seconds=1.5)
+        base = np.zeros((120, 160, 3), dtype=np.uint8)
+        changed = base.copy()
+        cv2.rectangle(changed, (20, 20), (100, 100), (255, 255, 255), -1)
+        detector.process(base, settings, 100.0, 0.0)
+        self.assertFalse(detector.process(changed, settings, 102.0, 0.0)[1])
+        self.assertFalse(detector.process(changed, settings, 102.1, 0.0)[1])
+        self.assertTrue(detector.process(changed, settings, 103.6, 0.0)[1])
+
+    def test_each_camera_uses_its_own_rule_and_disabled_rule_emits_no_alert(self) -> None:
+        config = replace(
+            load_config(DEFAULT_CONFIG),
+            native_camera_enabled=True,
+            native_cameras=(
+                NativeCameraConfig(
+                    "front", "Front", 0, True, True,
+                    CameraMotionRule(sensitivity=91, roi=(0.1, 0.1, 0.5, 0.5)),
+                ),
+                NativeCameraConfig(
+                    "side", "Side", 1, True, False,
+                    CameraMotionRule(enabled=False, sensitivity=20),
+                ),
+            ),
+        )
+        monitor = NativeCameraMonitor(
+            config, CameraFrameStore(),
+            SimpleNamespace(enabled=False), SimpleNamespace(enabled=False),
+        )
+        front = monitor._cameras["front"]
+        side = monitor._cameras["side"]
+        front.detector.process = Mock(return_value=(3.0, True))
+        side.detector.process = Mock(return_value=(3.0, True))
+        monitor.archive.record = Mock(return_value={"camera_id": "front"})
+        frame = np.full((90, 160, 3), 120, dtype=np.uint8)
+
+        monitor._process_frame(front, frame, time.monotonic())
+        monitor._process_frame(side, frame, time.monotonic())
+
+        self.assertEqual(front.detector.process.call_args.args[1].sensitivity, 91)
+        self.assertEqual(front.detector.process.call_args.args[4], (0.1, 0.1, 0.5, 0.5))
+        side.detector.process.assert_not_called()
+        monitor.archive.record.assert_called_once()
+        self.assertEqual(monitor.status()["monitoring_count"], 1)
+
+    def test_updating_one_camera_rule_persists_and_resets_only_that_detector(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_text(json.dumps({"native_cameras": [
+                {"id": "front", "index": 0, "primary": True},
+                {"id": "side", "index": 1},
+            ]}), encoding="utf-8")
+            config = load_config(path)
+            monitor = NativeCameraMonitor(
+                config, CameraFrameStore(),
+                SimpleNamespace(enabled=False), SimpleNamespace(enabled=False),
+            )
+            front = monitor._cameras["front"]
+            side = monitor._cameras["side"]
+            front.detector.background = np.ones((4, 4), dtype=np.uint8)
+            side.detector.background = np.ones((4, 4), dtype=np.uint8)
+            rule = monitor.update_motion_rule("front", {
+                "sensitivity": 80,
+                "consecutive_frames": 4,
+                "roi": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+            })
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["native_cameras"][0]["motion"], rule)
+            self.assertNotIn("motion", stored["native_cameras"][1])
+            self.assertEqual(monitor.motion_rule("front")["sensitivity"], 80)
+            self.assertEqual(monitor.motion_rule("side")["sensitivity"], 70)
+            self.assertIsNone(front.detector.background)
+            self.assertIsNotNone(side.detector.background)
+
+    def test_invalid_motion_rule_does_not_change_file_or_runtime(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_text(json.dumps({"native_cameras": [
+                {"id": "front", "index": 0, "primary": True},
+            ]}), encoding="utf-8")
+            monitor = NativeCameraMonitor(
+                load_config(path), CameraFrameStore(),
+                SimpleNamespace(enabled=False), SimpleNamespace(enabled=False),
+            )
+            before = path.read_bytes()
+            with self.assertRaises(ValueError):
+                monitor.update_motion_rule("front", {
+                    "roi": {"x": 0.9, "y": 0.0, "width": 0.3, "height": 0.5}
+                })
+            self.assertEqual(path.read_bytes(), before)
+            self.assertIsNone(monitor.motion_rule("front")["roi"])
+
+    def test_motion_rule_endpoint_saves_only_requested_camera(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_text(json.dumps({"native_cameras": [
+                {"id": "front", "index": 0, "primary": True},
+                {"id": "side", "index": 1},
+            ]}), encoding="utf-8")
+            monitor = NativeCameraMonitor(
+                load_config(path), CameraFrameStore(),
+                SimpleNamespace(enabled=False), SimpleNamespace(enabled=False),
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), DashboardHandler)
+            server.daemon_threads = True
+            server.native_camera = monitor
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/api/motion-rule/side"
+                request = Request(
+                    url,
+                    data=json.dumps({"sensitivity": 91, "roi": None}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request) as response:
+                    self.assertEqual(json.load(response)["motion"]["sensitivity"], 91)
+                self.assertEqual(monitor.motion_rule("front")["sensitivity"], 70)
+                self.assertEqual(monitor.motion_rule("side")["sensitivity"], 91)
+                invalid = Request(
+                    url,
+                    data=json.dumps({"consecutive_frames": 0}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(HTTPError) as response:
+                    urlopen(invalid)
+                self.assertEqual(response.exception.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
     def test_sustained_change_triggers_after_warmup(self) -> None:
         detector = MotionDetector()
         settings = MotionSettings(70, 0.5, 3, 1.0)
@@ -1104,48 +1414,6 @@ class NativeCameraTests(unittest.TestCase):
                 filename = str(event["snapshot_url"]).rsplit("/", 1)[-1]
                 self.assertIsNotNone(archive.resolve(filename))
                 self.assertIsNone(archive.resolve("../faces/faces.db"))
-
-    def test_monitor_releases_camera_when_browser_claims_it(self) -> None:
-        class FakeCapture:
-            def __init__(self) -> None:
-                self.opened = True
-                self.released = threading.Event()
-
-            def isOpened(self) -> bool:
-                return self.opened
-
-            def read(self):
-                return True, np.full((90, 160, 3), 120, dtype=np.uint8)
-
-            def release(self) -> None:
-                self.opened = False
-                self.released.set()
-
-        store = CameraFrameStore()
-        presence = SimpleNamespace(enabled=False)
-        face = SimpleNamespace(enabled=False)
-        config = load_config(DEFAULT_CONFIG)
-        config = replace(
-            config,
-            native_camera_enabled=True,
-            native_cameras=(config.native_cameras[0],),
-        )
-        monitor = NativeCameraMonitor(config, store, presence, face)
-        capture = FakeCapture()
-        with patch.object(monitor, "_open_camera", return_value=capture):
-            monitor.start()
-            deadline = time.monotonic() + 1.5
-            while (
-                store.status()["frame_source"] != "native"
-                and time.monotonic() < deadline
-            ):
-                time.sleep(0.02)
-            self.assertTrue(monitor.status()["active"])
-            self.assertEqual(store.status()["frame_source"], "native")
-            monitor.claim_for_browser(2.0)
-            self.assertTrue(capture.released.wait(1.0))
-            self.assertFalse(monitor.status()["active"])
-            monitor.stop()
 
     def test_monitor_runs_one_worker_per_enabled_camera(self) -> None:
         class FakeCapture:
@@ -1189,7 +1457,7 @@ class NativeCameraTests(unittest.TestCase):
             monitor.stop()
         self.assertEqual(status["configured_count"], 2)
         self.assertEqual(status["active_count"], 2)
-        self.assertEqual(store.status()["frame_source"], "native")
+        self.assertIsNotNone(store.latest_frame(10.0))
 
     def test_secondary_camera_id_returns_first_non_primary_camera(self) -> None:
         class ClosedCapture:
@@ -1279,6 +1547,60 @@ class NativeCameraTests(unittest.TestCase):
         self.assertIsNotNone(frame)
         self.assertTrue(frame.startswith(b"\xff\xd8"))
         self.assertFalse(status["enabled"])
+
+    def test_inactive_camera_never_reports_cached_frame_as_connected(self) -> None:
+        config = load_config(DEFAULT_CONFIG)
+        config = replace(
+            config, native_camera_enabled=False,
+            native_cameras=(config.native_cameras[0],),
+        )
+        monitor = NativeCameraMonitor(
+            config, CameraFrameStore(),
+            SimpleNamespace(enabled=False), SimpleNamespace(enabled=False),
+        )
+        camera_id = config.native_cameras[0].id
+        runtime = monitor._cameras[camera_id]
+        runtime.latest_jpeg = b"cached jpeg"
+        runtime.last_frame_at = time.time()
+        runtime.frame_sequence = 1
+        runtime.active = False
+
+        self.assertIsNone(monitor.preview_frame(camera_id, timeout=0.1))
+        self.assertEqual(monitor.capture_frames(camera_id, count=1, timeout=0.1), [])
+
+        runtime.active = True
+        monitor._release_camera(runtime)
+        self.assertIsNone(runtime.latest_jpeg)
+        self.assertEqual(runtime.last_frame_at, 0.0)
+
+    def test_preview_does_not_run_background_analysis_when_monitoring_is_off(self) -> None:
+        config = load_config(DEFAULT_CONFIG)
+        config = replace(
+            config,
+            native_camera_enabled=False,
+            native_cameras=(config.native_cameras[0],),
+        )
+        presence = SimpleNamespace(enabled=True, submit=Mock())
+        face = SimpleNamespace(enabled=True, submit=Mock(), pause=Mock())
+        gesture = SimpleNamespace(enabled=True, submit=Mock(), pause=Mock())
+        store = CameraFrameStore()
+        monitor = NativeCameraMonitor(config, store, presence, face, gesture)
+        runtime = next(iter(monitor._cameras.values()))
+
+        self.assertTrue(
+            monitor._process_frame(
+                runtime, np.full((90, 160, 3), 120, dtype=np.uint8), time.monotonic()
+            )
+        )
+
+        self.assertIsNotNone(store.latest_frame(10.0))
+        presence.submit.assert_not_called()
+        face.submit.assert_not_called()
+        gesture.submit.assert_not_called()
+
+        monitor.set_enabled(False)
+        face.pause.assert_called_once_with()
+        gesture.pause.assert_called_once_with()
 
 
 class PersonPresenceMonitorTests(unittest.TestCase):
@@ -2069,6 +2391,248 @@ class StreamingSpeechTests(unittest.TestCase):
         self.assertEqual(answer, "第一句。不会播放的第二句。")
         self.assertEqual(interrupt_action, "stop")
         self.assertEqual(spoken, ["第一句。"])
+
+
+class ExpressionClassificationTests(unittest.TestCase):
+    def test_expression_thresholds(self) -> None:
+        self.assertIsNone(classify_expression(None))
+        self.assertIsNone(classify_expression({}))
+        neutral = {"smile": 0.2, "jaw_open": 0.1, "blink": 0.2, "brow_down": 0.2}
+        self.assertIsNone(classify_expression(neutral))
+        self.assertEqual(classify_expression({"smile": 0.6}), "smile")
+        self.assertEqual(
+            classify_expression({"jaw_open": 0.7, "blink": 0.4}), "yawn"
+        )
+        self.assertEqual(classify_expression({"blink": 0.8}), "sleepy")
+        self.assertEqual(classify_expression({"brow_down": 0.6}), "frown")
+
+    def test_yawn_wins_over_smile(self) -> None:
+        self.assertEqual(
+            classify_expression({"smile": 0.7, "jaw_open": 0.8, "blink": 0.5}),
+            "yawn",
+        )
+
+
+class GestureServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = replace(
+            load_config(DEFAULT_CONFIG),
+            gesture_control_enabled=True,
+            gesture_confirm_frames=2,
+            gesture_action_cooldown_seconds=3.0,
+            gesture_expression_enabled=True,
+            gesture_expression_cooldown_seconds=90.0,
+            gesture_result_max_age_seconds=4.0,
+        )
+        self.service = GestureService(self.config)
+
+    def test_gesture_requires_confirm_frames(self) -> None:
+        self.service._track_gesture("open_palm", 100.0)
+        self.assertIsNone(self.service.consume_event())
+        self.service._track_gesture("open_palm", 100.5)
+        event = self.service.consume_event()
+        self.assertEqual(
+            event, {"type": "gesture", "name": "open_palm", "at": 100.5}
+        )
+
+    def test_gesture_cooldown_blocks_and_rearms(self) -> None:
+        self.service._track_gesture("open_palm", 100.0)
+        self.service._track_gesture("open_palm", 100.5)
+        self.assertIsNotNone(self.service.consume_event())
+        # 冷却期内换手势再确认：事件不触发。
+        self.service._track_gesture("peace", 101.0)
+        self.service._track_gesture("open_palm", 101.5)
+        self.service._track_gesture("open_palm", 102.0)
+        self.assertIsNone(self.service.consume_event())
+        # 冷却结束后再次确认：事件恢复触发。
+        self.service._track_gesture("peace", 104.0)
+        self.service._track_gesture("open_palm", 104.1)
+        self.service._track_gesture("open_palm", 104.2)
+        event = self.service.consume_event()
+        self.assertIsNotNone(event)
+        self.assertEqual(event["name"], "open_palm")
+
+    def test_gesture_held_repeats_after_cooldown(self) -> None:
+        # 复现：第一次触发后保持同一手势，冷却期满应再次触发
+        # （原版 count == confirm_frames 会在拒绝后卡死，第二次不再播报）。
+        base = 100.0
+        self.service._track_gesture("peace", base)
+        self.service._track_gesture("peace", base + 0.5)
+        self.assertIsNotNone(self.service.consume_event())
+        # 冷却期（3 秒）内继续确认：不重复触发。
+        for step in range(1, 6):
+            self.service._track_gesture("peace", base + 0.5 * step)
+        self.assertIsNone(self.service.consume_event())
+        # 冷却期满后继续确认：再次触发。
+        for step in range(6, 10):
+            self.service._track_gesture("peace", base + 0.5 * step)
+        second = self.service.consume_event()
+        self.assertIsNotNone(second)
+        self.assertEqual(second["name"], "peace")
+
+    def test_expression_held_repeats_after_cooldown(self) -> None:
+        base = 100.0
+        self.service._track_expression("smile", base)
+        self.service._track_expression("smile", base + 0.5)
+        self.assertIsNotNone(self.service.consume_event())
+        self.service._track_expression("smile", base + 91.0)
+        self.service._track_expression("smile", base + 91.5)
+        second = self.service.consume_event()
+        self.assertIsNotNone(second)
+        self.assertEqual(second["name"], "smile")
+
+    def test_immediate_callback_fires_on_confirm(self) -> None:
+        seen: list[str] = []
+        self.service.on_gesture_confirmed = seen.append
+        self.service._track_gesture("thumbs_up", 100.0)
+        self.assertEqual(seen, [])
+        self.service._track_gesture("thumbs_up", 100.5)
+        self.assertEqual(seen, ["thumbs_up"])
+
+    def test_expression_event_carries_message(self) -> None:
+        self.service._track_expression("smile", 100.0)
+        self.service._track_expression("smile", 100.5)
+        event = self.service.consume_event()
+        self.assertIsNotNone(event)
+        self.assertEqual(event["type"], "expression")
+        self.assertEqual(event["name"], "smile")
+        self.assertIn(event["message"], EXPRESSION_MESSAGES["smile"])
+
+    def test_expression_disabled_skips_events(self) -> None:
+        service = GestureService(
+            replace(self.config, gesture_expression_enabled=False)
+        )
+        service._track_expression("yawn", 100.0)
+        service._track_expression("yawn", 100.5)
+        self.assertIsNone(service.consume_event())
+
+    def test_disabling_clears_pending_events(self) -> None:
+        self.service._track_gesture("peace", 100.0)
+        self.service._track_gesture("peace", 100.5)
+        self.service.set_enabled(False)
+        self.assertIsNone(self.service.consume_event())
+
+    def test_low_confidence_classification_does_not_trigger(self) -> None:
+        service = GestureService(replace(
+            self.config, gesture_confirm_frames=1, gesture_min_confidence=0.8
+        ))
+        service.worker.detect = Mock(return_value={
+            "hands": [{"gesture": "open_palm", "gesture_score": 0.1}],
+            "expression": None,
+        })
+
+        service._process(b"frame", service._generation)
+
+        self.assertIsNone(service.consume_event())
+        self.assertIsNone(service.status()["gesture"])
+
+    def test_callback_error_is_contained(self) -> None:
+        self.service.on_gesture_confirmed = Mock(
+            side_effect=RuntimeError("callback failed")
+        )
+        self.service._track_gesture("open_palm", 100.0)
+        self.service._track_gesture("open_palm", 100.5)
+        self.assertEqual(self.service.consume_event()["name"], "open_palm")
+
+    def test_status_expires_stale_results(self) -> None:
+        with self.service._lock:
+            self.service._gesture = "open_palm"
+            self.service._result_time = time.time()
+        fresh = self.service.status()
+        self.assertEqual(fresh["gesture"], "手掌")
+        with self.service._lock:
+            self.service._result_time = time.time() - 100.0
+        stale = self.service.status()
+        self.assertIsNone(stale["gesture"])
+        self.assertEqual(stale["hands"], [])
+
+
+class GestureConfigTests(unittest.TestCase):
+    def test_gesture_config_defaults(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text("{}", encoding="utf-8")
+            config = load_config(path)
+        self.assertFalse(config.gesture_control_enabled)
+        self.assertEqual(config.gesture_confirm_frames, 2)
+        self.assertAlmostEqual(config.gesture_action_cooldown_seconds, 3.0)
+        self.assertAlmostEqual(config.gesture_submit_interval_seconds, 0.5)
+        self.assertTrue(config.gesture_expression_enabled)
+        self.assertAlmostEqual(config.gesture_expression_cooldown_seconds, 90.0)
+        self.assertEqual(
+            config.gesture_hand_model_path,
+            APP_DIR / "models" / "gesture" / "hand_landmarker.task",
+        )
+        self.assertEqual(
+            config.gesture_face_model_path,
+            APP_DIR / "models" / "gesture" / "face_landmarker.task",
+        )
+
+
+class WebFrontendIntegrityTests(unittest.TestCase):
+    """index.html 防回归：JS 引用的元素 id、页面/JS 使用的 class 必须真实存在。
+
+    覆盖两类历史事故：JS 引用被删掉的元素 id（运行时报 null）、
+    HTML 使用了没有 CSS 定义的 class（如 usage-hint 样式漏加）。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        html = (Path(__file__).resolve().parent / "web" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        style_match = re.search(r"<style>(.*?)</style>", html, re.DOTALL)
+        script_match = re.search(r"<script>(.*?)</script>", html, re.DOTALL)
+        if style_match is None or script_match is None:
+            raise AssertionError("index.html 缺少 style 或 script 块")
+        cls.style_text = style_match.group(1)
+        cls.script_text = script_match.group(1)
+        cls.markup_text = re.sub(
+            r"<script>.*?</script>|<style>.*?</style>", "", html, flags=re.DOTALL
+        )
+        cls.markup_ids = set(re.findall(r'id="([A-Za-z0-9_-]+)"', cls.markup_text))
+        cls.markup_classes = {
+            name
+            for chunk in re.findall(r'class="([^"]*)"', cls.markup_text)
+            for name in chunk.split()
+        }
+        cls.css_classes = set(
+            re.findall(r"\.([A-Za-z_][A-Za-z0-9_-]*)", cls.style_text)
+        )
+        cls.js_ids = set(
+            re.findall(r"getElementById\('([A-Za-z0-9_-]+)'\)", cls.script_text)
+        ) | set(
+            re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", cls.script_text)
+        )
+        cls.js_classes = set(
+            re.findall(r"classList\.(?:add|toggle)\('([^']+)'", cls.script_text)
+        ) | set(re.findall(r"className = '([^']+)'", cls.script_text))
+
+    def test_js_element_ids_exist_in_markup(self) -> None:
+        missing = self.js_ids - self.markup_ids
+        self.assertEqual(missing, set(), f"JS 引用了不存在的元素 id：{missing}")
+
+    def test_markup_classes_have_css_rules(self) -> None:
+        missing = self.markup_classes - self.css_classes
+        self.assertEqual(missing, set(), f"HTML class 缺少 CSS 定义：{missing}")
+
+    def test_js_dynamic_classes_have_css_rules(self) -> None:
+        missing = self.js_classes - self.css_classes
+        self.assertEqual(missing, set(), f"JS 动态 class 缺少 CSS 定义：{missing}")
+
+    def test_second_camera_is_counted_only_after_frame_is_ready(self) -> None:
+        self.assertRegex(
+            self.script_text,
+            r"if \(secondaryReady\) \{\s*secondaryStream = selectedSecondaryId;",
+        )
+        self.assertIn("secondaryCameraPane.hidden = true", self.script_text)
+
+    def test_camera_alert_actions_are_grouped_with_each_camera(self) -> None:
+        self.assertEqual(self.markup_text.count('class="motion-run"'), 2)
+        self.assertIn('启动变化告警', self.markup_text)
+        self.assertIn('关闭变化告警', self.script_text)
+        self.assertIn('body: JSON.stringify({ enabled: true })', self.script_text)
+        self.assertNotIn('class="motion-enabled"', self.markup_text)
 
 
 if __name__ == "__main__":

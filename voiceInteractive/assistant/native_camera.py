@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import threading
 import time
+import json
+import os
+import tempfile
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -13,12 +16,18 @@ from typing import TYPE_CHECKING, Callable
 import cv2
 import numpy as np
 
-from .config import Config, NativeCameraConfig
+from .config import (
+    CameraMotionRule,
+    Config,
+    NativeCameraConfig,
+    parse_camera_motion_rule,
+)
 from .paths import APP_DIR
 
 if TYPE_CHECKING:
     from .camera import CameraFrameStore, PersonPresenceMonitor
     from .face import FaceRecognitionService
+    from .gesture import GestureService
 
 
 def list_native_cameras(max_index: int = 9) -> None:
@@ -46,6 +55,7 @@ class MotionSettings:
     min_area_percent: float
     consecutive_frames: int
     cooldown_seconds: float
+    confirmation_seconds: float = 0.0
 
 
 class MotionDetector:
@@ -55,11 +65,13 @@ class MotionDetector:
         self.background: np.ndarray | None = None
         self.background_started_at = 0.0
         self.changed_frames = 0
+        self.change_started_at = 0.0
 
     def reset(self) -> None:
         self.background = None
         self.background_started_at = 0.0
         self.changed_frames = 0
+        self.change_started_at = 0.0
 
     def process(
         self,
@@ -67,10 +79,19 @@ class MotionDetector:
         settings: MotionSettings,
         now: float,
         last_alert_at: float,
+        roi: tuple[float, float, float, float] | None = None,
     ) -> tuple[float, bool]:
         height, width = frame.shape[:2]
         if height <= 0 or width <= 0:
             return 0.0, False
+        if roi is not None:
+            x, y, roi_width, roi_height = roi
+            left = min(width - 1, max(0, int(round(x * width))))
+            top = min(height - 1, max(0, int(round(y * height))))
+            right = min(width, max(left + 1, int(round((x + roi_width) * width))))
+            bottom = min(height, max(top + 1, int(round((y + roi_height) * height))))
+            frame = frame[top:bottom, left:right]
+            height, width = frame.shape[:2]
         scale = min(1.0, 640.0 / float(width))
         small = (
             cv2.resize(frame, None, fx=scale, fy=scale)
@@ -93,21 +114,31 @@ class MotionDetector:
             mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         total_area = float(small.shape[0] * small.shape[1])
-        minimum_area = max(60.0, total_area * settings.min_area_percent / 100.0)
+        # Area percentage is relative to the selected region, even for a
+        # small ROI; a fixed full-frame pixel floor would override the rule.
+        minimum_area = max(1.0, total_area * settings.min_area_percent / 100.0)
         changed_area = sum(
             cv2.contourArea(contour)
             for contour in contours
             if cv2.contourArea(contour) >= minimum_area
         )
         significant = changed_area > 0
-        self.changed_frames = self.changed_frames + 1 if significant else 0
+        if significant:
+            if self.changed_frames == 0:
+                self.change_started_at = now
+            self.changed_frames += 1
+        else:
+            self.changed_frames = 0
+            self.change_started_at = 0.0
         triggered = (
             now - self.background_started_at >= 1.0
             and self.changed_frames >= settings.consecutive_frames
+            and now - self.change_started_at >= settings.confirmation_seconds
             and now - last_alert_at >= settings.cooldown_seconds
         )
         if triggered:
             self.changed_frames = 0
+            self.change_started_at = 0.0
             self.background = gray.astype("float")
             self.background_started_at = now
         else:
@@ -243,6 +274,7 @@ class MotionEventArchive:
 @dataclass
 class _CameraRuntime:
     config: NativeCameraConfig
+    motion_rule: CameraMotionRule = field(default_factory=CameraMotionRule)
     detector: MotionDetector = field(default_factory=MotionDetector)
     capture: cv2.VideoCapture | None = None
     thread: threading.Thread | None = None
@@ -254,6 +286,7 @@ class _CameraRuntime:
     last_alert_at: float = 0.0
     last_frame_at: float = 0.0
     last_face_submit_at: float = 0.0
+    last_gesture_submit_at: float = 0.0
     latest_jpeg: bytes | None = None
     frame_sequence: int = 0
     preview_clients: int = 0
@@ -269,11 +302,13 @@ class NativeCameraMonitor:
         store: CameraFrameStore,
         presence_monitor: PersonPresenceMonitor,
         face_service: FaceRecognitionService,
+        gesture_service: GestureService | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.presence_monitor = presence_monitor
         self.face_service = face_service
+        self.gesture_service = gesture_service
         self.archive = MotionEventArchive(
             config.native_camera_event_retention_days,
             config.native_camera_save_snapshots,
@@ -288,13 +323,21 @@ class NativeCameraMonitor:
         )
         self._enabled = config.native_camera_enabled
         self._lock = threading.RLock()
+        self._motion_update_lock = threading.Lock()
         self._frame_ready = threading.Condition(self._lock)
         self._stop_event = threading.Event()
-        self._browser_claim_until = 0.0
-        self._browser_connected_count = 0
         self._listeners: list[Callable[[dict], None]] = []
         self._cameras = {
-            camera.id: _CameraRuntime(camera)
+            camera.id: _CameraRuntime(
+                camera,
+                motion_rule=camera.motion or CameraMotionRule(
+                    sensitivity=self.settings.sensitivity,
+                    min_area_percent=self.settings.min_area_percent,
+                    consecutive_frames=self.settings.consecutive_frames,
+                    confirmation_seconds=0.0,
+                    cooldown_seconds=self.settings.cooldown_seconds,
+                ),
+            )
             for camera in config.native_cameras
             if camera.enabled
         }
@@ -307,6 +350,53 @@ class NativeCameraMonitor:
     def has_camera(self, camera_id: str) -> bool:
         with self._lock:
             return camera_id in self._cameras
+
+    def motion_rule(self, camera_id: str) -> dict:
+        with self._lock:
+            runtime = self._cameras.get(camera_id)
+            if runtime is None:
+                raise KeyError(camera_id)
+            return runtime.motion_rule.to_dict()
+
+    def update_motion_rule(self, camera_id: str, payload: dict) -> dict:
+        """Persist one camera's rule and apply it without restarting capture."""
+        with self._motion_update_lock:
+            with self._lock:
+                runtime = self._cameras.get(camera_id)
+                if runtime is None:
+                    raise ValueError("没有找到该摄像头")
+                new_rule = parse_camera_motion_rule(payload, runtime.motion_rule)
+            config_path = self.config.config_path
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            cameras = raw.get("native_cameras")
+            if not isinstance(cameras, list):
+                raise ValueError("配置文件缺少 native_cameras")
+            target = next(
+                (camera for camera in cameras if isinstance(camera, dict) and camera.get("id") == camera_id),
+                None,
+            )
+            if target is None:
+                raise ValueError("配置文件中没有找到该摄像头")
+            target["motion"] = new_rule.to_dict()
+            temporary_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=config_path.parent,
+                    prefix=f".{config_path.name}.", suffix=".tmp", delete=False,
+                ) as temporary:
+                    temporary_path = Path(temporary.name)
+                    json.dump(raw, temporary, ensure_ascii=False, indent=2)
+                    temporary.write("\n")
+                os.replace(temporary_path, config_path)
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
+            with self._lock:
+                runtime.motion_rule = new_rule
+                runtime.detector.reset()
+                runtime.motion_score = 0.0
+                runtime.last_alert_at = 0.0
+            return new_rule.to_dict()
 
     def primary_camera_id(self) -> str | None:
         with self._lock:
@@ -330,9 +420,32 @@ class NativeCameraMonitor:
         with self._frame_ready:
             self._enabled = enabled
             for runtime in self._cameras.values():
-                runtime.state = "等待后台监控" if enabled else "后台摄像头接管已关闭"
+                runtime.state = "等待后台监控" if enabled else "无人值守监控已关闭"
                 runtime.error = ""
             self._frame_ready.notify_all()
+        if enabled:
+            resume_face = getattr(self.face_service, "resume", None)
+            if callable(resume_face):
+                resume_face()
+            if self.gesture_service is not None:
+                resume_gesture = getattr(self.gesture_service, "resume", None)
+                if callable(resume_gesture):
+                    resume_gesture()
+        else:
+            # Preview may keep the camera open, but must not keep queued or
+            # in-flight recognition actions alive after monitoring is stopped.
+            pause_face = getattr(self.face_service, "pause", None)
+            if callable(pause_face):
+                pause_face()
+            if self.gesture_service is not None:
+                pause_gesture = getattr(self.gesture_service, "pause", None)
+                if callable(pause_gesture):
+                    pause_gesture()
+
+    def ensure_enabled(self) -> None:
+        """视觉子功能依赖后台帧源，调用方开启时顺带拉起监控（已开启则不动作）。"""
+        if not self.enabled:
+            self.set_enabled(True)
 
     def preview_frames(self, camera_id: str):
         """Yield only the newest JPEG for an MJPEG client; old frames never queue."""
@@ -391,19 +504,31 @@ class NativeCameraMonitor:
             if runtime is None:
                 raise KeyError(camera_id)
             runtime.preview_clients += 1
-            recent = time.time() - runtime.last_frame_at < 2.0
+            recent = (
+                runtime.active
+                and runtime.latest_jpeg is not None
+                and time.time() - runtime.last_frame_at < 2.0
+            )
             initial_sequence = runtime.frame_sequence - 1 if recent else runtime.frame_sequence
             self._frame_ready.notify_all()
             try:
                 self._frame_ready.wait_for(
                     lambda: self._stop_event.is_set()
                     or (
-                        runtime.latest_jpeg is not None
+                        runtime.active
+                        and time.time() - runtime.last_frame_at < 2.0
+                        and runtime.latest_jpeg is not None
                         and runtime.frame_sequence > initial_sequence
                     ),
                     timeout=max(0.1, timeout),
                 )
-                return runtime.latest_jpeg if runtime.frame_sequence > initial_sequence else None
+                return (
+                    runtime.latest_jpeg
+                    if runtime.active
+                    and runtime.frame_sequence > initial_sequence
+                    and time.time() - runtime.last_frame_at < 2.0
+                    else None
+                )
             finally:
                 runtime.preview_clients = max(0, runtime.preview_clients - 1)
                 self._frame_ready.notify_all()
@@ -418,7 +543,11 @@ class NativeCameraMonitor:
             if runtime is None:
                 raise KeyError(camera_id)
             runtime.preview_clients += 1
-            recent = time.time() - runtime.last_frame_at < 2.0
+            recent = (
+                runtime.active
+                and runtime.latest_jpeg is not None
+                and time.time() - runtime.last_frame_at < 2.0
+            )
             last_sequence = runtime.frame_sequence - 1 if recent else runtime.frame_sequence
             self._frame_ready.notify_all()
             frames: list[bytes] = []
@@ -430,30 +559,23 @@ class NativeCameraMonitor:
                     self._frame_ready.wait_for(
                         lambda: self._stop_event.is_set()
                         or (
-                            runtime.latest_jpeg is not None
+                            runtime.active
+                            and runtime.latest_jpeg is not None
                             and runtime.frame_sequence > last_sequence
+                            and time.time() - runtime.last_frame_at < 2.0
                         ),
                         timeout=remaining,
                     )
-                    if self._stop_event.is_set() or runtime.frame_sequence <= last_sequence:
+                    if self._stop_event.is_set():
                         break
+                    if not runtime.active or runtime.frame_sequence <= last_sequence:
+                        continue
                     frames.append(runtime.latest_jpeg)
                     last_sequence = runtime.frame_sequence
                 return frames
             finally:
                 runtime.preview_clients = max(0, runtime.preview_clients - 1)
                 self._frame_ready.notify_all()
-
-    def claim_for_browser(
-        self, seconds: float = 12.0, connected_count: int | None = None
-    ) -> None:
-        """暂时释放全部设备，让网页选择并独占其中一个摄像头。"""
-        with self._lock:
-            self._browser_claim_until = time.monotonic() + max(2.0, seconds)
-            if connected_count is not None:
-                self._browser_connected_count = max(0, connected_count)
-            for runtime in self._cameras.values():
-                runtime.state = "正在把摄像头交给网页"
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -477,7 +599,6 @@ class NativeCameraMonitor:
             self._release_camera(runtime)
 
     def status(self) -> dict:
-        browser_frame_age = self.store.browser_frame_age_seconds()
         with self._lock:
             cameras = [
                 {
@@ -490,19 +611,23 @@ class NativeCameraMonitor:
                     "error": runtime.error,
                     "fps": round(runtime.fps, 1),
                     "motion_score": round(runtime.motion_score, 2),
+                    "motion": runtime.motion_rule.to_dict(),
                     "last_frame_at": runtime.last_frame_at,
                     "preview_clients": runtime.preview_clients,
                 }
                 for runtime in self._cameras.values()
             ]
             active_count = sum(1 for camera in cameras if camera["active"])
+            monitoring_count = sum(1 for camera in cameras if camera["motion"]["enabled"])
+            active_monitoring_count = sum(
+                1 for camera in cameras
+                if self._enabled and camera["active"] and camera["motion"]["enabled"]
+            )
             errors = [camera["error"] for camera in cameras if camera["error"]]
             if not self._enabled:
-                state = "后台摄像头接管已关闭"
-            elif time.monotonic() < self._browser_claim_until:
-                state = "网页摄像头正在工作，后台待机"
+                state = "无人值守监控已关闭"
             elif active_count:
-                state = f"后台正在监测 {active_count}/{len(cameras)} 个摄像头"
+                state = f"后台正在采集 {active_count}/{len(cameras)} 个摄像头"
             elif cameras:
                 state = cameras[0]["state"]
             else:
@@ -511,6 +636,8 @@ class NativeCameraMonitor:
                 "enabled": self._enabled,
                 "active": active_count > 0,
                 "active_count": active_count,
+                "monitoring_count": monitoring_count,
+                "active_monitoring_count": active_monitoring_count,
                 "configured_count": len(cameras),
                 "state": state,
                 "error": "；".join(dict.fromkeys(errors)),
@@ -522,13 +649,6 @@ class NativeCameraMonitor:
                 ),
                 "last_frame_at": max(
                     (camera["last_frame_at"] for camera in cameras), default=0.0
-                ),
-                "browser_claimed": time.monotonic() < self._browser_claim_until,
-                "browser_connected_count": (
-                    self._browser_connected_count
-                    if browser_frame_age is not None
-                    and browser_frame_age < self.config.native_camera_fallback_seconds
-                    else 0
                 ),
                 "cameras": cameras,
                 "events": self.archive.events(),
@@ -571,11 +691,14 @@ class NativeCameraMonitor:
         if capture is not None:
             capture.release()
         runtime.detector.reset()
-        with self._lock:
+        with self._frame_ready:
             runtime.active = False
             runtime.fps = 0.0
             runtime.motion_score = 0.0
             runtime.black_frames = 0
+            runtime.latest_jpeg = None
+            runtime.last_frame_at = 0.0
+            self._frame_ready.notify_all()
 
     def _dispatch_event(self, event: dict) -> None:
         for callback in tuple(self._listeners):
@@ -603,7 +726,7 @@ class NativeCameraMonitor:
                 runtime.state = (
                     "网页实时预览"
                     if runtime.preview_clients and not self._enabled
-                    else "后台摄像头已接管"
+                    else "无人值守监控中"
                 )
         encoded_ok, encoded = cv2.imencode(
             ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 84]
@@ -617,9 +740,14 @@ class NativeCameraMonitor:
             runtime.frame_sequence += 1
             self._frame_ready.notify_all()
 
-        # 主摄像头继续为视觉问答、人物确认和人脸识别提供统一画面。
+        # Preview and explicit visual Q&A can still use the latest frame while
+        # unattended monitoring is off; no background analysis may run then.
         if runtime.config.primary:
-            self.store.update_frame(jpeg, source="native")
+            self.store.update_frame(jpeg)
+        if not self.enabled:
+            return True
+
+        if runtime.config.primary:
             presence_status = self.store.status()
             if (
                 self.presence_monitor.enabled
@@ -632,17 +760,33 @@ class NativeCameraMonitor:
                 if self.face_service.submit(jpeg):
                     runtime.last_face_submit_at = now
 
-        if not self.enabled:
-            return True
+            gesture_interval = self.config.gesture_submit_interval_seconds
+            if (
+                self.gesture_service is not None
+                and self.gesture_service.enabled
+                and now - runtime.last_gesture_submit_at >= gesture_interval
+            ):
+                if self.gesture_service.submit(jpeg):
+                    runtime.last_gesture_submit_at = now
 
-        score, triggered = runtime.detector.process(
-            frame, self.settings, now, runtime.last_alert_at
-        )
         with self._lock:
+            rule = runtime.motion_rule
+            if not rule.enabled:
+                runtime.motion_score = 0.0
+                return True
+            settings = MotionSettings(
+                rule.sensitivity, rule.min_area_percent,
+                rule.consecutive_frames, rule.cooldown_seconds,
+                rule.confirmation_seconds,
+            )
+            score, triggered = runtime.detector.process(
+                frame, settings, now, runtime.last_alert_at, rule.roi
+            )
             runtime.motion_score = score
+            if triggered:
+                runtime.last_alert_at = now
         if not triggered:
             return True
-        runtime.last_alert_at = now
         event = self.archive.record(
             jpeg,
             score,
@@ -671,30 +815,6 @@ class NativeCameraMonitor:
                 self._stop_event.wait(0.5)
                 continue
 
-            if time.monotonic() < self._browser_claim_until and not preview_active:
-                if runtime.capture is not None:
-                    self._release_camera(runtime)
-                with self._lock:
-                    runtime.state = "等待网页连接摄像头"
-                    runtime.error = ""
-                self._stop_event.wait(0.25)
-                continue
-
-            browser_age = self.store.browser_frame_age_seconds()
-            if (
-                not preview_active
-                and
-                browser_age is not None
-                and browser_age < self.config.native_camera_fallback_seconds
-            ):
-                if runtime.capture is not None:
-                    self._release_camera(runtime)
-                with self._lock:
-                    runtime.state = "网页摄像头正在工作，后台待机"
-                    runtime.error = ""
-                self._stop_event.wait(0.5)
-                continue
-
             if runtime.capture is None or not runtime.capture.isOpened():
                 runtime.capture = self._open_camera(runtime.config)
                 if not runtime.capture.isOpened():
@@ -712,7 +832,7 @@ class NativeCameraMonitor:
                     runtime.state = (
                         "网页实时预览"
                         if preview_active and not self.enabled
-                        else "后台摄像头已接管"
+                        else "无人值守监控中"
                     )
                     runtime.error = ""
 

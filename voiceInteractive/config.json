@@ -53,17 +53,25 @@
       "name": "Deli MM101S 1",
       "index": 0,
       "enabled": true,
-      "primary": true
+      "primary": true,
+      "motion": {
+        "enabled": true,
+        "sensitivity": 70,
+        "min_area_percent": 0.8,
+        "consecutive_frames": 3,
+        "confirmation_seconds": 0.0,
+        "cooldown_seconds": 5.0,
+        "roi": null
+      }
     },
     {
       "id": "camera_2",
       "name": "Deli MM101S 2",
       "index": 1,
-      "enabled": true,
+      "enabled": false,
       "primary": false
     }
   ],
-  "native_camera_fallback_seconds": 5.0,
   "native_camera_width": 640,
   "native_camera_height": 480,
   "native_camera_fps": 20,

@@ -30,7 +30,7 @@ class SystemTray:
             pystray.MenuItem("打开老叶视觉助手", self.open_dashboard, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
-                "后台摄像头接管",
+                "无人值守监控",
                 self.toggle_native_camera,
                 checked=lambda _: self.dashboard.native_camera.enabled,
             ),
@@ -86,17 +86,20 @@ class SystemTray:
     def toggle_native_camera(self, *_: Any) -> None:
         enabled = not self.dashboard.native_camera.enabled
         self.dashboard.native_camera.set_enabled(enabled)
-        self._refresh("后台摄像头接管已开启" if enabled else "后台摄像头接管已关闭")
+        self._refresh("无人值守监控已开启" if enabled else "无人值守监控已关闭")
 
     def toggle_person_monitor(self, *_: Any) -> None:
         enabled = not self.dashboard.presence_monitor.enabled
         self.dashboard.presence_monitor.set_enabled(enabled)
+        if enabled:
+            self.dashboard.native_camera.ensure_enabled()
         self._refresh("动态人物监测已开启" if enabled else "动态人物监测已关闭")
 
     def toggle_scene_broadcast(self, *_: Any) -> None:
         enabled = not self.dashboard.store.scene_broadcast_enabled()
         self.dashboard.store.set_scene_broadcast_enabled(enabled)
         if enabled:
+            self.dashboard.native_camera.ensure_enabled()
             frame = self.dashboard.store.latest_frame(
                 self.dashboard.config.camera_frame_max_age_seconds
             )
@@ -109,6 +112,8 @@ class SystemTray:
     def toggle_face_recognition(self, *_: Any) -> None:
         enabled = not self.dashboard.face_service.enabled
         self.dashboard.face_service.set_enabled(enabled)
+        if enabled:
+            self.dashboard.native_camera.ensure_enabled()
         self._refresh("人脸识别已开启" if enabled else "人脸识别已关闭")
 
     def notify_motion(self, event: dict) -> None:

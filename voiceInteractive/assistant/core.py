@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import random
 import sys
 import threading
 import time
@@ -42,6 +43,10 @@ from .tools import DesktopTools, OnlineSearchTools
 
 
 class VoiceAssistant:
+    THUMBS_UP_COMMENTS = [
+        "收到点赞，我会继续加油的。",
+        "点个赞，看来刚才表现不错。",
+    ]
     COMMAND_PHRASES = [
         "现在 几点 了",
         "现在 几点",
@@ -87,6 +92,19 @@ class VoiceAssistant:
         self._wake_interrupt = threading.Event()
         self._interrupt_lock = threading.Lock()
         self._interrupt_action: str | None = None
+        gesture_service = getattr(self.dashboard, "gesture_service", None)
+        if gesture_service is not None:
+            gesture_service.on_gesture_confirmed = self._immediate_gesture_stop
+
+    def _immediate_gesture_stop(self, gesture: str) -> None:
+        """手掌手势的即时响应：不等主循环，直接打断当前播报。"""
+        if gesture != "open_palm":
+            return
+        self.playback_cancel.set()
+        try:
+            sd.stop()
+        except Exception as error:
+            print(f"[手势停播失败] {error}", file=sys.stderr)
 
     @staticmethod
     def _put_latest(target_queue: queue.Queue[bytes], data: bytes) -> None:
@@ -314,6 +332,88 @@ class VoiceAssistant:
         if interrupt_action == "stop":
             return "已停止播报，可以继续提问"
         return "可以继续提问，无需再次唤醒"
+
+    def _consume_face_greeting(self) -> str | None:
+        if self.dashboard is None:
+            return None
+        names: list[str] = []
+        while len(names) < 3:
+            name = self.dashboard.face_service.consume_greeting()
+            if name is None:
+                break
+            names.append(name)
+        if not names:
+            return None
+        if len(names) == 1:
+            return f"{names[0]}回来了。"
+        return "和".join(names) + "回来了。"
+
+    def _handle_gesture_events(self) -> bool:
+        """消费手势/表情事件并执行动作；返回是否有事件被处理。"""
+        if self.dashboard is None:
+            return False
+        gesture_service = getattr(self.dashboard, "gesture_service", None)
+        if gesture_service is None:
+            return False
+        quiet = self.dashboard.store.scene_broadcast_enabled()
+        handled = False
+        while True:
+            event = gesture_service.consume_event()
+            if event is None:
+                break
+            handled = True
+            if event.get("type") == "expression":
+                message = str(event.get("message") or "")
+                print(f"[表情调侃] {event.get('name')}: {message}")
+                if message and not quiet:
+                    self.dashboard.store.set_assistant_status("表情调侃", message)
+                    try:
+                        self._play_interruptible(
+                            self.speaker.say, message, self.playback_cancel
+                        )
+                    except Exception as error:
+                        print(f"[表情调侃播报失败] {error}", file=sys.stderr)
+                        self._play(self.speaker.chime, False)
+                continue
+            gesture = str(event.get("name") or "")
+            if gesture == "open_palm":
+                # 实际停播已在 _immediate_gesture_stop 完成，这里只补状态展示。
+                print("[手势控制] 手掌 → 已停止播报")
+                self.dashboard.store.set_assistant_status("手势控制", "已停止播报")
+                continue
+            if gesture == "peace":
+                frame = self.dashboard.store.latest_frame(
+                    self.config.camera_frame_max_age_seconds
+                )
+                if frame is None:
+                    feedback = "摄像头里现在没有画面，没拍成。"
+                else:
+                    self.dashboard.store.record_analysis_snapshot(frame)
+                    feedback = "咔嚓！拍好了，摄像头页面可以看这张照片。"
+                print(f"[手势拍照] {feedback}")
+                self.dashboard.store.set_assistant_status("手势拍照", feedback)
+                if not quiet:
+                    try:
+                        self._play_interruptible(
+                            self.speaker.say, feedback, self.playback_cancel
+                        )
+                    except Exception as error:
+                        print(f"[手势拍照播报失败] {error}", file=sys.stderr)
+                        self._play(self.speaker.chime, False)
+                continue
+            if gesture == "thumbs_up":
+                feedback = random.choice(self.THUMBS_UP_COMMENTS)
+                print(f"[手势点赞] {feedback}")
+                self.dashboard.store.set_assistant_status("手势点赞", feedback)
+                if not quiet:
+                    try:
+                        self._play_interruptible(
+                            self.speaker.say, feedback, self.playback_cancel
+                        )
+                    except Exception as error:
+                        print(f"[手势点赞播报失败] {error}", file=sys.stderr)
+                        self._play(self.speaker.chime, False)
+        return handled
 
     def _person_location_response(
         self, primary_text: str, recognition_candidates: list[str]
@@ -626,7 +726,9 @@ class VoiceAssistant:
                             and not self.dashboard.store.scene_broadcast_enabled()
                         ):
                             try:
-                                self._play(self.speaker.say, alert)
+                                self._play_interruptible(
+                                    self.speaker.say, alert, self.playback_cancel
+                                )
                             except Exception as error:
                                 print(f"[动态提醒播报失败] {error}", file=sys.stderr)
                                 self._play(self.speaker.chime, False)
@@ -635,6 +737,30 @@ class VoiceAssistant:
                                 time.monotonic()
                                 + self.config.command_timeout_seconds
                             )
+                    greeting = self._consume_face_greeting()
+                    if greeting is not None:
+                        print(f"[迎宾] {greeting}")
+                        if not self.dashboard.store.scene_broadcast_enabled():
+                            self.dashboard.store.set_assistant_status(
+                                "迎宾", greeting
+                            )
+                            try:
+                                self._play_interruptible(
+                                    self.speaker.say, greeting, self.playback_cancel
+                                )
+                            except Exception as error:
+                                print(f"[迎宾播报失败] {error}", file=sys.stderr)
+                                self._play(self.speaker.chime, False)
+                        if state == "command":
+                            command_deadline = (
+                                time.monotonic()
+                                + self.config.command_timeout_seconds
+                            )
+                    if self._handle_gesture_events() and state == "command":
+                        command_deadline = (
+                            time.monotonic()
+                            + self.config.command_timeout_seconds
+                        )
                 if state == "command" and time.monotonic() > command_deadline:
                     print("[会话结束] 一段时间没有继续提问，重新等待唤醒。")
                     self.ollama.end_conversation()

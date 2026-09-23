@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .camera import CameraFrameStore, PersonPresenceMonitor, YoloPersonDetector
 from .config import Config
 from .face import FaceRecognitionService
+from .gesture import GestureService
 from .llm import ModelRouter
 from .native_camera import NativeCameraMonitor
 from .paths import APP_DIR
@@ -36,6 +37,7 @@ class DashboardHTTPServer(ThreadingHTTPServer):
         presence_monitor: PersonPresenceMonitor,
         face_service: FaceRecognitionService,
         native_camera: NativeCameraMonitor,
+        gesture_service: GestureService,
     ):
         super().__init__(address, handler)
         self.store = store
@@ -44,6 +46,7 @@ class DashboardHTTPServer(ThreadingHTTPServer):
         self.presence_monitor = presence_monitor
         self.face_service = face_service
         self.native_camera = native_camera
+        self.gesture_service = gesture_service
 
 
 class DashboardHTTPServerV6(DashboardHTTPServer):
@@ -108,10 +111,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "person_monitor": {
                         "enabled": self.server.presence_monitor.enabled,
                         "detector": self.server.config.person_detector,
-                        "sensitivity": self.server.config.person_motion_sensitivity,
-                        "min_area_percent": self.server.config.person_motion_min_area_percent,
-                        "consecutive_frames": self.server.config.person_motion_consecutive_frames,
-                        "cooldown_seconds": self.server.config.person_motion_cooldown_seconds,
                     },
                     "scene_broadcast": {
                         "enabled": self.server.store.scene_broadcast_enabled(),
@@ -120,10 +119,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "face_recognition": {
                         "enabled": self.server.face_service.enabled,
                         "recommended_samples": 15,
+                        "greeting_cooldown_seconds": self.server.config.face_greeting_cooldown_seconds,
+                    },
+                    "gesture": {
+                        "enabled": self.server.gesture_service.enabled,
+                        "expression_enabled": self.server.config.gesture_expression_enabled,
+                        "action_cooldown_seconds": self.server.config.gesture_action_cooldown_seconds,
+                        "expression_cooldown_seconds": self.server.config.gesture_expression_cooldown_seconds,
                     },
                     "native_camera": {
                         "enabled": self.server.native_camera.enabled,
-                        "fallback_seconds": self.server.config.native_camera_fallback_seconds,
                         "retention_days": self.server.config.native_camera_event_retention_days,
                         "max_megabytes": self.server.config.native_camera_event_max_megabytes,
                         "cameras": [
@@ -133,6 +138,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                 "index": camera.index,
                                 "enabled": camera.enabled,
                                 "primary": camera.primary,
+                                "motion": (
+                                    self.server.native_camera.motion_rule(camera.id)
+                                    if self.server.native_camera.has_camera(camera.id)
+                                    else camera.motion.to_dict() if camera.motion else None
+                                ),
                             }
                             for camera in self.server.config.native_cameras
                         ],
@@ -150,6 +160,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if request_path == "/api/status":
             status = self.server.store.status()
             status["face_recognition"] = self.server.face_service.status()
+            status["gesture"] = self.server.gesture_service.status()
             status["native_camera"] = self.server.native_camera.status()
             self._send_json(status)
             return
@@ -381,6 +392,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         request_path = self.path.partition("?")[0]
+        motion_rule_match = re.fullmatch(
+            r"/api/motion-rule/([A-Za-z0-9_-]+)", request_path
+        )
+        if motion_rule_match:
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0 or content_length > 4096:
+                    raise ValueError("监控规则内容无效")
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                rule = self.server.native_camera.update_motion_rule(
+                    motion_rule_match.group(1), payload
+                )
+                self._send_json({"ok": True, "motion": rule})
+            except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            except OSError as error:
+                self._send_json({"ok": False, "error": f"无法保存监控规则：{error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         if request_path == "/api/shutdown":
             self.server.store.request_shutdown()
             self._send_json({"accepted": True}, HTTPStatus.ACCEPTED)
@@ -468,6 +497,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(enabled, bool):
                     raise ValueError("enabled 必须是布尔值")
                 self.server.presence_monitor.set_enabled(enabled)
+                if enabled:
+                    self.server.native_camera.ensure_enabled()
                 self._send_json({"ok": True, "enabled": enabled})
             except (ValueError, json.JSONDecodeError) as error:
                 self._send_json(
@@ -489,25 +520,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError) as error:
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
-        if request_path == "/api/camera-client":
-            connected_count = None
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-                if 0 < content_length <= 1024:
-                    payload = json.loads(
-                        self.rfile.read(content_length).decode("utf-8")
-                    )
-                    if isinstance(payload.get("connected_count"), int):
-                        connected_count = max(
-                            0, min(20, payload["connected_count"])
-                        )
-            except (ValueError, json.JSONDecodeError):
-                connected_count = None
-            self.server.native_camera.claim_for_browser(
-                connected_count=connected_count
-            )
-            self._send_json({"ok": True})
-            return
         if request_path == "/api/face-recognition":
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -518,6 +530,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(enabled, bool):
                     raise ValueError("enabled 必须是布尔值")
                 self.server.face_service.set_enabled(enabled)
+                if enabled:
+                    self.server.native_camera.ensure_enabled()
+                self._send_json({"ok": True, "enabled": enabled})
+            except (ValueError, json.JSONDecodeError) as error:
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if request_path == "/api/gesture":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0 or content_length > 1024:
+                    raise ValueError("无效的请求内容")
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                enabled = payload.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled 必须是布尔值")
+                self.server.gesture_service.set_enabled(enabled)
+                if enabled:
+                    self.server.native_camera.ensure_enabled()
                 self._send_json({"ok": True, "enabled": enabled})
             except (ValueError, json.JSONDecodeError) as error:
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
@@ -549,6 +579,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.server.store.set_scene_broadcast_enabled(enabled)
                 queued = False
                 if enabled:
+                    self.server.native_camera.ensure_enabled()
                     current_frame = self.server.store.latest_frame(
                         self.server.config.camera_frame_max_age_seconds
                     )
@@ -566,80 +597,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
             return
-        if request_path not in {
-            "/api/frame",
-            "/api/snapshot",
-            "/api/presence-check",
-            "/api/scene-description",
-            "/api/face-recognize",
-        }:
-            sample_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/samples", request_path)
-            if sample_match:
-                self._handle_face_sample(sample_match.group(1))
-                return
-            video_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/video", request_path)
-            if video_match:
-                self._handle_face_video(video_match.group(1))
-                return
-            self.send_error(HTTPStatus.NOT_FOUND)
+        sample_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/samples", request_path)
+        if sample_match:
+            self._handle_face_sample(sample_match.group(1))
             return
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            content_length = 0
-        if content_length <= 0 or content_length > self.MAX_FRAME_BYTES:
-            self._send_json({"error": "invalid frame size"}, HTTPStatus.BAD_REQUEST)
+        video_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/video", request_path)
+        if video_match:
+            self._handle_face_video(video_match.group(1))
             return
-        frame = self.rfile.read(content_length)
-        if not (frame.startswith(b"\xff\xd8") and frame.endswith(b"\xff\xd9")):
-            self._send_json({"error": "JPEG required"}, HTTPStatus.BAD_REQUEST)
-            return
-        if request_path == "/api/presence-check":
-            accepted = self.server.presence_monitor.submit(
-                frame, self.headers.get("X-Presence-Reason", "motion")
-            )
-            self._send_json(
-                {"accepted": accepted},
-                HTTPStatus.ACCEPTED if accepted else HTTPStatus.TOO_MANY_REQUESTS,
-            )
-            return
-        if request_path == "/api/scene-description":
-            accepted = self.server.store.submit_scene_broadcast(
-                frame, self.server.config.scene_broadcast_cooldown_seconds
-            )
-            self._send_json(
-                {"accepted": accepted},
-                HTTPStatus.ACCEPTED if accepted else HTTPStatus.TOO_MANY_REQUESTS,
-            )
-            return
-        if request_path == "/api/face-recognize":
-            accepted = self.server.face_service.submit(frame)
-            self._send_json(
-                {"accepted": accepted},
-                HTTPStatus.ACCEPTED if accepted else HTTPStatus.TOO_MANY_REQUESTS,
-            )
-            return
-        if request_path == "/api/snapshot":
-            try:
-                request_id = int(self.headers.get("X-Snapshot-Request-Id", "0"))
-            except ValueError:
-                request_id = 0
-            if request_id <= 0:
-                self._send_json(
-                    {"error": "snapshot request id required"},
-                    HTTPStatus.BAD_REQUEST,
-                )
-                return
-            if not self.server.store.submit_snapshot(request_id, frame):
-                self._send_json(
-                    {"error": "snapshot request expired"}, HTTPStatus.CONFLICT
-                )
-                return
-        else:
-            self.server.store.update_frame(frame)
-        self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def _handle_face_sample(self, person_id: str) -> None:
         try:
@@ -766,8 +732,13 @@ class CameraDashboard:
             self.store, person_detector, config.person_monitor_enabled
         )
         self.face_service = FaceRecognitionService(config)
+        self.gesture_service = GestureService(config)
         self.native_camera = NativeCameraMonitor(
-            config, self.store, self.presence_monitor, self.face_service
+            config,
+            self.store,
+            self.presence_monitor,
+            self.face_service,
+            self.gesture_service,
         )
         self.server: DashboardHTTPServer | None = None
         self.servers: list[DashboardHTTPServer] = []
@@ -793,6 +764,7 @@ class CameraDashboard:
             self.presence_monitor,
             self.face_service,
             self.native_camera,
+            self.gesture_service,
         )
         self.servers.append(self.server)
         thread = threading.Thread(
@@ -812,6 +784,7 @@ class CameraDashboard:
                     self.presence_monitor,
                     self.face_service,
                     self.native_camera,
+                    self.gesture_service,
                 )
                 self.servers.append(ipv6_server)
                 ipv6_thread = threading.Thread(
@@ -839,3 +812,4 @@ class CameraDashboard:
             server.server_close()
         self.presence_monitor.close()
         self.face_service.close()
+        self.gesture_service.close()
