@@ -55,7 +55,7 @@
       "enabled": true,
       "primary": true,
       "motion": {
-        "enabled": true,
+        "enabled": false,
         "sensitivity": 70,
         "min_area_percent": 0.8,
         "consecutive_frames": 3,
