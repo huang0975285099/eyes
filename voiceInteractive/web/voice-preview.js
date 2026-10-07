@@ -1,0 +1,938 @@
+    // 原型动效：待机时持续流动；用户授权麦克风后，声压包络驱动核心振幅。
+    const spaceCanvas = document.getElementById('space');
+    const spaceCtx = spaceCanvas.getContext('2d');
+    const coreCanvas = document.getElementById('core-canvas');
+    const coreCtx = coreCanvas.getContext('2d');
+    const core = document.querySelector('.core');
+    const micButton = document.getElementById('mic-button');
+    const micCaption = document.getElementById('mic-caption');
+    const voiceStatus = document.getElementById('voice-status');
+    const stage = document.querySelector('.stage');
+    const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+    let width, height, stageWidth, pixelRatio, stars = [], audioContext, analyser, micStream, audioData;
+    let targetLevel = 0, level = 0, listening = false, frame = 0, silenceSince = 0;
+    const shockwaves = []; // 发送冲击波：光轮从球体爆发，冲出屏幕边缘
+    let chatState='idle'; // idle | listening | thinking | speaking
+    let ttsAnalyser=null,ttsSource=null,ttsLive=false; // ttsLive：TTS 已开始播报（false=仍在生成，显示思考动画）
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    // fetch 超时封装：后端卡住时不会让 UI 永久停在“正在思考/聆听”
+    function fetchWithTimeout(url, opts, ms=30000){
+      const ctrl=new AbortController();
+      const id=setTimeout(()=>ctrl.abort(),ms);
+      return fetch(url,Object.assign({},opts,{signal:ctrl.signal})).finally(()=>clearTimeout(id));
+    }
+
+    function resize() {
+      const rect = stage.getBoundingClientRect(); pixelRatio = Math.min(devicePixelRatio || 1, 2); width = innerWidth; height = innerHeight; stageWidth=rect.width;
+      spaceCanvas.width = width * pixelRatio; spaceCanvas.height = height * pixelRatio;
+      spaceCtx.setTransform(pixelRatio,0,0,pixelRatio,0,0);
+      const coreRect = coreCanvas.getBoundingClientRect();
+      coreCanvas.width = Math.max(1, Math.round(coreRect.width * pixelRatio));
+      coreCanvas.height = Math.max(1, Math.round(coreRect.height * pixelRatio));
+      coreCtx.setTransform(pixelRatio,0,0,pixelRatio,0,0);
+      stars = Array.from({length:Math.min(750,Math.floor(width*height/2900))},(_,id)=>({id,x:Math.random()*width,y:Math.random()*height,vx:(Math.random()-.5)*.34,vy:(Math.random()-.5)*.34,r:Math.random()*1.9+.35,a:Math.random()*.5+.12,p:Math.random()*6.28,s:Math.random()*.13+.025,hue:Math.random()>.78?255:190,z:Math.random()}));
+    }
+
+    function sampleMicrophone() {
+      // AI 播报时由 TTS 音频驱动；唤醒词监听时由唤醒分析器驱动；会话中由麦克风驱动
+      const source = (chatState==='speaking' && ttsAnalyser) ? ttsAnalyser : (wakeListening && wakeAnalyser) ? wakeAnalyser : analyser;
+      if (!source) { targetLevel = 0; return; }
+      // 欢迎语音等场景麦克风未开启：按需创建采样缓冲（fftSize 均为 1024）
+      if (!audioData || audioData.length !== source.fftSize) audioData = new Uint8Array(source.fftSize);
+      source.getByteTimeDomainData(audioData);
+      let sum = 0;
+      for (let i=0;i<audioData.length;i++) { const n=(audioData[i]-128)/128; sum += n*n; }
+      const rms = Math.sqrt(sum/audioData.length);
+      // 提高灵敏度：更低噪声门 + 更大增益，正常说话即可明显驱动动效
+      targetLevel = clamp((rms-.008)*14,0,1);
+    }
+
+    const orbitLabels=[...document.querySelectorAll('.orbit-label')];
+    // 每个标签一颗独立“卫星”：各自轨道半径、速度、倾角与升交点方位，多平面交错环绕球体。
+    const satelliteParams=orbitLabels.map((_,index)=>({
+      radius:.76+((index*7)%4)*.11,                      // 0.76 / 0.87 / 0.98 / 1.09
+      speed:(.17+((index*5)%3)*.05)*(index%3===1?-1:1),  // 三档速度，部分逆行
+      phase:index*1.87,
+      incl:(.62+((index*3)%4)*.18)*(index%2?1:-1),       // 约 ±35° 到 ±66°，正负交错
+      node:index*.97+(index%2)*.55,                      // 轨道平面方位角铺开
+    }));
+    function drawCore(t) {
+      const cw=coreCanvas.clientWidth, ch=coreCanvas.clientHeight;
+      coreCtx.clearRect(0,0,cw,ch);
+      level += (targetLevel-level) * (targetLevel>level ? .3 : .08);
+      const idle = reduceMotion.matches ? .1 : .08*Math.sin(t*.0011)+.045*Math.sin(t*.0023+1.4);
+      // 音量驱动：会话聆听中（麦克风）或唤醒监听中（唤醒分析器）或 TTS 播报中（ttsAnalyser，欢迎语音同理）
+      const energy=(chatState==='thinking'||(chatState==='speaking'&&!ttsLive)) ? .5+.22*Math.sin(t*.006) : ((listening||wakeListening||(chatState==='speaking'&&ttsLive)) ? level : 0);
+      // 画布扩到 200% 后按比例缩小基准半径，球体视觉大小与旧版一致（.36×128% ≈ .2304×200%）
+      const base = Math.min(cw,ch)*.2304;
+      const time = t*.00045;
+      // 音量驱动的整体游走：改为画布内变换实现，避免 CSS transform 缩放整个画布位图导致内容越界截断
+      const motion=reduceMotion.matches?0:1;
+      const wander=base*.05*(1+energy*3.5);
+      const wx=motion*(Math.sin(t*.0011)*wander+Math.sin(t*.0031+2.1)*wander*.35);
+      const wy=motion*(Math.cos(t*.0014+.7)*wander+Math.sin(t*.0026+1.4)*wander*.5);
+      const grow=1+idle*.18+energy*.16;
+      const rot=(motion*(Math.sin(time*.42)*1.2+energy*4))*Math.PI/180;
+      const cx=cw/2+wx, cy=ch/2+wy;
+      // 软性限幅：极端峰值只被平滑压缩，永不越过画布边界（消灭截断直线）
+      const fitR=Math.min(cw,ch)*.5-base*.1;
+      const knee=fitR*.86, soft=(fitR-knee)||1;
+      const fit=v=>v<=knee?v:knee+soft*Math.tanh((v-knee)/soft);
+      coreCtx.save();
+      coreCtx.translate(cx,cy);coreCtx.rotate(rot);coreCtx.scale(grow,grow);coreCtx.translate(-cx,-cy);
+      // 土星式光轮：整圈先画（后侧被球体遮挡），球体完成后再补前侧弧线。
+      // 两根光环各自独立摆动：上下浮动、倾角晃动、平面进动与半径微呼吸，互不同步。
+      const ringSway=[
+        {rr:base*1.46, color:'rgba(137,231,255,', lw:1.4, glow:'#57d7ff',
+         bobAmp:base*.05, bobSpd:.9,  bobPh:0,
+         tilt:.38, tiltAmp:.09, tiltSpd:.7, tiltPh:1.2,
+         spinAmp:.16, spinSpd:.35, spinPh:.4},
+        {rr:base*1.64, color:'rgba(150,158,255,', lw:1.1, glow:'#8e88ff',
+         bobAmp:base*.07, bobSpd:.6,  bobPh:2.4,
+         tilt:.34, tiltAmp:.11, tiltSpd:.5, tiltPh:3.7,
+         spinAmp:.2, spinSpd:.25, spinPh:1.9},
+      ];
+      const drawRings=(front)=>{
+        for(const k of ringSway){
+          const cyr=cy+Math.sin(time*k.bobSpd+k.bobPh)*k.bobAmp*(1+energy*1.1);
+          const tilt=k.tilt+Math.sin(time*k.tiltSpd+k.tiltPh)*k.tiltAmp;
+          const rot=Math.sin(time*k.spinSpd+k.spinPh)*k.spinAmp;
+          const rr=k.rr*(1+Math.sin(time*.8+k.bobPh*2)*.015);
+          const alpha=front ? .34+energy*.2 : .11;
+          coreCtx.save();
+          coreCtx.lineWidth=k.lw;
+          coreCtx.strokeStyle=k.color+alpha.toFixed(3)+')';
+          coreCtx.shadowColor=k.glow;
+          coreCtx.shadowBlur=front ? 12+energy*20 : 6;
+          coreCtx.beginPath();
+          coreCtx.ellipse(cx,cyr,rr,rr*tilt,rot,0,front ? Math.PI : Math.PI*2);
+          coreCtx.stroke();
+          coreCtx.restore();
+        }
+      };
+      drawRings(false);
+      // Organic fluid body: a smooth asymmetric silhouette with drifting inner light currents.
+      const bodyPath=new Path2D();
+      const bodyPoints=180;
+      for(let i=0;i<bodyPoints;i++) {
+        const a=i/bodyPoints*Math.PI*2;
+        const slow=Math.sin(a*3+time*1.15)*.044+Math.cos(a*5-time*.82)*.03;
+        const fast=Math.sin(a*2-time*1.9+.8)*(.022+energy*.12)+Math.cos(a*7+time*1.4)*(.015+energy*.09);
+        const breath=Math.sin(a*4+time*2.6)*(.016+energy*.16);
+        const tremor=Math.sin(a*11+time*6.3)*(.004+energy*.07); // 音量驱动的高频颤动
+        const r=fit(base*(1+slow+fast+breath+tremor+idle+energy*.15));
+        const px=cx+Math.cos(a)*r,py=cy+Math.sin(a)*r;
+        if(i===0)bodyPath.moveTo(px,py);else bodyPath.lineTo(px,py);
+      }
+      bodyPath.closePath();
+      coreCtx.save();
+      coreCtx.shadowColor=`rgba(71,190,255,${.5+energy*.22})`;coreCtx.shadowBlur=28+energy*32;
+      const bodyFill=coreCtx.createRadialGradient(cx-base*.34+Math.sin(time)*base*.12,cy-base*.42,base*.04,cx,cy,base*1.08);
+      bodyFill.addColorStop(0,'rgba(172,246,255,.96)');bodyFill.addColorStop(.08,'rgba(91,225,255,.92)');bodyFill.addColorStop(.29,'rgba(43,142,255,.94)');bodyFill.addColorStop(.54,'rgba(54,83,231,.9)');bodyFill.addColorStop(.76,'rgba(41,45,151,.78)');bodyFill.addColorStop(1,'rgba(8,12,43,.22)');
+      coreCtx.fillStyle=bodyFill;coreCtx.fill(bodyPath);
+      coreCtx.shadowBlur=0;coreCtx.save();coreCtx.clip(bodyPath);coreCtx.globalCompositeOperation='screen';
+      for(let i=0;i<5;i++) {
+        const a=time*(i%2?-.42:.31)+i*2.38;
+        const hx=cx+Math.cos(a)*base*.52,hy=cy+Math.sin(a*1.23)*base*.48;
+        const light=coreCtx.createRadialGradient(hx,hy,0,hx,hy,base*(.25+(i%3)*.11+energy*.16));
+        const colors=['133,255,250','96,185,255','177,139,255'];
+        light.addColorStop(0,`rgba(${colors[i%3]},${.3+energy*.2})`);light.addColorStop(.45,`rgba(${colors[i%3]},${.12+energy*.1})`);light.addColorStop(1,'rgba(70,135,255,0)');
+        coreCtx.fillStyle=light;coreCtx.fillRect(cx-base*1.2,cy-base*1.2,base*2.4,base*2.4);
+      }
+      coreCtx.restore();
+      // Soft glass highlight and a quiet shifting contour keep the orb dimensional.
+      const sheen=coreCtx.createRadialGradient(cx-base*.38,cy-base*.48,0,cx-base*.18,cy-base*.2,base*.72);
+      sheen.addColorStop(0,'rgba(238,255,255,.26)');sheen.addColorStop(.18,'rgba(158,242,255,.1)');sheen.addColorStop(.55,'rgba(107,158,255,.02)');sheen.addColorStop(1,'rgba(100,130,255,0)');
+      coreCtx.fillStyle=sheen;coreCtx.fill(bodyPath);
+      coreCtx.lineWidth=.7;coreCtx.strokeStyle=`rgba(169,248,255,${.07+energy*.12})`;coreCtx.shadowColor='#73dfff';coreCtx.shadowBlur=7+energy*9;coreCtx.stroke(bodyPath);coreCtx.restore();
+      // Fine moving contour layers and surface particles.
+      for (let layer=3;layer>=0;layer--) {
+        const points=layer===0?170:100;
+        coreCtx.beginPath();
+        for(let i=0;i<=points;i++) {
+          const a=i/points*Math.PI*2;
+          const wave=Math.sin(a*5+time*2.4+layer)*(.04+energy*.2)+Math.sin(a*9-time*1.7+layer*2)*(.028+energy*.14)+Math.sin(a*3+time*.8)*(.04+energy*.09)+Math.cos(a*2-time*1.25+layer*.7)*(.024+energy*.08);
+          const radius=fit(base*(1+wave+idle+energy*.095)*(.72+layer*.105));
+          const x=cx+Math.cos(a+time*(layer%2?-.18:.13))*radius;
+          const y=cy+Math.sin(a+time*(layer%2?-.18:.13))*radius;
+          if(i===0) coreCtx.moveTo(x,y); else coreCtx.lineTo(x,y);
+        }
+        coreCtx.closePath();
+        const hue=layer%2?193:224;
+        coreCtx.fillStyle=`hsla(${hue},95%,${52+energy*20}%,${.018+energy*.022})`;
+        coreCtx.strokeStyle=`hsla(${hue},100%,${68+energy*15}%,${.045+energy*.1})`;
+        coreCtx.lineWidth=layer===0?1.15: .7; coreCtx.shadowBlur=9+energy*24; coreCtx.shadowColor=`hsla(${hue},100%,70%,${.2+energy*.35})`; coreCtx.fill();coreCtx.stroke();
+      }
+      drawRings(true);
+      coreCtx.shadowBlur=0;
+      const dots=190;
+      for(let i=0;i<dots;i++) {
+        const a=i*2.399963+time*(i%2?1:-.72);
+        const radial=Math.sqrt((i+.5)/dots)*base*(.97+Math.sin(time*2+i)*.018+energy*.11);
+        const wobble=Math.sin(a*4+time*4+i*.03)*(2+energy*8);
+        const x=cx+Math.cos(a)*radial+wobble*.22, y=cy+Math.sin(a)*radial+wobble;
+        const size=(i%13===0?1.45:.65)+(Math.sin(time*3+i)*.22)+energy*.9;
+        const alpha=.16+((Math.sin(time*2.4+i*1.73)+1)*.16)+energy*.36;
+        coreCtx.beginPath();coreCtx.fillStyle=`rgba(${i%5===0?'194,160,255':'139,239,255'},${alpha})`;coreCtx.shadowBlur=i%13===0?7:2;coreCtx.shadowColor='#69dfff';coreCtx.arc(x,y,size,0,Math.PI*2);coreCtx.fill();
+      }
+      coreCtx.restore();
+      // 思考态动画（含 TTS 生成等待）：能量光环——呼吸光晕 + 向外扩散的声呐环 + 螺旋上升光尘（柔和，无生硬光束）
+      if(chatState==='thinking'||(chatState==='speaking'&&!ttsLive)){
+        const tp=t*.001;
+        coreCtx.save();coreCtx.globalCompositeOperation='lighter';
+        const haloR=base*(1.28+.12*Math.sin(tp*2.4));
+        const halo=coreCtx.createRadialGradient(cx,cy,base*.5,cx,cy,haloR);
+        halo.addColorStop(0,`rgba(120,225,255,${(.15+.05*Math.sin(tp*2.4)).toFixed(3)})`);
+        halo.addColorStop(.6,'rgba(90,180,255,.06)');
+        halo.addColorStop(1,'rgba(90,180,255,0)');
+        coreCtx.fillStyle=halo;coreCtx.beginPath();coreCtx.arc(cx,cy,haloR,0,Math.PI*2);coreCtx.fill();
+        for(let i=0;i<3;i++){ // 三道声呐环，相位错开，越扩越淡
+          const p=((tp*.4)+i/3)%1;
+          const rr=base*(1.06+p*1.3);
+          coreCtx.beginPath();
+          coreCtx.strokeStyle=`rgba(140,230,255,${(.3*(1-p)*(1-p)).toFixed(3)})`;
+          coreCtx.lineWidth=1.6-p*1.2;
+          coreCtx.shadowColor='#69dfff';coreCtx.shadowBlur=10;
+          coreCtx.arc(cx,cy,rr,0,Math.PI*2);coreCtx.stroke();
+        }
+        for(let i=0;i<12;i++){ // 光尘绕球螺旋上升，仿佛能量被吸入
+          const p=((tp*(.2+(i%5)*.05))+i*.41)%1;
+          const ang=i*2.4+tp*.6;
+          const rr=base*(1.45-p*.5);
+          const mx=cx+Math.cos(ang)*rr;
+          const my=cy+Math.sin(ang)*rr*.78-p*base*.5;
+          coreCtx.beginPath();
+          coreCtx.fillStyle=`rgba(170,240,255,${(Math.sin(p*Math.PI)*.5).toFixed(3)})`;
+          coreCtx.shadowBlur=6;coreCtx.shadowColor='#8ae8ff';
+          coreCtx.arc(mx,my,1.4,0,Math.PI*2);coreCtx.fill();
+        }
+        coreCtx.restore();
+      }
+      core.style.filter=`brightness(${1+energy*.24}) saturate(${1+energy*.2})`;
+      const orbit=Math.min(core.clientWidth*1.434,stageWidth*.5-112);
+      const persp=1400; // 透视焦距：近处卫星放大、远处缩小
+      orbitLabels.forEach((label,index)=>{
+        const p=satelliteParams[index];
+        const angle=time*p.speed+p.phase;
+        const rr=orbit*p.radius;
+        // 轨道面内圆周位置
+        const ox=Math.cos(angle)*rr, oy=Math.sin(angle)*rr;
+        // 倾角（绕 x 轴）+ 升交点方位（绕屏幕法线）：每颗卫星一个独立轨道平面
+        const yTilt=oy*Math.cos(p.incl), z=oy*Math.sin(p.incl);
+        const x=ox*Math.cos(p.node)-yTilt*Math.sin(p.node);
+        const y=ox*Math.sin(p.node)+yTilt*Math.cos(p.node);
+        const perspScale=persp/(persp-z);
+        const depth=(z/(rr*Math.abs(Math.sin(p.incl)))+1)/2;
+        const scale=.58+depth*.52;
+        label.style.transform=`translate(-50%,-50%) translate3d(${(x*perspScale).toFixed(1)}px,${(y*perspScale).toFixed(1)}px,0) scale(${(scale*perspScale).toFixed(3)}) perspective(240px) rotateX(${(-Math.sign(p.speed)*(oy/rr)*12).toFixed(1)}deg)`;
+        label.style.opacity=String(.26+.74*depth);
+        label.style.filter=`blur(${((1-depth)*1.3).toFixed(2)}px)`;
+        label.style.zIndex=z>0?'4':'0';
+      });
+      const inputLevel=document.getElementById('input-level');
+      if(inputLevel) inputLevel.textContent=Math.round(level*100)+'%';
+      // 实时音量条：直观确认麦克风信号在驱动动效
+      if(listening){
+        checkVAD(level,t); // VAD 自动分段：停顿后截取一段送识别
+        const bars=Math.round(level*6);
+        micCaption.textContent='▮'.repeat(bars)+'▯'.repeat(6-bars);
+        // 信号诊断：高通滤波后 RMS 整体降低，阈值相应调低（0.003）
+        if(level<.003){
+          if(!silenceSince) silenceSince=t;
+          else if(t-silenceSince>8000) voiceStatus.textContent='✦  信号很弱：请检查 Windows 默认输入设备与浏览器麦克风权限';
+        } else silenceSince=0;
+      } else {
+        silenceSince=0;
+        if(wakeListening) checkWakeVAD(level,t); // 唤醒词 VAD：切段送 ASR，命中“老叶老叶”即进入会话
+      }
+    }
+
+    function drawSpace(t) {
+      spaceCtx.clearRect(0,0,width,height);
+      const cx=width/2,cy=height*.47,pulse=level*(listening?1:0);
+      // Multiple oversized light fields travel across the entire viewport.
+      spaceCtx.globalCompositeOperation='screen';
+      for(let i=0;i<5;i++) {
+        const driftX=cx+Math.sin(t*.00011+i*1.7)*width*.47;
+        const driftY=height*(.12+i*.18)+Math.cos(t*.00014+i*2.1)*height*.2;
+        const radius=Math.max(width,height)*(.19+((i%3)*.055)+pulse*.14);
+        const field=spaceCtx.createRadialGradient(driftX,driftY,0,driftX,driftY,radius);
+        field.addColorStop(0,`hsla(${i%2?190:225},100%,62%,${.038+pulse*.08})`);
+        field.addColorStop(.22,`hsla(${i%2?207:255},100%,58%,${.018+pulse*.055})`);
+        field.addColorStop(1,'rgba(0,0,0,0)');spaceCtx.fillStyle=field;spaceCtx.fillRect(0,0,width,height);
+      }
+      const wash=spaceCtx.createRadialGradient(cx+Math.sin(t*.00016)*width*.12,cy+Math.cos(t*.00013)*height*.1,4,cx,cy,Math.max(width,height)*.58);
+      wash.addColorStop(0,`rgba(31,102,210,${.024+pulse*.06})`);wash.addColorStop(.34,`rgba(34,206,231,${.012+pulse*.045})`);wash.addColorStop(.72,'rgba(83,67,191,.008)');wash.addColorStop(1,'rgba(0,0,0,0)');
+      spaceCtx.fillStyle=wash;spaceCtx.fillRect(0,0,width,height);
+      // Full-screen particle currents, layered at different speeds and depths.
+      for(let stream=0;stream<6;stream++) {
+        const phase=t*(.00012+stream*.000027)+stream*2.1;
+        spaceCtx.beginPath();
+        for(let x=-40;x<=width+40;x+=Math.max(12,width/95)) {
+          const progress=(x+40)/(width+80);
+          const y=height*(.12+stream*.15)+Math.sin(progress*8+phase)*height*.075+Math.sin(progress*17-phase*1.4)*height*.025;
+          if(x===-40)spaceCtx.moveTo(x,y);else spaceCtx.lineTo(x,y);
+        }
+        const flow=spaceCtx.createLinearGradient(0,0,width,height);
+        flow.addColorStop(0,'rgba(63,121,255,0)');flow.addColorStop(.25,`rgba(85,190,255,${.032+pulse*.13})`);flow.addColorStop(.53,`rgba(83,244,231,${.026+pulse*.11})`);flow.addColorStop(.8,`rgba(135,100,255,${.032+pulse*.13})`);flow.addColorStop(1,'rgba(63,121,255,0)');
+          spaceCtx.strokeStyle=flow;spaceCtx.lineWidth=1.3+stream*.35+pulse*2;spaceCtx.shadowBlur=20+pulse*22;spaceCtx.shadowColor='#42caff';spaceCtx.stroke();
+      }
+      spaceCtx.shadowBlur=0;spaceCtx.globalCompositeOperation='source-over';
+      if(pulse>.015) for(let i=0;i<4;i++) {
+        const radius=((t*.055+i*115)%Math.max(width,height)*.65);
+        spaceCtx.beginPath();spaceCtx.ellipse(cx,cy,radius,radius*.58,Math.sin(t*.0002+i)*.08,0,Math.PI*2);
+        spaceCtx.strokeStyle=`rgba(80,207,255,${pulse*(1-radius/(Math.max(width,height)*.72))*.13})`;spaceCtx.lineWidth=1+pulse*2;spaceCtx.stroke();
+      }
+      for(const p of stars) {
+        p.x+=p.vx*(.45+p.z*1.5+pulse*5);p.y+=p.vy*(.45+p.z*1.5+pulse*5);
+        p.x+=Math.sin(t*.0002+p.p)*(.08+p.z*.18);p.y+=Math.cos(t*.00017+p.p)*(.08+p.z*.18);
+        if(p.x<-8)p.x=width+8;if(p.x>width+8)p.x=-8;if(p.y<-8)p.y=height+8;if(p.y>height+8)p.y=-8;
+      }
+      const cellSize=130,grid=new Map();
+      for(const star of stars) { const gx=Math.floor(star.x/cellSize),gy=Math.floor(star.y/cellSize),key=`${gx},${gy}`;if(!grid.has(key))grid.set(key,[]);grid.get(key).push(star); }
+      for(const a of stars) {
+        const gx=Math.floor(a.x/cellSize),gy=Math.floor(a.y/cellSize);
+        for(let ox=-1;ox<=1;ox++)for(let oy=-1;oy<=1;oy++)for(const b of grid.get(`${gx+ox},${gy+oy}`)||[]) {
+          if(b.id<=a.id)continue;const dx=a.x-b.x,dy=a.y-b.y,dist=Math.hypot(dx,dy),limit=66+pulse*35;if(dist>=limit)continue;
+          const alpha=(1-dist/limit)*(.055+pulse*.14);spaceCtx.beginPath();spaceCtx.moveTo(a.x,a.y);spaceCtx.lineTo(b.x,b.y);spaceCtx.strokeStyle=`rgba(83,197,255,${alpha})`;spaceCtx.lineWidth=.5+pulse*.6;spaceCtx.stroke();
+        }
+      }
+      for(const p of stars) {
+        const flicker=.45+Math.sin(t*.001*p.s*8+p.p)*.3+Math.sin(t*.00031+p.p*2)*.11;
+        const radius=p.r*(1+pulse*1.2*(.5+.5*Math.sin(t*.002+p.p)));
+        spaceCtx.beginPath();spaceCtx.fillStyle=`hsla(${p.hue},98%,${76+pulse*18}%,${p.a*flicker+pulse*.24})`;spaceCtx.shadowBlur=(p.r>1.15?12:5)+pulse*18;spaceCtx.shadowColor=`hsla(${p.hue},100%,76%,1)`;
+        spaceCtx.arc(p.x+Math.sin(t*.0004+p.p)*2,p.y+Math.cos(t*.00032+p.p)*2,radius,0,Math.PI*2);spaceCtx.fill();
+      }
+      spaceCtx.shadowBlur=0;
+      // 发送冲击波：光轮从球心爆发，2.2 秒由慢到快冲出屏幕边缘后消散
+      if(shockwaves.length){
+        spaceCtx.save();spaceCtx.globalCompositeOperation='lighter';
+        const maxR=Math.hypot(width,height)*.62; // 超过对角线半径，确保冲出屏幕
+        for(let i=shockwaves.length-1;i>=0;i--){
+          const s=shockwaves[i],p=(t-s.start)/2200;
+          if(p>=1){shockwaves.splice(i,1);continue;}
+          const e=Math.pow(p,2.3); // 先蓄势后加速：从慢到快冲出屏幕
+          const r=70+(maxR-70)*e;
+          const fade=Math.pow(1-p,1.2);
+          spaceCtx.beginPath(); // 主光轮：粗亮边+辉光
+          spaceCtx.arc(s.cx,s.cy,r,0,Math.PI*2);
+          spaceCtx.strokeStyle=`rgba(150,238,255,${(.62*fade).toFixed(3)})`;
+          spaceCtx.lineWidth=4+13*fade;
+          spaceCtx.shadowColor='#6fe0ff';spaceCtx.shadowBlur=34*fade+10;
+          spaceCtx.stroke();
+          if(p>.08){ // 次级光轮：跟随其后，稍细更淡
+            const p2=Math.max(0,p-.09),e2=Math.pow(p2,2.3),r2=70+(maxR-70)*e2;
+            spaceCtx.beginPath();
+            spaceCtx.arc(s.cx,s.cy,r2,0,Math.PI*2);
+            spaceCtx.strokeStyle=`rgba(120,170,255,${(.3*fade).toFixed(3)})`;
+            spaceCtx.lineWidth=2.2+7*fade;
+            spaceCtx.stroke();
+          }
+        }
+        spaceCtx.restore();
+      }
+    }
+
+    function animate(t) {
+      // 麦克风采样不受系统“减少动态效果”设置影响（否则该设置开启时永远采不到音量）
+      sampleMicrophone();
+      drawSpace(t); drawCore(t); frame=requestAnimationFrame(animate);
+    }
+
+    // 语音对话闭环（本地 Qwen3-ASR + Ollama + edge-tts）：
+    // 说话实时上屏 → 停顿 1.4s 自动发送 → 思考动画 → 回答打字机上屏 → 语音播报（球体随 AI 音量起伏）
+    const replyText=document.getElementById('reply-text');
+    const aiText=document.getElementById('ai-text');
+    const replyBox=document.querySelector('.reply');
+    // 文字越多字号越小：超过 60 字逐级缩小，避免长回答盖住球体
+    function fitReplyFont(){
+      const len=(replyText.textContent+aiText.textContent).length;
+      const base=Math.min(27,Math.max(18,innerWidth*.0225)); // 对应 CSS clamp(18px,2.25vw,27px)
+      let scale=1;
+      if(len>160)scale=.68;else if(len>110)scale=.78;else if(len>60)scale=.88;
+      replyBox.style.fontSize=(base*scale).toFixed(1)+'px';
+    }
+    let mediaRecorder=null,recordedChunks=[],asrBusy=false,asrQueue=[];
+    let segSilenceStart=0,hasVoiceInSeg=false,segVoiceStart=0;
+    let typeTimer=null; // 打字机定时器（外层引用，便于结束会话时清除）
+    let conversationHistory=[],turnActive=false,lastVoiceAt=0,asrContext='';
+    function startRecognition(){
+      replyText.textContent='';aiText.textContent='';
+      replyBox.style.fontSize=''; // 恢复默认字号
+      recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
+      conversationHistory=[];turnActive=false;asrContext='';
+      chatState='listening';
+      preloadSendCue(); // 提前加载发送音效
+      preloadDoneCue(); // 提前加载回答完毕音效
+      startNewRecorder();
+    }
+    function startNewRecorder(){
+      if(!micStream){mediaRecorder=null;return;}
+      recordedChunks.length=0;segSilenceStart=0;hasVoiceInSeg=false;
+      try{
+        const rec=new MediaRecorder(micStream);
+        rec.ondataavailable=e=>{if(e.data.size>0)recordedChunks.push(e.data);};
+        rec.onstop=()=>{
+          const chunks=recordedChunks.splice(0,recordedChunks.length);
+          if(chunks.length>0){
+            const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
+            asrQueue.push(blob);processASRQueue();
+          }
+          if(listening&&chatState==='listening')startNewRecorder();
+        };
+        rec.start();mediaRecorder=rec;
+      }catch(_){mediaRecorder=null;}
+    }
+    async function processASRQueue(){
+      if(asrBusy||asrQueue.length===0)return;
+      asrBusy=true;
+      const blob=asrQueue.shift();
+      let goodbye=false;
+      try{
+        // context=已识别前文，帮助分段边界断词连贯（qwen-asr 原生支持）
+        const resp=await fetchWithTimeout('http://localhost:8770/transcribe?context='+encodeURIComponent(asrContext.slice(-200)),{method:'POST',body:blob,headers:{'Content-Type':blob.type||'audio/webm'}},30000);
+        const data=await resp.json();
+        if(data.text&&chatState==='listening'){ // 结束会话后 chatState='idle'，丢弃残留识别结果，不再写屏
+          if(!turnActive){replyText.textContent='';aiText.textContent='';turnActive=true;} // 新一轮清空上一轮内容
+          replyText.textContent+=data.text; // 追加到现有文字，光标跟随
+          asrContext+=data.text;
+          fitReplyFont();
+          if(isGoodbye(data.text))goodbye=true; // “再见”照常上屏，稍后走告别流程（发送→AI告别→结束）
+        }
+        if(data.error&&chatState==='listening')voiceStatus.textContent='✦ 识别失败：'+data.error;
+        else if(chatState==='listening')voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
+      }catch(error){
+        if(chatState==='listening')voiceStatus.textContent='✦ 识别失败：'+(error.name==='AbortError'?'识别超时，请重说':error.message);
+      }
+      asrBusy=false; // 识别完成不重置发送计时：lastVoiceAt 只由说话声音更新，文字出现后很快自动发送
+      if(goodbye){sendGoodbye();return;} // “再见”走告别流程：发送音效+动画 → AI 告别 → 结束会话
+      if(asrQueue.length>0)processASRQueue();
+    }
+    // VAD 流水线（抗远处杂音）：触发门槛 0.055 + 连续 160ms 确认才算真语音；
+    // 远处声音音量小且断续，过不了确认；杂音也不更新发送计时（否则对话永不发出）
+    const VAD_OPEN=.15, VAD_CONFIRM_MS=160;
+    let voiceCandStart=0;
+    function checkVAD(level,t){
+      if(chatState!=='listening')return;
+      if(level>VAD_OPEN){
+        if(!voiceCandStart)voiceCandStart=t;
+        if(t-voiceCandStart>VAD_CONFIRM_MS){ // 持续确认：短促杂音被忽略
+          hasVoiceInSeg=true;segSilenceStart=0;lastVoiceAt=t;
+          if(!segVoiceStart)segVoiceStart=t;
+        }
+      } else {
+        voiceCandStart=0;
+        if(hasVoiceInSeg){
+          if(!segSilenceStart)segSilenceStart=t;
+          else if(t-segSilenceStart>300){segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;cutSegment();}
+        }
+      }
+      // 滚动切分：一段连续说话超过 2.5s 就切走送识别，说话期间文字持续上屏
+      if(hasVoiceInSeg&&segVoiceStart&&t-segVoiceStart>2500){segVoiceStart=0;segSilenceStart=0;hasVoiceInSeg=false;cutSegment();}
+      if(turnActive&&t-lastVoiceAt>1400&&!asrBusy&&asrQueue.length===0)autoSendChat();
+    }
+    function cutSegment(){try{mediaRecorder&&mediaRecorder.state==='recording'&&mediaRecorder.stop();}catch(_){}}
+    // 状态提示音：Web Audio 振荡器合成，轻柔不喧宾夺主
+    function playCue(kind){
+      if(!audioContext||audioContext.state==='closed')return;
+      if(audioContext.state==='suspended')audioContext.resume();
+      const now=audioContext.currentTime;
+      const master=audioContext.createGain();master.gain.value=.14;master.connect(audioContext.destination);
+      const note=(freq,start,dur,peak)=>{
+        const osc=audioContext.createOscillator(),g=audioContext.createGain();
+        osc.type='sine';osc.frequency.value=freq;
+        g.gain.setValueAtTime(0,now+start);
+        g.gain.linearRampToValueAtTime(peak,now+start+.05);
+        g.gain.exponentialRampToValueAtTime(.001,now+start+dur);
+        osc.connect(g);g.connect(master);
+        osc.start(now+start);osc.stop(now+start+dur+.05);
+      };
+      if(kind==='think'){note(523.25,0,.5,.4);note(783.99,.14,.6,.3);}    // 思考：柔和上行双音
+      else if(kind==='reply'){note(659.25,0,.7,.42);note(987.77,.1,.8,.22);} // 回答：温暖提示音
+      else if(kind==='done'){note(392,0,.55,.28);note(523.25,.12,.6,.18);} // 完毕：低音轻点，提示可以继续说话
+    }
+    // 发送音效：预加载 send.mp3（比合成音更有质感），未就绪时退回合成音
+    let sendCueBuffer=null;
+    async function preloadSendCue(){
+      if(sendCueBuffer||!audioContext||audioContext.state==='closed')return;
+      try{
+        const resp=await fetch('/send.mp3');
+        if(!resp.ok)return;
+        sendCueBuffer=await audioContext.decodeAudioData(await resp.arrayBuffer());
+      }catch(_){sendCueBuffer=null;}
+    }
+    // 唤醒确认语“我在。”：页面加载时预取音频字节，唤醒时用主音频上下文即时解码播放
+    let ackArrayBuffer=null; // null=未取，false=取失败，ArrayBuffer=就绪
+    async function preloadAck(){
+      if(ackArrayBuffer!==null)return;
+      try{
+        const resp=await fetchWithTimeout('http://localhost:8770/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'我在。'})},30000);
+        ackArrayBuffer=resp.ok?await resp.arrayBuffer():false;
+      }catch(_){ackArrayBuffer=false;}
+    }
+    function playSendCue(){
+      if(!sendCueBuffer||!audioContext||audioContext.state==='closed'){playCue('think');return;}
+      if(audioContext.state==='suspended')audioContext.resume();
+      const src=audioContext.createBufferSource();src.buffer=sendCueBuffer;
+      const g=audioContext.createGain();g.gain.value=.6;
+      src.connect(g);g.connect(audioContext.destination);src.start();
+    }
+    // 回答完毕音效：预加载 done.mp3，未就绪时退回合成音
+    let doneCueBuffer=null;
+    async function preloadDoneCue(){
+      if(doneCueBuffer||!audioContext||audioContext.state==='closed')return;
+      try{
+        const resp=await fetch('/done.mp3');
+        if(!resp.ok)return;
+        doneCueBuffer=await audioContext.decodeAudioData(await resp.arrayBuffer());
+      }catch(_){doneCueBuffer=null;}
+    }
+    function playDoneCue(){
+      if(!doneCueBuffer||!audioContext||audioContext.state==='closed'){playCue('done');return;}
+      if(audioContext.state==='suspended')audioContext.resume();
+      const src=audioContext.createBufferSource();src.buffer=doneCueBuffer;
+      const g=audioContext.createGain();g.gain.value=.1; // 调小 50%（原 .6）
+      src.connect(g);g.connect(audioContext.destination);src.start();
+    }
+    function spawnShockwave(){
+      const rect=coreCanvas.getBoundingClientRect(); // 光轮从球体实际屏幕位置爆发
+      shockwaves.push({cx:rect.left+rect.width/2,cy:rect.top+rect.height/2,start:performance.now()});
+    }
+    async function autoSendChat(){
+      chatState='thinking';turnActive=false;playSendCue();spawnShockwave();
+      const question=replyText.textContent.trim();
+      if(!question){chatState='listening';return;}
+      if(mediaRecorder){const r=mediaRecorder;mediaRecorder=null;r.onstop=null;try{r.stop();}catch(_){}} // 暂停录音，防止播报被录入
+      voiceStatus.textContent='✦ 正在思考…';
+      conversationHistory.push({role:'user',content:question});
+      if(conversationHistory.length>12)conversationHistory.splice(0,conversationHistory.length-12);
+      asrContext=''; // 新一轮提问的识别上下文独立
+      try{
+        const resp=await fetchWithTimeout('http://localhost:8770/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:conversationHistory})},60000);
+        const data=await resp.json();
+        if(chatState!=='thinking')return; // 会话已结束，丢弃迟到的回答，避免污染已重置的界面
+        if(!data.text||data.error)throw new Error(data.error||'模型没有返回回答');
+        // 限制历史单条内容长度，避免超长回复撑大后续上下文
+        const ans=data.text.length>2000?data.text.slice(0,2000)+'…':data.text;
+        conversationHistory.push({role:'assistant',content:ans});
+        await speakAnswer(data.text);
+      }catch(error){
+        if(chatState==='idle')return; // 已结束会话：不恢复、不提示，保持待机态
+        voiceStatus.textContent='✦ 回答失败：'+(error.name==='AbortError'?'模型响应超时':error.message);
+        chatState='listening';turnActive=false;asrContext='';startNewRecorder();
+      }
+    }
+    async function speakAnswer(text, endAfter){
+      chatState='speaking';voiceStatus.textContent='✦ 正在回答…';
+      let buffer=null;
+      try{ // 获取语音（失败则纯文字展示）
+        const resp=await fetchWithTimeout('http://localhost:8770/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})},30000);
+        if(resp.ok){
+          const arr=await resp.arrayBuffer();
+          if(audioContext&&audioContext.state!=='closed')buffer=await audioContext.decodeAudioData(arr);
+        }
+      }catch(_){buffer=null;}
+      const duration=buffer?buffer.duration:Math.max(2,text.length/4);
+      const start=performance.now();
+      typeTimer=setInterval(()=>{ // 打字机与语音同步
+        const p=Math.min(1,(performance.now()-start)/(duration*1000));
+        aiText.textContent=text.slice(0,Math.round(text.length*p));
+        fitReplyFont();
+      },80);
+      try{
+        if(buffer&&audioContext&&audioContext.state!=='closed'){
+          if(audioContext.state==='suspended')await audioContext.resume();
+          playCue('reply');
+          ttsAnalyser=audioContext.createAnalyser();ttsAnalyser.fftSize=1024;ttsAnalyser.smoothingTimeConstant=.78;
+          ttsSource=audioContext.createBufferSource();ttsSource.buffer=buffer;
+          ttsSource.connect(ttsAnalyser);ttsAnalyser.connect(audioContext.destination);
+          ttsLive=true; // TTS 开始播报：思考动画退场，球体改由 AI 音频驱动
+          try{
+            await new Promise((res,rej)=>{ttsSource.onended=res;ttsSource.onerror=()=>rej(new Error('tts play failed'));ttsSource.start();});
+          }catch(_){ /* TTS 播放出错：文字已由打字机显示，按纯文字完成，不阻断对话 */ }
+          ttsSource=null;ttsAnalyser=null;ttsLive=false;
+        }else{
+          ttsLive=true; // 纯文字模式：打字开始即视为“回答中”，停止思考动画
+          await new Promise(res=>setTimeout(res,duration*1000));
+          ttsLive=false;
+        }
+      }finally{
+        clearInterval(typeTimer);typeTimer=null;aiText.textContent=text; // 无论正常结束还是抛错都收尾，杜绝定时器泄漏
+      }
+      if(!listening){chatState='idle';return;}
+      if(endAfter)return; // 告别场景：播完即返回，由调用方结束会话（不回聆听、不重启录音）
+      playDoneCue();
+      voiceStatus.textContent='✦ 回答完毕 · 继续聆听';
+      chatState='listening';startNewRecorder();
+    }
+    // 唤醒确认语：唤醒后先回一句（如“我在。”），球体随声起伏，播完进入聆听
+    async function speakWakeAck(text){
+      chatState='speaking';voiceStatus.textContent='✦  我在';
+      replyText.textContent='';aiText.textContent=text;fitReplyFont();
+      // 优先用预取的音频字节解码（即时），否则现取现解码
+      let buffer=null;
+      if(ackArrayBuffer&&audioContext&&audioContext.state!=='closed'){
+        try{buffer=await audioContext.decodeAudioData(ackArrayBuffer.slice(0));}catch(_){buffer=null;}
+      }
+      if(!buffer){
+        try{
+          const resp=await fetchWithTimeout('http://localhost:8770/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})},30000);
+          if(resp.ok){const arr=await resp.arrayBuffer();if(audioContext&&audioContext.state!=='closed')buffer=await audioContext.decodeAudioData(arr);}
+        }catch(_){buffer=null;}
+      }
+      if(buffer&&audioContext&&audioContext.state!=='closed'){
+        if(audioContext.state==='suspended')await audioContext.resume();
+        ttsAnalyser=audioContext.createAnalyser();ttsAnalyser.fftSize=1024;ttsAnalyser.smoothingTimeConstant=.78;
+        ttsSource=audioContext.createBufferSource();ttsSource.buffer=buffer;
+        ttsSource.connect(ttsAnalyser);ttsAnalyser.connect(audioContext.destination);
+        ttsLive=true; // 球体改由确认语音频驱动
+        try{await new Promise((res,rej)=>{ttsSource.onended=res;ttsSource.onerror=()=>rej(new Error('ack play failed'));ttsSource.start();});}catch(_){}
+        ttsSource=null;ttsAnalyser=null;ttsLive=false;
+      }else{
+        ttsLive=true;await new Promise(res=>setTimeout(res,800));ttsLive=false; // 无音频：短暂停顿后继续
+      }
+      if(!listening){chatState='idle';return;} // 期间点了结束会话
+      // 进入聆听：重置会话状态，保留“我在。”文字直到用户开口（首条 ASR 结果会清空它）
+      recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
+      conversationHistory=[];turnActive=false;asrContext='';
+      chatState='listening';voiceStatus.textContent='✦  请说';
+      preloadSendCue();preloadDoneCue();startNewRecorder();
+    }
+    async function stopRecognition(){
+      if(!mediaRecorder)return;
+      const rec=mediaRecorder;mediaRecorder=null;
+      await new Promise(resolve=>{
+        rec.onstop=()=>{
+          const chunks=recordedChunks.splice(0,recordedChunks.length);
+          if(chunks.length>0){
+            const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
+            asrQueue.push(blob);processASRQueue();
+          }
+          resolve();
+        };
+        try{rec.stop();}catch(_){resolve();}
+      });
+    }
+
+    // ===== 唤醒词“老叶老叶”：idle 态持续监听麦克风，命中后自动进入会话 =====
+    let wakeStream=null,wakeCtx=null,wakeAnalyser=null,wakeData=null;
+    let wakeRecorder=null,wakeChunks=[],wakeAsrBusy=false,wakeQueue=[];
+    let wakeListening=false,wakeCandStart=0,wakeSilence=0,wakeVoice=false,wakeVoiceStart=0;
+    // 唤醒词判定：清理标点空白后，“老叶”出现 ≥2 次即命中（兼容“老叶老叶”/“老叶 老叶”等）
+    function isWakeWord(text){
+      const clean=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
+      return (clean.match(/老叶/g)||[]).length>=2;
+    }
+    // 退出词“再见”判定：清理标点空白后包含“再见”即命中（兼容“再见”/“好的再见”/“再见啦”等）
+    function isGoodbye(text){
+      return /再见/.test(String(text).replace(/[\s，,。.！!？?、~～]/g,''));
+    }
+    async function startWakeWord(){
+      if(wakeListening||listening)return;
+      try{
+        wakeStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});
+        wakeCtx=new AudioContext();
+        if(wakeCtx.state==='suspended')await wakeCtx.resume();
+        const src=wakeCtx.createMediaStreamSource(wakeStream);
+        const hp=wakeCtx.createBiquadFilter();hp.type='highpass';hp.frequency.value=150;hp.Q.value=.7;
+        wakeAnalyser=wakeCtx.createAnalyser();wakeAnalyser.fftSize=1024;wakeAnalyser.smoothingTimeConstant=.78;
+        src.connect(hp);hp.connect(wakeAnalyser);wakeData=new Uint8Array(wakeAnalyser.fftSize);
+        wakeListening=true;
+        if(chatState==='idle'){voiceStatus.textContent='✦  说出“老叶老叶”唤醒我';micCaption.textContent='等待唤醒';}
+        startWakeRecorder();
+      }catch(_){
+        wakeListening=false;
+        voiceStatus.textContent='✦  唤醒需要麦克风权限，也可点击“开始会话”';
+      }
+    }
+    function startWakeRecorder(){
+      if(!wakeStream||!wakeListening){wakeRecorder=null;return;}
+      wakeChunks.length=0;
+      try{
+        const rec=new MediaRecorder(wakeStream);
+        rec.ondataavailable=e=>{if(e.data.size>0)wakeChunks.push(e.data);};
+        rec.onstop=()=>{
+          if(!wakeListening){wakeChunks.length=0;return;} // 已停止，丢弃残留
+          const chunks=wakeChunks.splice(0,wakeChunks.length);
+          if(chunks.length>0){
+            const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
+            wakeQueue.push(blob);processWakeASR();
+          }
+          startWakeRecorder(); // 连续分段录制
+        };
+        rec.start();wakeRecorder=rec;
+      }catch(_){wakeRecorder=null;}
+    }
+    function cutWakeSegment(){try{wakeRecorder&&wakeRecorder.state==='recording'&&wakeRecorder.stop();}catch(_){}}
+    async function processWakeASR(){
+      if(wakeAsrBusy||wakeQueue.length===0||!wakeListening)return;
+      wakeAsrBusy=true;
+      const blob=wakeQueue.shift();
+      try{
+        const resp=await fetchWithTimeout('http://localhost:8770/transcribe',{method:'POST',body:blob,headers:{'Content-Type':blob.type||'audio/webm'}},30000);
+        const data=await resp.json();
+        if(data.text&&isWakeWord(data.text)){
+          wakeListening=false; // 立即停掉监听，防止重复触发
+          voiceStatus.textContent='✦  唤醒成功 · 进入会话';
+          startMicrophone('我在。'); // 内部会 await stopWakeWord，并先回“我在。”再进入聆听
+        }
+      }catch(_){}
+      wakeAsrBusy=false;
+      if(wakeQueue.length>0&&wakeListening)processWakeASR();
+    }
+    // 唤醒 VAD：复用对话 VAD 的门槛与确认机制，切段送 ASR
+    function checkWakeVAD(level,t){
+      if(!wakeListening)return;
+      if(level>VAD_OPEN){
+        if(!wakeCandStart)wakeCandStart=t;
+        if(t-wakeCandStart>VAD_CONFIRM_MS){wakeVoice=true;wakeSilence=0;wakeVoiceStart=wakeVoiceStart||t;}
+      }else{
+        wakeCandStart=0;
+        if(wakeVoice){
+          if(!wakeSilence)wakeSilence=t;
+          else if(t-wakeSilence>300){wakeSilence=0;wakeVoice=false;wakeVoiceStart=0;cutWakeSegment();}
+        }
+      }
+      if(wakeVoice&&wakeVoiceStart&&t-wakeVoiceStart>2500){wakeVoiceStart=0;wakeSilence=0;wakeVoice=false;cutWakeSegment();}
+    }
+    async function stopWakeWord(){
+      wakeListening=false;
+      try{wakeRecorder&&wakeRecorder.state==='recording'&&wakeRecorder.stop();}catch(_){}
+      wakeRecorder=null;
+      wakeStream?.getTracks().forEach(track=>track.stop());wakeStream=null;
+      await wakeCtx?.close();wakeCtx=null;wakeAnalyser=null;wakeData=null;
+      wakeQueue.length=0;wakeAsrBusy=false;
+      wakeCandStart=0;wakeSilence=0;wakeVoice=false;wakeVoiceStart=0;
+      micCaption.textContent='开始会话';
+    }
+
+    async function startMicrophone(ack) {
+      if (listening) return;
+      try {
+        stopGreeting(); // 欢迎语音还在播时先停掉，避免被麦克风录进去
+        await stopWakeWord(); // 停掉唤醒词监听，释放其麦克风资源
+        micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});
+        audioContext=new AudioContext();
+        if(audioContext.state==='suspended') await audioContext.resume(); // 浏览器自动播放策略可能挂起上下文
+        analyser=audioContext.createAnalyser();analyser.fftSize=1024;analyser.smoothingTimeConstant=.78;
+        // 高通滤波器：切除 150Hz 以下的低频（远处人声经距离衰减后只剩低频闷声，近处说话不受影响）
+        const highpass=audioContext.createBiquadFilter();highpass.type='highpass';highpass.frequency.value=150;highpass.Q.value=.7;
+        audioContext.createMediaStreamSource(micStream).connect(highpass);highpass.connect(analyser);audioData=new Uint8Array(analyser.fftSize);listening=true;
+        micCaption.textContent='麦克风监听中';micButton.setAttribute('aria-label','麦克风输入中');
+        if(ack){
+          await speakWakeAck(ack); // 唤醒确认：先回一句“我在。”再进入聆听
+        }else{
+          voiceStatus.textContent='✦  正在聆听 · 说出的话将实时呈现';
+          startRecognition();
+        }
+      } catch(error) {
+        const message=error.name==='NotAllowedError'?'请在浏览器地址栏允许麦克风权限后重试':error.name==='NotFoundError'?'未检测到可用麦克风':'麦克风暂不可用，请检查浏览器权限或设备';
+        voiceStatus.textContent='✦  '+message;
+        micCaption.textContent='点击重试';
+      }
+    }
+
+    async function stopMicrophone() {
+      listening=false;targetLevel=0;chatState='idle';
+      try{ttsSource&&ttsSource.stop();}catch(_){} // 停止 AI 播报（会触发 speakAnswer 的 onended → clearInterval）
+      if(typeTimer){clearInterval(typeTimer);typeTimer=null;} // 兜底：确保打字机停止
+      await stopRecognition(); // 先停止录音并识别（需在 micStream 仍存活时完成数据收集）
+      micStream?.getTracks().forEach(track=>track.stop());micStream=null;
+      await audioContext?.close();audioContext=null;analyser=null;audioData=null;
+      ttsAnalyser=null;ttsSource=null;ttsLive=false;
+      asrQueue.length=0;asrBusy=false; // 丢弃队列里待识别的音频，防止结束后还有文字写回
+      micCaption.textContent='开始会话';micButton.setAttribute('aria-label','开启麦克风');
+    }
+    // 结束会话：界面恢复到初始状态（文字、字号、状态）
+    function resetUI(){
+      if(typeTimer){clearInterval(typeTimer);typeTimer=null;}
+      replyText.innerHTML='夜色已经降临，所有的设备都准备好了。<br>你想先从什么开始？';
+      aiText.textContent='';
+      replyBox.style.fontSize='';
+      voiceStatus.textContent='✦ 待机中';
+      conversationHistory=[];asrContext='';turnActive=false;
+      shockwaves.length=0;
+    }
+
+    micButton.addEventListener('click',()=>startMicrophone()); // 箭头包裹：避免 click 事件被当作 ack 参数传入
+    // 语音“再见”告别流程：发送音效+冲击波 → 思考动画 → AI 回答固定告别语 → 结束会话
+    async function sendGoodbye(){
+      chatState='thinking';turnActive=false;
+      playSendCue();spawnShockwave(); // 与正常提问一致的发送音效与冲击波动画
+      if(mediaRecorder){const r=mediaRecorder;mediaRecorder=null;r.onstop=null;try{r.stop();}catch(_){}} // 暂停录音，防止 AI 告别语被录入
+      voiceStatus.textContent='✦ 正在思考…';
+      try{
+        await speakAnswer('好的，下次见，有需要随时喊我！',true); // 告别语：播完即返回，不回聆听
+      }catch(_){}
+      await endByVoice(); // AI 告别播完后结束会话、恢复界面、回到唤醒监听
+    }
+    // 语音“再见”结束会话：等同点“结束会话”按钮（停录音识别→恢复界面→回唤醒监听）
+    async function endByVoice(){
+      if(!listening)return;
+      voiceStatus.textContent='✦  再见 · 结束会话中…';
+      await stopMicrophone();
+      resetUI();
+      startWakeWord(); // 结束后回到唤醒词监听，可再次“老叶老叶”唤醒
+    }
+
+    document.getElementById('end-button').addEventListener('click',async()=>{
+      if (!listening) return;
+      voiceStatus.textContent='✦ 正在结束并识别…';
+      await stopMicrophone();
+      resetUI();
+      startWakeWord(); // 结束会话后回到唤醒词监听，可再次“老叶老叶”唤醒
+    });
+
+    // 开场欢迎语音：页面加载即播放 test_chinese.wav，球体随语音起伏；
+    // 浏览器拦截自动播放时，等待首次点击再播
+    let greetBuffer=null,greetCtx=null;
+    function stopGreeting(){
+      if(ttsSource&&!analyser){try{ttsSource.stop();}catch(_){}} // 停掉属于欢迎语音的播报源
+      if(greetCtx){try{greetCtx.close();}catch(_){}}
+      greetCtx=null;greetBuffer=null;
+      if(!analyser){ttsAnalyser=null;ttsSource=null;ttsLive=false;if(chatState==='speaking')chatState='idle';}
+    }
+    async function playGreeting(){
+      if(!greetBuffer||!greetCtx)return;
+      try{if(greetCtx.state==='suspended')await greetCtx.resume();}catch(_){}
+      if(greetCtx.state!=='running')return; // 自动播放被拦截，等首次点击
+      chatState='speaking';ttsLive=true; // 复用 AI 播报通路：球体随音量起伏
+      const an=greetCtx.createAnalyser();an.fftSize=1024;an.smoothingTimeConstant=.78;
+      const src=greetCtx.createBufferSource();src.buffer=greetBuffer;
+      src.connect(an);an.connect(greetCtx.destination);
+      ttsAnalyser=an;ttsSource=src;
+      await new Promise(res=>{src.onended=res;src.start();});
+      ttsAnalyser=null;ttsSource=null;ttsLive=false;
+      greetBuffer=null;
+      if(chatState==='speaking')chatState='idle';
+    }
+    (async()=>{
+      try{
+        greetCtx=new (window.AudioContext||window.webkitAudioContext)();
+        const resp=await fetch('/test_chinese.wav');
+        if(resp.ok){greetBuffer=await greetCtx.decodeAudioData(await resp.arrayBuffer());await playGreeting();}
+      }catch(_){greetCtx=null;greetBuffer=null;}
+    })();
+    preloadAck(); // 预取唤醒确认语“我在。”音频字节，唤醒时即时解码播放
+    // 首次交互：恢复欢迎语（如被自动播放拦截）→ 启动唤醒词监听
+    document.addEventListener('pointerdown',async(e)=>{
+      if(e.target.closest('#mic-button')||e.target.closest('#end-button'))return; // 按钮各自处理
+      if(greetBuffer&&greetCtx&&greetCtx.state!=='running')await playGreeting();
+      if(!listening&&!wakeListening)startWakeWord();
+    });
+    resize();addEventListener('resize',resize);document.addEventListener('visibilitychange',()=>{if(!document.hidden) resize()});
+    frame=requestAnimationFrame(animate);
+
+    // ===== 科技感摄像头窗口：点击任意卫星标签弹出所有 USB 摄像头（每个设备一个窗口，随机分布） =====
+    let camSlots=[]; // [{deviceId, win, stream}]
+    async function enumerateVideoDevices(){
+      // 首次需先获取权限，enumerateDevices 才能拿到 label 与稳定 deviceId
+      let probe=null;
+      try{ probe=await navigator.mediaDevices.getUserMedia({video:true}); }catch(_){ return []; }
+      probe.getTracks().forEach(t=>t.stop());
+      try{
+        const devices=await navigator.mediaDevices.enumerateDevices();
+        const vids=devices.filter(d=>d.kind==='videoinput');
+        return vids.length?vids:[{deviceId:'',label:'摄像头'}]; // 有权限但枚举为空时回退
+      }catch(_){ return []; }
+    }
+    function attachCamDrag(win){
+      const head=win.querySelector('.cam-head');
+      let dragging=false, sx=0, sy=0, ox=0, oy=0;
+      head.addEventListener('pointerdown',(e)=>{
+        if(e.target.closest('.cam-close'))return; // 点关闭按钮不触发拖动
+        dragging=true; sx=e.clientX; sy=e.clientY;
+        const rect=win.getBoundingClientRect(); ox=rect.left; oy=rect.top;
+        win.classList.add('dragging'); head.setPointerCapture(e.pointerId);
+      });
+      head.addEventListener('pointermove',(e)=>{
+        if(!dragging)return;
+        const nx=ox+(e.clientX-sx), ny=oy+(e.clientY-sy);
+        const w=win.offsetWidth, h=win.offsetHeight;
+        win.style.left=Math.max(0,Math.min(innerWidth-w,nx))+'px'; // 限制不拖出视口
+        win.style.top=Math.max(0,Math.min(innerHeight-h,ny))+'px';
+      });
+      const endDrag=(e)=>{ if(!dragging)return; dragging=false; win.classList.remove('dragging'); try{head.releasePointerCapture(e.pointerId);}catch(_){} };
+      head.addEventListener('pointerup',endDrag);
+      head.addEventListener('pointercancel',endDrag);
+    }
+    function ensureCamWindow(deviceId, label){
+      let slot=camSlots.find(s=>s.deviceId===deviceId);
+      if(slot){ slot.win.querySelector('.cam-title').innerHTML='<span class="live-dot"></span>'+label; return slot; }
+      const win=document.createElement('div');
+      win.className='cam-window';
+      win.innerHTML='<div class="cam-head"><span class="cam-title"><span class="live-dot"></span>'+label+'</span><span class="cam-close" title="关闭">✕</span></div><div class="cam-stage"><video autoplay playsinline muted></video><div class="cam-grid"></div><div class="cam-scan"></div><i class="cam-corner tl"></i><i class="cam-corner tr"></i><i class="cam-corner bl"></i><i class="cam-corner br"></i><div class="cam-fallback" hidden>摄像头不可用<br>请检查设备与浏览器权限</div></div>';
+      document.body.appendChild(win);
+      attachCamDrag(win);
+      win.querySelector('.cam-close').addEventListener('click',()=>closeCamWindow(deviceId));
+      slot={deviceId, win, stream:null};
+      camSlots.push(slot);
+      return slot;
+    }
+    function placeCamWindow(win){
+      // offsetHeight 触发同步 layout，可直接量取（transform 不影响布局尺寸，无需临时 add open）
+      const w=480, h=win.offsetHeight||360;
+      const mx=Math.max(40,innerWidth*0.06), my=Math.max(40,innerHeight*0.06);
+      const xRange=Math.max(0,innerWidth-w-mx*2), yRange=Math.max(0,innerHeight-h-my*2);
+      // 已打开窗口的中心点：新窗口尽量远离它们，避免多个窗口挤在一起
+      const placed=camSlots.filter(s=>s.win!==win&&s.win.classList.contains('open')).map(s=>{
+        const px=parseFloat(s.win.style.left)||0, py=parseFloat(s.win.style.top)||0;
+        return {cx:px+(s.win.offsetWidth||w)/2, cy:py+(s.win.offsetHeight||h)/2};
+      });
+      let bestX=mx+Math.random()*xRange, bestY=my+Math.random()*yRange, bestDist=placed.length?0:Infinity;
+      for(let i=0;i<30;i++){ // 多次随机采样，取离最近邻居最远的位置（最远点采样）
+        const x=mx+Math.random()*xRange, y=my+Math.random()*yRange;
+        const cx=x+w/2, cy=y+h/2;
+        let minD=Infinity;
+        for(const p of placed) minD=Math.min(minD,Math.hypot(cx-p.cx,cy-p.cy));
+        if(minD>bestDist){ bestDist=minD; bestX=x; bestY=y; }
+        if(placed.length===0) break;
+      }
+      win.style.left=bestX.toFixed(0)+'px'; win.style.top=bestY.toFixed(0)+'px';
+      win.classList.add('open'); // 触发“从小到大”弹出动画
+    }
+    async function startCamStream(slot){
+      const win=slot.win;
+      const video=win.querySelector('video');
+      const fb=win.querySelector('.cam-fallback');
+      try{
+        if(!slot.stream) slot.stream=await navigator.mediaDevices.getUserMedia({video:{deviceId:slot.deviceId?{exact:slot.deviceId}:undefined,width:{ideal:1280},height:{ideal:720}}});
+        video.srcObject=slot.stream; video.hidden=false; fb.hidden=true;
+      }catch(_){
+        video.hidden=true; fb.hidden=false;
+      }
+    }
+    async function openAllCameras(){
+      const devices=await enumerateVideoDevices();
+      if(devices.length===0){
+        // 无摄像头或无权限：弹一个提示窗口
+        const slot=ensureCamWindow('__none__','摄像头');
+        placeCamWindow(slot.win);
+        const v=slot.win.querySelector('video'); v.hidden=true;
+        slot.win.querySelector('.cam-fallback').hidden=false;
+        return;
+      }
+      // 清理已拔出设备对应的窗口
+      const ids=devices.map(d=>d.deviceId);
+      [...camSlots].forEach(s=>{ if(s.deviceId!=='__none__'&&!ids.includes(s.deviceId)) closeCamWindow(s.deviceId); });
+      // 为每个设备创建/复用窗口，随机分布（已打开的窗口保留原位置，避免反复点击抖动）
+      devices.forEach((d,i)=>{
+        const label=(i+1)+'号摄像头';
+        const slot=ensureCamWindow(d.deviceId, label);
+        if(!slot.win.classList.contains('open')) placeCamWindow(slot.win);
+        startCamStream(slot);
+      });
+    }
+    function closeCamWindow(deviceId){
+      const slot=camSlots.find(s=>s.deviceId===deviceId);
+      if(!slot)return;
+      slot.win.classList.remove('open');
+      setTimeout(()=>{ // 延迟释放摄像头与移除窗口，让退出动画跑完
+        if(slot.stream){slot.stream.getTracks().forEach(t=>t.stop());slot.stream=null;}
+        const v=slot.win.querySelector('video'); if(v)v.srcObject=null;
+        slot.win.remove();
+        camSlots=camSlots.filter(s=>s!==slot);
+      },320);
+    }
+    // 点击任意卫星标签：同时弹出所有摄像头窗口
+    orbitLabels.forEach(label=>label.addEventListener('click',openAllCameras));
