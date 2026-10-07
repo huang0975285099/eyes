@@ -102,6 +102,12 @@
     let chatState='idle'; // idle | listening | thinking | speaking
     let ttsAnalyser=null,ttsSource=null,ttsLive=false; // ttsLive：TTS 已开始播报（false=仍在生成，显示思考动画）
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    // fetch 超时封装：后端卡住时不会让 UI 永久停在“正在思考/聆听”
+    function fetchWithTimeout(url, opts, ms=30000){
+      const ctrl=new AbortController();
+      const id=setTimeout(()=>ctrl.abort(),ms);
+      return fetch(url,Object.assign({},opts,{signal:ctrl.signal})).finally(()=>clearTimeout(id));
+    }
 
     function resize() {
       const rect = stage.getBoundingClientRect(); pixelRatio = Math.min(devicePixelRatio || 1, 2); width = innerWidth; height = innerHeight; stageWidth=rect.width;
@@ -466,7 +472,7 @@
       const blob=asrQueue.shift();
       try{
         // context=已识别前文，帮助分段边界断词连贯（qwen-asr 原生支持）
-        const resp=await fetch('http://localhost:8770/transcribe?context='+encodeURIComponent(asrContext.slice(-200)),{method:'POST',body:blob,headers:{'Content-Type':blob.type||'audio/webm'}});
+        const resp=await fetchWithTimeout('http://localhost:8770/transcribe?context='+encodeURIComponent(asrContext.slice(-200)),{method:'POST',body:blob,headers:{'Content-Type':blob.type||'audio/webm'}},30000);
         const data=await resp.json();
         if(data.text&&chatState==='listening'){ // 结束会话后 chatState='idle'，丢弃残留识别结果，不再写屏
           if(!turnActive){replyText.textContent='';aiText.textContent='';turnActive=true;} // 新一轮清空上一轮内容
@@ -477,7 +483,7 @@
         if(data.error&&chatState==='listening')voiceStatus.textContent='✦ 识别失败：'+data.error;
         else if(chatState==='listening')voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
       }catch(error){
-        voiceStatus.textContent='✦ 识别失败：'+error.message;
+        if(chatState==='listening')voiceStatus.textContent='✦ 识别失败：'+(error.name==='AbortError'?'识别超时，请重说':error.message);
       }
       asrBusy=false; // 识别完成不重置发送计时：lastVoiceAt 只由说话声音更新，文字出现后很快自动发送
       if(asrQueue.length>0)processASRQueue();
@@ -556,13 +562,17 @@
       if(conversationHistory.length>12)conversationHistory.splice(0,conversationHistory.length-12);
       asrContext=''; // 新一轮提问的识别上下文独立
       try{
-        const resp=await fetch('http://localhost:8770/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:conversationHistory})});
+        const resp=await fetchWithTimeout('http://localhost:8770/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:conversationHistory})},60000);
         const data=await resp.json();
+        if(chatState!=='thinking')return; // 会话已结束，丢弃迟到的回答，避免污染已重置的界面
         if(!data.text||data.error)throw new Error(data.error||'模型没有返回回答');
-        conversationHistory.push({role:'assistant',content:data.text});
+        // 限制历史单条内容长度，避免超长回复撑大后续上下文
+        const ans=data.text.length>2000?data.text.slice(0,2000)+'…':data.text;
+        conversationHistory.push({role:'assistant',content:ans});
         await speakAnswer(data.text);
       }catch(error){
-        voiceStatus.textContent='✦ 回答失败：'+error.message;
+        if(chatState==='idle')return; // 已结束会话：不恢复、不提示，保持待机态
+        voiceStatus.textContent='✦ 回答失败：'+(error.name==='AbortError'?'模型响应超时':error.message);
         chatState='listening';turnActive=false;asrContext='';startNewRecorder();
       }
     }
@@ -570,7 +580,7 @@
       chatState='speaking';voiceStatus.textContent='✦ 正在回答…';
       let buffer=null;
       try{ // 获取语音（失败则纯文字展示）
-        const resp=await fetch('http://localhost:8770/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+        const resp=await fetchWithTimeout('http://localhost:8770/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})},30000);
         if(resp.ok){
           const arr=await resp.arrayBuffer();
           if(audioContext&&audioContext.state!=='closed')buffer=await audioContext.decodeAudioData(arr);
@@ -583,21 +593,26 @@
         aiText.textContent=text.slice(0,Math.round(text.length*p));
         fitReplyFont();
       },80);
-      if(buffer&&audioContext&&audioContext.state!=='closed'){
-        if(audioContext.state==='suspended')await audioContext.resume();
-        playCue('reply');
-        ttsAnalyser=audioContext.createAnalyser();ttsAnalyser.fftSize=1024;ttsAnalyser.smoothingTimeConstant=.78;
-        ttsSource=audioContext.createBufferSource();ttsSource.buffer=buffer;
-        ttsSource.connect(ttsAnalyser);ttsAnalyser.connect(audioContext.destination);
-        ttsLive=true; // TTS 开始播报：思考动画退场，球体改由 AI 音频驱动
-        await new Promise(res=>{ttsSource.onended=res;ttsSource.start();});
-        ttsSource=null;ttsAnalyser=null;ttsLive=false;
-      }else{
-        ttsLive=true; // 纯文字模式：打字开始即视为"回答中"，停止思考动画
-        await new Promise(res=>setTimeout(res,duration*1000));
-        ttsLive=false;
+      try{
+        if(buffer&&audioContext&&audioContext.state!=='closed'){
+          if(audioContext.state==='suspended')await audioContext.resume();
+          playCue('reply');
+          ttsAnalyser=audioContext.createAnalyser();ttsAnalyser.fftSize=1024;ttsAnalyser.smoothingTimeConstant=.78;
+          ttsSource=audioContext.createBufferSource();ttsSource.buffer=buffer;
+          ttsSource.connect(ttsAnalyser);ttsAnalyser.connect(audioContext.destination);
+          ttsLive=true; // TTS 开始播报：思考动画退场，球体改由 AI 音频驱动
+          try{
+            await new Promise((res,rej)=>{ttsSource.onended=res;ttsSource.onerror=()=>rej(new Error('tts play failed'));ttsSource.start();});
+          }catch(_){ /* TTS 播放出错：文字已由打字机显示，按纯文字完成，不阻断对话 */ }
+          ttsSource=null;ttsAnalyser=null;ttsLive=false;
+        }else{
+          ttsLive=true; // 纯文字模式：打字开始即视为“回答中”，停止思考动画
+          await new Promise(res=>setTimeout(res,duration*1000));
+          ttsLive=false;
+        }
+      }finally{
+        clearInterval(typeTimer);typeTimer=null;aiText.textContent=text; // 无论正常结束还是抛错都收尾，杜绝定时器泄漏
       }
-      clearInterval(typeTimer);aiText.textContent=text;
       if(!listening){chatState='idle';return;}
       playCue('done');
       voiceStatus.textContent='✦ 回答完毕 · 继续聆听';
