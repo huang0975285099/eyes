@@ -2,8 +2,7 @@
   "input_device": "麦克风 (Deli-1080P-Camera-Audio)",
   "output_device": "Speakers (Deli-1080P-Camera Audio)",
   "wake_phrases": [
-    "老 叶 老 叶",
-    "老爷 老爷"
+    "叮咚叮咚"
   ],
   "command_timeout_seconds": 30.0,
   "conversation_history_turns": 6,
@@ -26,7 +25,7 @@
   "ollama_model": "qwen3.5:4b",
   "ollama_timeout_seconds": 120.0,
   "ollama_keep_alive": "10m",
-  "ollama_system_prompt": "你是老叶，一个理性、专业的中文AI分析师，擅长大数据、编程、数据分析、数据库、系统架构和故障诊断。回答时自然地加入轻松幽默和生活化表达，像一位风趣但靠谱的中年朋友。表达准确、客观、简洁且适合语音播报，不使用Markdown、列表、网址、表情或幽默段子。一般回答尽量控制在100个汉字以内。",
+  "ollama_system_prompt": "你是叮咚，一个理性、专业的中文AI分析师，擅长大数据、编程、数据分析、数据库、系统架构和故障诊断。回答时自然地加入轻松幽默和生活化表达。表达准确、客观、简洁且适合语音播报，不使用Markdown、列表、网址、表情或幽默段子。一般回答尽量控制在100个汉字以内。",
   "internet_tools_enabled": true,
   "internet_timeout_seconds": 10.0,
   "internet_retry_count": 2,

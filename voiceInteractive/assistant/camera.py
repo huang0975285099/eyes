@@ -140,7 +140,7 @@ class CameraFrameStore:
         return True
 
     def start_conversation(
-        self, wake_text: str = "老叶老叶", greeting: str = "我在"
+        self, wake_text: str = "叮咚叮咚", greeting: str = "我在"
     ) -> str:
         with self._lock:
             self._end_conversation_locked("重新唤醒")

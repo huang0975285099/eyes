@@ -259,7 +259,7 @@ function drawCore(t) {
     } else silenceSince=0;
   } else {
     silenceSince=0;
-    if(wakeListening) checkWakeVAD(level,t); // 唤醒词 VAD：切段送 ASR，命中“眉州眉州”即进入会话
+    if(wakeListening) checkWakeVAD(level,t); // 唤醒词 VAD：切段送 ASR，命中“叮咚叮咚”即进入会话
   }
 }
 

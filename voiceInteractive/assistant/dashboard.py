@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 import socket
@@ -281,6 +282,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if frame_match:
             self._send_camera_frame(frame_match.group(1))
             return
+        # 兜底：服务 web/ 目录下的静态文件（css/js/mp3/wav 等），支持 index.html 子资源
+        if not request_path.startswith("/api/"):
+            web_root = (APP_DIR / "web").resolve()
+            candidate = (web_root / request_path.lstrip("/")).resolve()
+            try:
+                candidate.relative_to(web_root)
+            except ValueError:
+                candidate = None
+            if candidate is not None and candidate.is_file():
+                mimetypes.add_type("text/javascript", ".js")
+                mime, _ = mimetypes.guess_type(candidate.name)
+                body = candidate.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", mime or "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def _send_camera_frame(self, camera_id: str) -> None:

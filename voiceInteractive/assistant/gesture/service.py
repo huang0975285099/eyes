@@ -100,9 +100,11 @@ class MediaPipeGestureWorker:
     def _start(self) -> None:
         if self._process is not None and self._process.poll() is None:
             return
+        worker = APP_DIR / "gesture_worker.py"
+        if not worker.is_file():
+            return  # gesture_worker.py 已移除：手势检测禁用，detect 将走"进程不可用"降级
         if not self.hand_model_path.is_file():
             raise RuntimeError("手势模型尚未安装，请检查 models/gesture 目录")
-        worker = APP_DIR / "gesture_worker.py"
         command = [
             self.python_executable, "-u", str(worker),
             "--hand-model", str(self.hand_model_path),

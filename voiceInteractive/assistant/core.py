@@ -671,10 +671,10 @@ class VoiceAssistant:
         weather_context_active = False
         desktop_context_active = False
 
-        print("\n已启动。请说：老叶老叶")
+        print("\n已启动。请说：叮咚叮咚")
         print("听到“我在”后开始提问（按 Ctrl+C 退出）\n")
         if self.dashboard:
-            self.dashboard.store.set_assistant_status("等待“老叶老叶”唤醒")
+            self.dashboard.store.set_assistant_status("等待“叮咚叮咚”唤醒")
 
         with sd.RawInputStream(
             samplerate=sample_rate,
@@ -775,7 +775,7 @@ class VoiceAssistant:
                     last_partial = ""
                     if self.dashboard:
                         self.dashboard.store.end_conversation("空闲超时")
-                        self.dashboard.store.set_assistant_status("等待“老叶老叶”唤醒")
+                        self.dashboard.store.set_assistant_status("等待“叮咚叮咚”唤醒")
 
                 try:
                     data = self.audio_queue.get(timeout=0.2)
@@ -1065,7 +1065,7 @@ class VoiceAssistant:
                     if self.dashboard:
                         self.dashboard.store.end_conversation(text, answer)
                         self.dashboard.store.set_assistant_status(
-                            "等待“老叶老叶”唤醒", answer
+                            "等待“叮咚叮咚”唤醒", answer
                         )
                     try:
                         self._play(self.speaker.say, answer)

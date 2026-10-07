@@ -292,14 +292,14 @@ async function stopRecognition(){
   });
 }
 
-// ===== 唤醒词“眉州眉州”：idle 态持续监听麦克风，命中后自动进入会话 =====
+// ===== 唤醒词“叮咚叮咚”：idle 态持续监听麦克风，命中后自动进入会话 =====
 let wakeStream=null,wakeCtx=null,wakeAnalyser=null,wakeData=null;
 let wakeRecorder=null,wakeChunks=[],wakeAsrBusy=false,wakeQueue=[];
 let wakeListening=false,wakeCandStart=0,wakeSilence=0,wakeVoice=false,wakeVoiceStart=0;
-// 唤醒词判定：清理标点空白后，“眉州”出现 ≥2 次即命中（兼容“眉州眉州”/“眉州 眉州”等）
+// 唤醒词判定：清理标点空白后，“叮咚”出现 ≥2 次即命中（兼容“叮咚叮咚”/“叮咚 叮咚”等）
 function isWakeWord(text){
   const clean=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
-  return (clean.match(/眉州/g)||[]).length>=2;
+  return (clean.match(/叮咚/g)||[]).length>=2;
 }
 // 退出词“再见”判定：清理标点空白后包含“再见”即命中（兼容“再见”/“好的再见”/“再见啦”等）
 function isGoodbye(text){
@@ -316,7 +316,7 @@ async function startWakeWord(){
     wakeAnalyser=wakeCtx.createAnalyser();wakeAnalyser.fftSize=1024;wakeAnalyser.smoothingTimeConstant=.78;
     src.connect(hp);hp.connect(wakeAnalyser);wakeData=new Uint8Array(wakeAnalyser.fftSize);
     wakeListening=true;
-    if(chatState==='idle'){voiceStatus.textContent='✦  说出“眉州眉州”唤醒我';micCaption.textContent='等待唤醒';}
+    if(chatState==='idle'){voiceStatus.textContent='✦  说出“叮咚叮咚”唤醒我';micCaption.textContent='等待唤醒';}
     startWakeRecorder();
   }catch(_){
     wakeListening=false;
@@ -450,7 +450,7 @@ async function endByVoice(){
   voiceStatus.textContent='✦  再见 · 结束会话中…';
   await stopMicrophone();
   resetUI();
-  startWakeWord(); // 结束后回到唤醒词监听，可再次“眉州眉州”唤醒
+  startWakeWord(); // 结束后回到唤醒词监听，可再次“叮咚叮咚”唤醒
 }
 
 document.getElementById('end-button').addEventListener('click',async()=>{
@@ -458,7 +458,7 @@ document.getElementById('end-button').addEventListener('click',async()=>{
   voiceStatus.textContent='✦ 正在结束并识别…';
   await stopMicrophone();
   resetUI();
-  startWakeWord(); // 结束会话后回到唤醒词监听，可再次“眉州眉州”唤醒
+  startWakeWord(); // 结束会话后回到唤醒词监听，可再次“叮咚叮咚”唤醒
 });
 
 // 开场欢迎语音：页面加载即播放 test_chinese.wav，球体随语音起伏；

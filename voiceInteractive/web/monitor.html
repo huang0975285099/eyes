@@ -564,7 +564,7 @@
             <span id="conversationCount" class="conversation-count">0 次</span>
           </div>
           <div id="conversationLog" class="conversation-log" aria-live="polite">
-            <div class="conversation-empty">说“老叶老叶”开启新对话，对话内容会显示在这里。</div>
+            <div class="conversation-empty">说“叮咚叮咚”开启新对话，对话内容会显示在这里。</div>
           </div>
         </div>
         <div>
@@ -1761,7 +1761,7 @@
       if (!conversations.length) {
         const empty = document.createElement('div');
         empty.className = 'conversation-empty';
-        empty.textContent = '说“老叶老叶”开启新对话，对话内容会显示在这里。';
+        empty.textContent = '说“叮咚叮咚”开启新对话，对话内容会显示在这里。';
         conversationLog.append(empty);
         return;
       }
