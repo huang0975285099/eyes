@@ -18,3 +18,4 @@ Thumbs.db
 .pytest_cache/
 .venv/
 .tmp-go-cache/
+*.whl

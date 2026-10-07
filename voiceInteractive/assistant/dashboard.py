@@ -393,6 +393,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         request_path = self.path.partition("?")[0]
+        if request_path == "/api/asr":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0:
+                    raise ValueError("音频数据为空")
+                audio_bytes = self.rfile.read(content_length)
+                content_type = self.headers.get("Content-Type", "") or "audio/webm"
+                import urllib.error
+                import urllib.request
+
+                req = urllib.request.Request(
+                    "http://127.0.0.1:8770/transcribe",
+                    data=audio_bytes,
+                    headers={"Content-Type": content_type},
+                )
+                try:
+                    resp = urllib.request.urlopen(req, timeout=180)
+                    self._send_json(json.loads(resp.read().decode("utf-8")))
+                except urllib.error.HTTPError as upstream_error:
+                    self._send_json(
+                        json.loads(upstream_error.read().decode("utf-8")),
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+            except Exception as error:
+                self._send_json(
+                    {"text": "", "error": str(error)},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
         motion_rule_match = re.fullmatch(
             r"/api/motion-rule/([A-Za-z0-9_-]+)", request_path
         )
