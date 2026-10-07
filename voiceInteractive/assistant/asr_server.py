@@ -21,6 +21,20 @@ from .paths import APP_DIR
 
 _ASR_PORT = 8770
 _MODEL: Qwen3ASRModel | None = None
+
+# 繁体转简体（Qwen3-ASR 可能输出繁体，统一转简体）
+try:
+    from opencc import OpenCC
+    _T2S = OpenCC("t2s")
+except Exception:
+    _T2S = None
+
+
+def _to_simplified(text: str) -> str:
+    """繁体转简体；opencc 不可用时原样返回。"""
+    if _T2S is None or not text:
+        return text
+    return _T2S.convert(text)
 _CONFIG = json.loads((APP_DIR / "config.json").read_text(encoding="utf-8"))
 
 
@@ -184,7 +198,7 @@ class ASRHandler(BaseHTTPRequestHandler):
             t_decode = time.perf_counter()
             result = model.transcribe((audio_array, sample_rate), context=context)
             t_infer = time.perf_counter()
-            text = result[0].text if result else ""
+            text = _to_simplified(result[0].text if result else "")
             print(
                 f"[transcribe] 音频{content_length/1024:.0f}KB "
                 f"读取{(t_read-t0)*1000:.0f}ms 解码{(t_decode-t_read)*1000:.0f}ms "

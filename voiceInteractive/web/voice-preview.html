@@ -317,10 +317,10 @@
         checkVAD(level,t); // VAD 自动分段：停顿后截取一段送识别
         const bars=Math.round(level*6);
         micCaption.textContent='▮'.repeat(bars)+'▯'.repeat(6-bars);
-        // 信号诊断：监听中但持续无音量时，提示检查设备
-        if(level<.015){
+        // 信号诊断：高通滤波后 RMS 整体降低，阈值相应调低（0.003）
+        if(level<.003){
           if(!silenceSince) silenceSince=t;
-          else if(t-silenceSince>5000) voiceStatus.textContent='✦  信号很弱：请检查 Windows 默认输入设备与浏览器麦克风权限';
+          else if(t-silenceSince>8000) voiceStatus.textContent='✦  信号很弱：请检查 Windows 默认输入设备与浏览器麦克风权限';
         } else silenceSince=0;
       } else silenceSince=0;
     }
@@ -484,7 +484,7 @@
     }
     // VAD 流水线（抗远处杂音）：触发门槛 0.055 + 连续 160ms 确认才算真语音；
     // 远处声音音量小且断续，过不了确认；杂音也不更新发送计时（否则对话永不发出）
-    const VAD_OPEN=.1, VAD_CONFIRM_MS=160;
+    const VAD_OPEN=.15, VAD_CONFIRM_MS=160;
     let voiceCandStart=0;
     function checkVAD(level,t){
       if(chatState!=='listening')return;
@@ -623,11 +623,13 @@
       if (listening) return;
       try {
         stopGreeting(); // 欢迎语音还在播时先停掉，避免被麦克风录进去
-        micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+        micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});
         audioContext=new AudioContext();
         if(audioContext.state==='suspended') await audioContext.resume(); // 浏览器自动播放策略可能挂起上下文
         analyser=audioContext.createAnalyser();analyser.fftSize=1024;analyser.smoothingTimeConstant=.78;
-        audioContext.createMediaStreamSource(micStream).connect(analyser);audioData=new Uint8Array(analyser.fftSize);listening=true;
+        // 高通滤波器：切除 150Hz 以下的低频（远处人声经距离衰减后只剩低频闷声，近处说话不受影响）
+        const highpass=audioContext.createBiquadFilter();highpass.type='highpass';highpass.frequency.value=150;highpass.Q.value=.7;
+        audioContext.createMediaStreamSource(micStream).connect(highpass);highpass.connect(analyser);audioData=new Uint8Array(analyser.fftSize);listening=true;
         micCaption.textContent='麦克风监听中';voiceStatus.textContent='✦  正在聆听 · 说出的话将实时呈现';micButton.setAttribute('aria-label','麦克风输入中');
         startRecognition();
       } catch(error) {
