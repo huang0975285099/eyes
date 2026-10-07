@@ -578,7 +578,7 @@
       if(!doneCueBuffer||!audioContext||audioContext.state==='closed'){playCue('done');return;}
       if(audioContext.state==='suspended')audioContext.resume();
       const src=audioContext.createBufferSource();src.buffer=doneCueBuffer;
-      const g=audioContext.createGain();g.gain.value=.6;
+      const g=audioContext.createGain();g.gain.value=.1; // 调小 50%（原 .6）
       src.connect(g);g.connect(audioContext.destination);src.start();
     }
     function spawnShockwave(){
@@ -683,7 +683,7 @@
       recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
       conversationHistory=[];turnActive=false;asrContext='';
       chatState='listening';voiceStatus.textContent='✦  请说';
-      preloadSendCue();startNewRecorder();
+      preloadSendCue();preloadDoneCue();startNewRecorder();
     }
     async function stopRecognition(){
       if(!mediaRecorder)return;
@@ -841,7 +841,7 @@
       shockwaves.length=0;
     }
 
-    micButton.addEventListener('click',startMicrophone);
+    micButton.addEventListener('click',()=>startMicrophone()); // 箭头包裹：避免 click 事件被当作 ack 参数传入
     // 语音"再见"告别流程：发送音效+冲击波 → 思考动画 → AI 回答固定告别语 → 结束会话
     async function sendGoodbye(){
       chatState='thinking';turnActive=false;
