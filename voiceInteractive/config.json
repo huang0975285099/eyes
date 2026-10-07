@@ -14,7 +14,7 @@
   "tts_voice": "zh-CN-YunyangNeural",
   "tts_rate": "+25%",
   "tts_volume": "+0%",
-  "tts_proxy": "http://127.0.0.1:52351",
+  "tts_proxy": "",
   "llm_provider": "ollama",
   "online_api_base_url": "https://ws-bmmb54df8myndcj1.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
   "online_api_key": "",

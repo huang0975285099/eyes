@@ -11,7 +11,7 @@ const inputLevelEl = document.getElementById('input-level');
 const stage = document.querySelector('.stage');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 let width, height, stageWidth, pixelRatio, stars = [], audioContext, analyser, micStream, audioData, coreCanvasW = 0, coreCanvasH = 0, coreWidth = 0;
-let targetLevel = 0, level = 0, listening = false, frame = 0, silenceSince = 0;
+let targetLevel = 0, level = 0, gateLevel = 0, listening = false, frame = 0, silenceSince = 0;
 const shockwaves = []; // 发送冲击波：光轮从球体爆发，冲出屏幕边缘
 let chatState='idle'; // idle | listening | thinking | speaking
 let ttsAnalyser=null,ttsSource=null,ttsLive=false; // ttsLive：TTS 已开始播报（false=仍在生成，显示思考动画）
@@ -72,9 +72,13 @@ function drawCore(t) {
   const cw=coreCanvasW, ch=coreCanvasH;
   coreCtx.clearRect(0,0,cw,ch);
   level += (targetLevel-level) * (targetLevel>level ? .3 : .08);
+  // 视觉门限（关联降噪）：低于 VAD_OPEN 的声音大幅衰减，中心球只在"会被识别的声音"时显著跳动
+  const vadOpen = typeof VAD_OPEN !== 'undefined' ? VAD_OPEN : 0.22; // 跨文件取 VAD_OPEN，兜底防脚本未加载导致 drawCore 崩溃
+  const gateTarget = level < vadOpen ? 0 : level; // 远场（低于门槛）直接归零，中心球只剩待机呼吸
+  gateLevel += (gateTarget-gateLevel) * (gateTarget>gateLevel ? .3 : .08);
   const idle = reduceMotion.matches ? .1 : .08*Math.sin(t*.0011)+.045*Math.sin(t*.0023+1.4);
   // 音量驱动：会话聆听中（麦克风）或唤醒监听中（唤醒分析器）或 TTS 播报中（ttsAnalyser，欢迎语音同理）
-  const energy=(chatState==='thinking'||(chatState==='speaking'&&!ttsLive)) ? .5+.22*Math.sin(t*.006) : ((listening||wakeListening||(chatState==='speaking'&&ttsLive)) ? level : 0);
+  const energy=(chatState==='thinking'||(chatState==='speaking'&&!ttsLive)) ? .5+.22*Math.sin(t*.006) : ((listening||wakeListening) ? gateLevel : (chatState==='speaking'&&ttsLive) ? level : 0);
   // 画布扩到 200% 后按比例缩小基准半径，球体视觉大小与旧版一致（.36×128% ≈ .2304×200%）
   const base = Math.min(cw,ch)*.2304;
   const time = t*.00045;
@@ -265,7 +269,7 @@ function drawCore(t) {
 
 function drawSpace(t) {
   spaceCtx.clearRect(0,0,width,height);
-  const cx=width/2,cy=height*.47,pulse=level*(listening?1:0);
+  const cx=width/2,cy=height*.47,pulse=gateLevel*(listening?1:0);
   // Multiple oversized light fields travel across the entire viewport.
   spaceCtx.globalCompositeOperation='screen';
   for(let i=0;i<5;i++) {

@@ -167,7 +167,7 @@ class VoiceAssistant:
             is_final = recognizer.AcceptWaveform(data)
             result = recognizer.Result() if is_final else recognizer.PartialResult()
             text = _result_text(result, "text" if is_final else "partial")
-            if not text or text == "[unk]":
+            if not text or text.replace("[unk]","").strip() == "":
                 continue
             action = interruption_action(text, self.config.wake_phrases)
             if action is None:
@@ -817,9 +817,7 @@ class VoiceAssistant:
                         continue
                     last_partial = text
 
-                if not text:
-                    continue
-                if text == "[unk]":
+                if not text or text.replace("[unk]","").strip() == "":
                     continue
                 print(f"[{state}] {text}")
 

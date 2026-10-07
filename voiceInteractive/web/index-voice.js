@@ -453,7 +453,7 @@ function resetUI(){
   shockwaves.length=0;
 }
 
-micButton.addEventListener('click',()=>startMicrophone()); // 箭头包裹：避免 click 事件被当作 ack 参数传入
+micButton.addEventListener('click',()=>startWakeWord()); // 点"开始会话"进入唤醒监听，说"叮咚叮咚"后自动进入会话
 // 语音“再见”告别流程：发送音效+冲击波 → 思考动画 → AI 回答固定告别语 → 结束会话
 async function sendGoodbye(){
   chatState='thinking';turnActive=false;
