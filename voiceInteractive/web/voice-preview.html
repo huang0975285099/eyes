@@ -12,13 +12,13 @@
     body::before { content: ""; position: fixed; z-index:1; inset: 0; pointer-events: none; opacity: .09; background-image: linear-gradient(rgba(137,169,255,.08) 1px,transparent 1px),linear-gradient(90deg,rgba(137,169,255,.08) 1px,transparent 1px); background-size: 72px 72px; mask-image: radial-gradient(ellipse at center,#000,transparent 78%); }
     .grain { position: fixed; inset: -50%; z-index: 1; pointer-events: none; opacity: .045; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.86' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E"); transform: translateZ(0); }
     #space { position:fixed; inset:0; width:100vw; height:100vh; z-index:0; pointer-events:none; }
-    .shell { min-height: 100svh; position: relative; z-index:2; display: grid; grid-template-rows: 70px 1fr auto; padding: 0 clamp(22px,5vw,76px) 30px; }
+    .shell { min-height: 100svh; position: relative; z-index:2; display: grid; grid-template-rows: 70px 1fr; padding: 0 clamp(22px,5vw,76px) 30px; }
     header { z-index: 2; display: flex; align-items: center; justify-content: space-between; }
     .brand { display: flex; align-items: center; gap: 11px; letter-spacing: .04em; font-size: 13px; color: #dce8ff; }
     .brand-mark { width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid rgba(124,195,255,.45); border-radius: 9px; color: #9eeaff; box-shadow: inset 0 0 18px #53b9ff22,0 0 22px #53b9ff15; font-size: 13px; }
     .top-right { display: flex; align-items: center; gap: 16px; color: #7786a7; font: 10px/1.4 ui-monospace,Consolas,monospace; letter-spacing: .13em; text-transform: uppercase; }
-    .stage { position: relative; display: grid; place-items: center; min-height: 0; isolation: isolate; }
-    .halo { position: absolute; width: min(82vw,790px); aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle, #4da8ff08 24%,#3979ff12 43%,#4be5ff16 50%,#5b5cff0d 58%,transparent 72%); filter: blur(18px); animation: breathe 7s ease-in-out infinite; }
+    .stage { position: relative; display: grid; place-items: center; min-height: 0; isolation: isolate; padding-bottom: clamp(150px, 23vh, 215px); }
+    .halo { position: absolute; inset: 0 0 clamp(150px,23vh,215px) 0; margin: auto; width: min(82vw,790px); aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle, #4da8ff08 24%,#3979ff12 43%,#4be5ff16 50%,#5b5cff0d 58%,transparent 72%); filter: blur(18px); animation: breathe 7s ease-in-out infinite; }
     .orb-wrap { width: min(52vw,490px); aspect-ratio: 1; position: relative; display: grid; place-items: center; filter: drop-shadow(0 0 56px #39a9ff20); }
     .orb-wrap::before,.orb-wrap::after { content:""; position:absolute; inset: 5%; border:1px solid #84bbff0b; border-radius:50%; transform:rotateX(68deg) rotate(-16deg); box-shadow: 0 0 38px #53c4ff08,inset 0 0 32px #53c4ff08; }
     .orb-wrap::after { inset: 1%; transform: rotateX(74deg) rotate(58deg); border-color:#9e80ff0b; }
@@ -35,9 +35,10 @@
     .orbit-label:nth-of-type(4) { width:160px; text-align:left; }
     .orbit-label:nth-of-type(5) { width:158px; text-align:right; }
     .orbit-label:nth-of-type(6) { width:156px; text-align:left; }
-    .bottom { z-index:2; width:min(760px,100%); margin:0 auto; text-align:center; padding-bottom:5px; }
+    .bottom { position: fixed; left:0; right:0; bottom:0; z-index:3; width:min(760px,100%); margin:0 auto; text-align:center; padding: 14px clamp(22px,5vw,76px) 24px; pointer-events:none; background: linear-gradient(180deg, rgba(4,6,12,0), rgba(4,6,12,.42) 46%); }
     .eyebrow { margin-bottom:15px; color:#81b9d8; font:10px/1 ui-monospace,Consolas,monospace; letter-spacing:.25em; text-transform:uppercase; }
     .reply { min-height:82px; color:#f0f5ff; font-size:clamp(18px,2.25vw,27px); font-weight:350; line-height:1.55; letter-spacing:.01em; text-wrap:balance; text-shadow:0 2px 24px #5daeff2b; }
+    #ai-text { color:#8ef2ff; text-shadow:0 2px 26px #35c4ff66; }
     .reply .cursor { display:inline-block; width:1px;height:1.05em; margin-left:4px; vertical-align:-.15em; background:#79e9ff; box-shadow:0 0 10px #79e9ff; animation:blink 1s steps(2) infinite; }
     .controls { display:flex; justify-content:center; align-items:center; gap:21px; }
     .icon-button { width:40px;height:40px; display:grid;place-items:center; border:1px solid #a5b9e327; border-radius:50%; background:#111a2b88; color:#9baeca; }
@@ -80,7 +81,7 @@
     </section>
     <section class="bottom" aria-label="AI 回复">
       <div class="eyebrow" id="voice-status">✦ 待机中</div>
-      <div class="reply"><span id="reply-text">夜色已经降临，所有的设备都准备好了。<br>你想先从什么开始？</span><span class="cursor" aria-hidden="true"></span></div>
+      <div class="reply"><span id="reply-text">夜色已经降临，所有的设备都准备好了。<br>你想先从什么开始？</span><span id="ai-text"></span><span class="cursor" aria-hidden="true"></span></div>
     </section>
   </main>
   <script>
@@ -97,6 +98,9 @@
     const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
     let width, height, stageWidth, pixelRatio, stars = [], audioContext, analyser, micStream, audioData;
     let targetLevel = 0, level = 0, listening = false, frame = 0, silenceSince = 0;
+    const shockwaves = []; // 发送冲击波：光轮从球体爆发，冲出屏幕边缘
+    let chatState='idle'; // idle | listening | thinking | speaking
+    let ttsAnalyser=null,ttsSource=null,ttsLive=false; // ttsLive：TTS 已开始播报（false=仍在生成，显示思考动画）
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
     function resize() {
@@ -111,8 +115,12 @@
     }
 
     function sampleMicrophone() {
-      if (!analyser || !audioData) { targetLevel = 0; return; }
-      analyser.getByteTimeDomainData(audioData);
+      // AI 播报时由 TTS 音频驱动球体（与麦克风同一套声压包络逻辑）
+      const source = (chatState==='speaking' && ttsAnalyser) ? ttsAnalyser : analyser;
+      if (!source) { targetLevel = 0; return; }
+      // 欢迎语音等场景麦克风未开启：按需创建采样缓冲（fftSize 均为 1024）
+      if (!audioData || audioData.length !== source.fftSize) audioData = new Uint8Array(source.fftSize);
+      source.getByteTimeDomainData(audioData);
       let sum = 0;
       for (let i=0;i<audioData.length;i++) { const n=(audioData[i]-128)/128; sum += n*n; }
       const rms = Math.sqrt(sum/audioData.length);
@@ -134,7 +142,8 @@
       coreCtx.clearRect(0,0,cw,ch);
       level += (targetLevel-level) * (targetLevel>level ? .3 : .08);
       const idle = reduceMotion.matches ? .1 : .08*Math.sin(t*.0011)+.045*Math.sin(t*.0023+1.4);
-      const energy = listening ? level : 0;
+      // 音量驱动：麦克风聆听中（level 来自麦克风）或 TTS 播报中（level 来自 ttsAnalyser，欢迎语音同理）
+      const energy=(chatState==='thinking'||(chatState==='speaking'&&!ttsLive)) ? .5+.22*Math.sin(t*.006) : ((listening||(chatState==='speaking'&&ttsLive)) ? level : 0);
       // 画布扩到 200% 后按比例缩小基准半径，球体视觉大小与旧版一致（.36×128% ≈ .2304×200%）
       const base = Math.min(cw,ch)*.2304;
       const time = t*.00045;
@@ -155,11 +164,11 @@
       // 土星式光轮：整圈先画（后侧被球体遮挡），球体完成后再补前侧弧线。
       // 两根光环各自独立摆动：上下浮动、倾角晃动、平面进动与半径微呼吸，互不同步。
       const ringSway=[
-        {rr:base*1.14, color:'rgba(137,231,255,', lw:1.4, glow:'#57d7ff',
+        {rr:base*1.46, color:'rgba(137,231,255,', lw:1.4, glow:'#57d7ff',
          bobAmp:base*.05, bobSpd:.9,  bobPh:0,
          tilt:.38, tiltAmp:.09, tiltSpd:.7, tiltPh:1.2,
          spinAmp:.16, spinSpd:.35, spinPh:.4},
-        {rr:base*1.3, color:'rgba(150,158,255,', lw:1.1, glow:'#8e88ff',
+        {rr:base*1.64, color:'rgba(150,158,255,', lw:1.1, glow:'#8e88ff',
          bobAmp:base*.07, bobSpd:.6,  bobPh:2.4,
          tilt:.34, tiltAmp:.11, tiltSpd:.5, tiltPh:3.7,
          spinAmp:.2, spinSpd:.25, spinPh:1.9},
@@ -248,6 +257,38 @@
         coreCtx.beginPath();coreCtx.fillStyle=`rgba(${i%5===0?'194,160,255':'139,239,255'},${alpha})`;coreCtx.shadowBlur=i%13===0?7:2;coreCtx.shadowColor='#69dfff';coreCtx.arc(x,y,size,0,Math.PI*2);coreCtx.fill();
       }
       coreCtx.restore();
+      // 思考态动画（含 TTS 生成等待）：能量光环——呼吸光晕 + 向外扩散的声呐环 + 螺旋上升光尘（柔和，无生硬光束）
+      if(chatState==='thinking'||(chatState==='speaking'&&!ttsLive)){
+        const tp=t*.001;
+        coreCtx.save();coreCtx.globalCompositeOperation='lighter';
+        const haloR=base*(1.28+.12*Math.sin(tp*2.4));
+        const halo=coreCtx.createRadialGradient(cx,cy,base*.5,cx,cy,haloR);
+        halo.addColorStop(0,`rgba(120,225,255,${(.15+.05*Math.sin(tp*2.4)).toFixed(3)})`);
+        halo.addColorStop(.6,'rgba(90,180,255,.06)');
+        halo.addColorStop(1,'rgba(90,180,255,0)');
+        coreCtx.fillStyle=halo;coreCtx.beginPath();coreCtx.arc(cx,cy,haloR,0,Math.PI*2);coreCtx.fill();
+        for(let i=0;i<3;i++){ // 三道声呐环，相位错开，越扩越淡
+          const p=((tp*.4)+i/3)%1;
+          const rr=base*(1.06+p*1.3);
+          coreCtx.beginPath();
+          coreCtx.strokeStyle=`rgba(140,230,255,${(.3*(1-p)*(1-p)).toFixed(3)})`;
+          coreCtx.lineWidth=1.6-p*1.2;
+          coreCtx.shadowColor='#69dfff';coreCtx.shadowBlur=10;
+          coreCtx.arc(cx,cy,rr,0,Math.PI*2);coreCtx.stroke();
+        }
+        for(let i=0;i<12;i++){ // 光尘绕球螺旋上升，仿佛能量被吸入
+          const p=((tp*(.2+(i%5)*.05))+i*.41)%1;
+          const ang=i*2.4+tp*.6;
+          const rr=base*(1.45-p*.5);
+          const mx=cx+Math.cos(ang)*rr;
+          const my=cy+Math.sin(ang)*rr*.78-p*base*.5;
+          coreCtx.beginPath();
+          coreCtx.fillStyle=`rgba(170,240,255,${(Math.sin(p*Math.PI)*.5).toFixed(3)})`;
+          coreCtx.shadowBlur=6;coreCtx.shadowColor='#8ae8ff';
+          coreCtx.arc(mx,my,1.4,0,Math.PI*2);coreCtx.fill();
+        }
+        coreCtx.restore();
+      }
       core.style.filter=`brightness(${1+energy*.24}) saturate(${1+energy*.2})`;
       const orbit=Math.min(core.clientWidth*1.434,stageWidth*.5-112);
       const persp=1400; // 透视焦距：近处卫星放大、远处缩小
@@ -273,12 +314,13 @@
       if(inputLevel) inputLevel.textContent=Math.round(level*100)+'%';
       // 实时音量条：直观确认麦克风信号在驱动动效
       if(listening){
+        checkVAD(level,t); // VAD 自动分段：停顿后截取一段送识别
         const bars=Math.round(level*6);
         micCaption.textContent='▮'.repeat(bars)+'▯'.repeat(6-bars);
         // 信号诊断：监听中但持续无音量时，提示检查设备
-        if(level<.03){
+        if(level<.015){
           if(!silenceSince) silenceSince=t;
-          else if(t-silenceSince>2500) voiceStatus.textContent='✦  信号很弱：请检查 Windows 默认输入设备与浏览器麦克风权限';
+          else if(t-silenceSince>5000) voiceStatus.textContent='✦  信号很弱：请检查 Windows 默认输入设备与浏览器麦克风权限';
         } else silenceSince=0;
       } else silenceSince=0;
     }
@@ -340,6 +382,33 @@
         spaceCtx.arc(p.x+Math.sin(t*.0004+p.p)*2,p.y+Math.cos(t*.00032+p.p)*2,radius,0,Math.PI*2);spaceCtx.fill();
       }
       spaceCtx.shadowBlur=0;
+      // 发送冲击波：光轮从球心爆发，2.2 秒由慢到快冲出屏幕边缘后消散
+      if(shockwaves.length){
+        spaceCtx.save();spaceCtx.globalCompositeOperation='lighter';
+        const maxR=Math.hypot(width,height)*.62; // 超过对角线半径，确保冲出屏幕
+        for(let i=shockwaves.length-1;i>=0;i--){
+          const s=shockwaves[i],p=(t-s.start)/2200;
+          if(p>=1){shockwaves.splice(i,1);continue;}
+          const e=Math.pow(p,2.3); // 先蓄势后加速：从慢到快冲出屏幕
+          const r=70+(maxR-70)*e;
+          const fade=Math.pow(1-p,1.2);
+          spaceCtx.beginPath(); // 主光轮：粗亮边+辉光
+          spaceCtx.arc(s.cx,s.cy,r,0,Math.PI*2);
+          spaceCtx.strokeStyle=`rgba(150,238,255,${(.62*fade).toFixed(3)})`;
+          spaceCtx.lineWidth=4+13*fade;
+          spaceCtx.shadowColor='#6fe0ff';spaceCtx.shadowBlur=34*fade+10;
+          spaceCtx.stroke();
+          if(p>.08){ // 次级光轮：跟随其后，稍细更淡
+            const p2=Math.max(0,p-.09),e2=Math.pow(p2,2.3),r2=70+(maxR-70)*e2;
+            spaceCtx.beginPath();
+            spaceCtx.arc(s.cx,s.cy,r2,0,Math.PI*2);
+            spaceCtx.strokeStyle=`rgba(120,170,255,${(.3*fade).toFixed(3)})`;
+            spaceCtx.lineWidth=2.2+7*fade;
+            spaceCtx.stroke();
+          }
+        }
+        spaceCtx.restore();
+      }
     }
 
     function animate(t) {
@@ -348,37 +417,252 @@
       drawSpace(t); drawCore(t); frame=requestAnimationFrame(animate);
     }
 
-    // 语音识别（Chrome Web Speech API）：把用户说的话实时呈现到回复区，光标跟随文字
+    // 语音对话闭环（本地 Qwen3-ASR + Ollama + edge-tts）：
+    // 说话实时上屏 → 停顿 1.4s 自动发送 → 思考动画 → 回答打字机上屏 → 语音播报（球体随 AI 音量起伏）
     const replyText=document.getElementById('reply-text');
-    const SpeechRec=window.SpeechRecognition||window.webkitSpeechRecognition;
-    let recognizer=null,finalText='';
-    function startRecognition(){
-      if(!SpeechRec){voiceStatus.textContent='✦  当前浏览器不支持语音识别，请使用 Chrome';return;}
-      finalText='';replyText.textContent=''; // 新会话清空上一轮内容
-      recognizer=new SpeechRec();
-      recognizer.lang='zh-CN';recognizer.continuous=true;recognizer.interimResults=true;
-      recognizer.onresult=e=>{
-        let interim='';
-        for(let i=e.resultIndex;i<e.results.length;i++){
-          const res=e.results[i];
-          if(res.isFinal)finalText+=res[0].transcript;else interim+=res[0].transcript;
-        }
-        replyText.textContent=finalText+interim; // 光标 span 永远跟在文字后面
-      };
-      // Chrome 检测到静音会自动断开识别，持续聆听需要重启
-      recognizer.onend=()=>{if(listening&&recognizer){try{recognizer.start();}catch(_){}}};
-      recognizer.onerror=e=>{if(e.error==='not-allowed')voiceStatus.textContent='✦  语音识别被拒绝：请检查浏览器麦克风权限';};
-      try{recognizer.start();}catch(_){}
+    const aiText=document.getElementById('ai-text');
+    const replyBox=document.querySelector('.reply');
+    // 文字越多字号越小：超过 60 字逐级缩小，避免长回答盖住球体
+    function fitReplyFont(){
+      const len=(replyText.textContent+aiText.textContent).length;
+      const base=Math.min(27,Math.max(18,innerWidth*.0225)); // 对应 CSS clamp(18px,2.25vw,27px)
+      let scale=1;
+      if(len>160)scale=.68;else if(len>110)scale=.78;else if(len>60)scale=.88;
+      replyBox.style.fontSize=(base*scale).toFixed(1)+'px';
     }
-    function stopRecognition(){
-      if(!recognizer)return;
-      const r=recognizer;recognizer=null;r.onend=null;
-      try{r.stop();}catch(_){}
+    // 唤醒词（与主应用同款逻辑）：识别文本归一化后子串匹配"老叶老叶"，命中应答"我在"
+    let awake=false;
+    const WAKE_PHRASES=['老叶老叶','老爷老爷','老叶老叶老叶'];
+    const norm=s=>s.replace(/[\s，。！？、,.!?；;：:"'“”‘’（）()\[\]【】—…\-]/g,'').toLowerCase();
+    const isWakeText=text=>WAKE_PHRASES.some(p=>norm(text).includes(norm(p)));
+    async function respondWake(restText){
+      awake=true;turnActive=false;asrContext='';
+      chatState='speaking';voiceStatus.textContent='✦ 我在';
+      let buffer=null;
+      try{
+        const resp=await fetch('http://localhost:8770/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'我在。'})});
+        if(resp.ok&&audioContext&&audioContext.state!=='closed')buffer=await audioContext.decodeAudioData(await resp.arrayBuffer());
+      }catch(_){buffer=null;}
+      if(buffer&&audioContext&&audioContext.state!=='closed'){
+        if(audioContext.state==='suspended')await audioContext.resume();
+        chatState='speaking';ttsLive=true;
+        const an=audioContext.createAnalyser();an.fftSize=1024;an.smoothingTimeConstant=.78;
+        const src=audioContext.createBufferSource();src.buffer=buffer;
+        src.connect(an);an.connect(audioContext.destination);
+        ttsAnalyser=an;ttsSource=src;
+        await new Promise(res=>{src.onended=res;src.start();});
+        ttsAnalyser=null;ttsSource=null;ttsLive=false;
+      }
+      chatState='listening';
+      if(listening){
+        voiceStatus.textContent='✦ 我在 · 请讲';
+        if(restText){ // 唤醒词后直接跟的问题：剥掉唤醒词直接上屏
+          replyText.textContent='';aiText.textContent='';turnActive=true;
+          replyText.textContent=restText;asrContext=restText;fitReplyFont();
+          voiceStatus.textContent='✦ 我在 · 停顿后自动提问';
+        }
+        startNewRecorder();
+      }
+    }
+    let mediaRecorder=null,recordedChunks=[],asrBusy=false,asrQueue=[];
+    let segSilenceStart=0,hasVoiceInSeg=false,segVoiceStart=0;
+    let conversationHistory=[],turnActive=false,lastVoiceAt=0,asrContext='';
+    function startRecognition(){
+      replyText.textContent='';aiText.textContent='';
+      replyBox.style.fontSize=''; // 恢复默认字号
+      recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
+      conversationHistory=[];turnActive=false;asrContext='';awake=false;
+      chatState='listening';
+      voiceStatus.textContent='✦ 待唤醒 · 说「老叶老叶」开始对话';
+      preloadSendCue(); // 提前加载发送音效
+      startNewRecorder();
+    }
+    function startNewRecorder(){
+      if(!micStream){mediaRecorder=null;return;}
+      recordedChunks.length=0;segSilenceStart=0;hasVoiceInSeg=false;
+      try{
+        const rec=new MediaRecorder(micStream);
+        rec.ondataavailable=e=>{if(e.data.size>0)recordedChunks.push(e.data);};
+        rec.onstop=()=>{
+          const chunks=recordedChunks.splice(0,recordedChunks.length);
+          if(chunks.length>0){
+            const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
+            asrQueue.push(blob);processASRQueue();
+          }
+          if(listening&&chatState==='listening')startNewRecorder();
+        };
+        rec.start();mediaRecorder=rec;
+      }catch(_){mediaRecorder=null;}
+    }
+    async function processASRQueue(){
+      if(asrBusy||asrQueue.length===0)return;
+      asrBusy=true;
+      const blob=asrQueue.shift();
+      try{
+        // context=已识别前文，帮助分段边界断词连贯（qwen-asr 原生支持）
+        const resp=await fetch('http://localhost:8770/transcribe?context='+encodeURIComponent(asrContext.slice(-200)),{method:'POST',body:blob,headers:{'Content-Type':blob.type||'audio/webm'}});
+        const data=await resp.json();
+        if(data.text&&!awake){ // 未唤醒：只找唤醒词，其余文字不上屏
+          if(isWakeText(data.text)){
+            const rest=data.text.replace(/老\s*叶\s*老\s*叶|老\s*爷\s*老\s*爷/g,'').replace(/^[，。、,.\s]+|[，。、,.\s]+$/g,'');
+            respondWake(rest);
+          }
+          else voiceStatus.textContent='✦ 待唤醒 · 说「老叶老叶」开始对话';
+        }else if(data.text){
+          if(!turnActive){replyText.textContent='';aiText.textContent='';turnActive=true;} // 新一轮清空上一轮内容
+          replyText.textContent+=data.text; // 追加到现有文字，光标跟随
+          asrContext+=data.text;
+          fitReplyFont();
+        }
+        if(data.error)voiceStatus.textContent='✦ 识别失败：'+data.error;
+        else if(chatState==='listening')voiceStatus.textContent=awake?'✦ 聆听中 · 停顿后自动提问':'✦ 待唤醒 · 说「老叶老叶」开始对话';
+      }catch(error){
+        voiceStatus.textContent='✦ 识别失败：'+error.message;
+      }
+      asrBusy=false; // 识别完成不重置发送计时：lastVoiceAt 只由说话声音更新，文字出现后很快自动发送
+      if(asrQueue.length>0)processASRQueue();
+    }
+    // VAD 流水线（抗远处杂音）：触发门槛 0.055 + 连续 160ms 确认才算真语音；
+    // 远处声音音量小且断续，过不了确认；杂音也不更新发送计时（否则对话永不发出）
+    const VAD_OPEN=.055, VAD_CONFIRM_MS=160;
+    let voiceCandStart=0;
+    function checkVAD(level,t){
+      if(chatState!=='listening')return;
+      if(level>VAD_OPEN){
+        if(!voiceCandStart)voiceCandStart=t;
+        if(t-voiceCandStart>VAD_CONFIRM_MS){ // 持续确认：短促杂音被忽略
+          hasVoiceInSeg=true;segSilenceStart=0;lastVoiceAt=t;
+          if(!segVoiceStart)segVoiceStart=t;
+        }
+      } else {
+        voiceCandStart=0;
+        if(hasVoiceInSeg){
+          if(!segSilenceStart)segSilenceStart=t;
+          else if(t-segSilenceStart>300){segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;cutSegment();}
+        }
+      }
+      // 滚动切分：一段连续说话超过 2.5s 就切走送识别，说话期间文字持续上屏
+      if(hasVoiceInSeg&&segVoiceStart&&t-segVoiceStart>2500){segVoiceStart=0;segSilenceStart=0;hasVoiceInSeg=false;cutSegment();}
+      if(turnActive&&t-lastVoiceAt>1400&&!asrBusy&&asrQueue.length===0)autoSendChat();
+    }
+    function cutSegment(){try{mediaRecorder&&mediaRecorder.state==='recording'&&mediaRecorder.stop();}catch(_){}}
+    // 状态提示音：Web Audio 振荡器合成，轻柔不喧宾夺主
+    function playCue(kind){
+      if(!audioContext||audioContext.state==='closed')return;
+      if(audioContext.state==='suspended')audioContext.resume();
+      const now=audioContext.currentTime;
+      const master=audioContext.createGain();master.gain.value=.14;master.connect(audioContext.destination);
+      const note=(freq,start,dur,peak)=>{
+        const osc=audioContext.createOscillator(),g=audioContext.createGain();
+        osc.type='sine';osc.frequency.value=freq;
+        g.gain.setValueAtTime(0,now+start);
+        g.gain.linearRampToValueAtTime(peak,now+start+.05);
+        g.gain.exponentialRampToValueAtTime(.001,now+start+dur);
+        osc.connect(g);g.connect(master);
+        osc.start(now+start);osc.stop(now+start+dur+.05);
+      };
+      if(kind==='think'){note(523.25,0,.5,.4);note(783.99,.14,.6,.3);}    // 思考：柔和上行双音
+      else if(kind==='reply'){note(659.25,0,.7,.42);note(987.77,.1,.8,.22);} // 回答：温暖提示音
+      else if(kind==='done'){note(392,0,.55,.28);note(523.25,.12,.6,.18);} // 完毕：低音轻点，提示可以继续说话
+    }
+    // 发送音效：预加载 send.mp3（比合成音更有质感），未就绪时退回合成音
+    let sendCueBuffer=null;
+    async function preloadSendCue(){
+      if(sendCueBuffer||!audioContext||audioContext.state==='closed')return;
+      try{
+        const resp=await fetch('/send.mp3');
+        if(!resp.ok)return;
+        sendCueBuffer=await audioContext.decodeAudioData(await resp.arrayBuffer());
+      }catch(_){sendCueBuffer=null;}
+    }
+    function playSendCue(){
+      if(!sendCueBuffer||!audioContext||audioContext.state==='closed'){playCue('think');return;}
+      if(audioContext.state==='suspended')audioContext.resume();
+      const src=audioContext.createBufferSource();src.buffer=sendCueBuffer;
+      const g=audioContext.createGain();g.gain.value=.6;
+      src.connect(g);g.connect(audioContext.destination);src.start();
+    }
+    function spawnShockwave(){
+      const rect=coreCanvas.getBoundingClientRect(); // 光轮从球体实际屏幕位置爆发
+      shockwaves.push({cx:rect.left+rect.width/2,cy:rect.top+rect.height/2,start:performance.now()});
+    }
+    async function autoSendChat(){
+      chatState='thinking';turnActive=false;playSendCue();spawnShockwave();
+      const question=replyText.textContent.trim();
+      if(!question){chatState='listening';return;}
+      if(mediaRecorder){const r=mediaRecorder;mediaRecorder=null;r.onstop=null;try{r.stop();}catch(_){}} // 暂停录音，防止播报被录入
+      voiceStatus.textContent='✦ 正在思考…';
+      conversationHistory.push({role:'user',content:question});
+      if(conversationHistory.length>12)conversationHistory.splice(0,conversationHistory.length-12);
+      asrContext=''; // 新一轮提问的识别上下文独立
+      try{
+        const resp=await fetch('http://localhost:8770/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:conversationHistory})});
+        const data=await resp.json();
+        if(!data.text||data.error)throw new Error(data.error||'模型没有返回回答');
+        conversationHistory.push({role:'assistant',content:data.text});
+        await speakAnswer(data.text);
+      }catch(error){
+        voiceStatus.textContent='✦ 回答失败：'+error.message;
+        chatState='listening';turnActive=false;asrContext='';startNewRecorder();
+      }
+    }
+    async function speakAnswer(text){
+      chatState='speaking';voiceStatus.textContent='✦ 正在回答…';
+      let buffer=null;
+      try{ // 获取语音（失败则纯文字展示）
+        const resp=await fetch('http://localhost:8770/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+        if(resp.ok){
+          const arr=await resp.arrayBuffer();
+          if(audioContext&&audioContext.state!=='closed')buffer=await audioContext.decodeAudioData(arr);
+        }
+      }catch(_){buffer=null;}
+      const duration=buffer?buffer.duration:Math.max(2,text.length/4);
+      const start=performance.now();
+      const typeTimer=setInterval(()=>{ // 打字机与语音同步
+        const p=Math.min(1,(performance.now()-start)/(duration*1000));
+        aiText.textContent=text.slice(0,Math.round(text.length*p));
+        fitReplyFont();
+      },80);
+      if(buffer&&audioContext&&audioContext.state!=='closed'){
+        if(audioContext.state==='suspended')await audioContext.resume();
+        playCue('reply');
+        ttsAnalyser=audioContext.createAnalyser();ttsAnalyser.fftSize=1024;ttsAnalyser.smoothingTimeConstant=.78;
+        ttsSource=audioContext.createBufferSource();ttsSource.buffer=buffer;
+        ttsSource.connect(ttsAnalyser);ttsAnalyser.connect(audioContext.destination);
+        ttsLive=true; // TTS 开始播报：思考动画退场，球体改由 AI 音频驱动
+        await new Promise(res=>{ttsSource.onended=res;ttsSource.start();});
+        ttsSource=null;ttsAnalyser=null;ttsLive=false;
+      }else{
+        ttsLive=true; // 纯文字模式：打字开始即视为"回答中"，停止思考动画
+        await new Promise(res=>setTimeout(res,duration*1000));
+        ttsLive=false;
+      }
+      clearInterval(typeTimer);aiText.textContent=text;
+      if(!listening){chatState='idle';return;}
+      playCue('done');
+      voiceStatus.textContent='✦ 回答完毕 · 继续聆听';
+      chatState='listening';startNewRecorder();
+    }
+    async function stopRecognition(){
+      if(!mediaRecorder)return;
+      const rec=mediaRecorder;mediaRecorder=null;
+      await new Promise(resolve=>{
+        rec.onstop=()=>{
+          const chunks=recordedChunks.splice(0,recordedChunks.length);
+          if(chunks.length>0){
+            const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
+            asrQueue.push(blob);processASRQueue();
+          }
+          resolve();
+        };
+        try{rec.stop();}catch(_){resolve();}
+      });
     }
 
     async function startMicrophone() {
       if (listening) return;
       try {
+        stopGreeting(); // 欢迎语音还在播时先停掉，避免被麦克风录进去
         micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
         audioContext=new AudioContext();
         if(audioContext.state==='suspended') await audioContext.resume(); // 浏览器自动播放策略可能挂起上下文
@@ -394,8 +678,10 @@
     }
 
     async function stopMicrophone() {
-      listening=false;targetLevel=0;micStream?.getTracks().forEach(track=>track.stop());micStream=null;
-      stopRecognition();
+      listening=false;targetLevel=0;chatState='idle';
+      try{ttsSource&&ttsSource.stop();}catch(_){} // 停止 AI 播报
+      await stopRecognition(); // 先停止录音并识别（需在 micStream 仍存活时完成数据收集）
+      micStream?.getTracks().forEach(track=>track.stop());micStream=null;
       await audioContext?.close();audioContext=null;analyser=null;audioData=null;
       micCaption.textContent='试听动效';micButton.setAttribute('aria-label','开启麦克风');
     }
@@ -403,9 +689,41 @@
     micButton.addEventListener('click',startMicrophone);
     document.getElementById('end-button').addEventListener('click',async()=>{
       if (!listening) return;
+      voiceStatus.textContent='✦ 正在结束并识别…';
       await stopMicrophone();
-      voiceStatus.textContent='✦ 会话已结束';
     });
+
+    // 开场欢迎语音：页面加载即播放 test_chinese.wav，球体随语音起伏；
+    // 浏览器拦截自动播放时，等待首次点击再播
+    let greetBuffer=null,greetCtx=null;
+    function stopGreeting(){
+      if(ttsSource&&!analyser){try{ttsSource.stop();}catch(_){}} // 停掉属于欢迎语音的播报源
+      if(greetCtx){try{greetCtx.close();}catch(_){}}
+      greetCtx=null;greetBuffer=null;
+      if(!analyser){ttsAnalyser=null;ttsSource=null;ttsLive=false;if(chatState==='speaking')chatState='idle';}
+    }
+    async function playGreeting(){
+      if(!greetBuffer||!greetCtx)return;
+      try{if(greetCtx.state==='suspended')await greetCtx.resume();}catch(_){}
+      if(greetCtx.state!=='running')return; // 自动播放被拦截，等首次点击
+      chatState='speaking';ttsLive=true; // 复用 AI 播报通路：球体随音量起伏
+      const an=greetCtx.createAnalyser();an.fftSize=1024;an.smoothingTimeConstant=.78;
+      const src=greetCtx.createBufferSource();src.buffer=greetBuffer;
+      src.connect(an);an.connect(greetCtx.destination);
+      ttsAnalyser=an;ttsSource=src;
+      await new Promise(res=>{src.onended=res;src.start();});
+      ttsAnalyser=null;ttsSource=null;ttsLive=false;
+      greetBuffer=null;
+      if(chatState==='speaking')chatState='idle';
+    }
+    (async()=>{
+      try{
+        greetCtx=new (window.AudioContext||window.webkitAudioContext)();
+        const resp=await fetch('/test_chinese.wav');
+        if(resp.ok){greetBuffer=await greetCtx.decodeAudioData(await resp.arrayBuffer());await playGreeting();}
+      }catch(_){greetCtx=null;greetBuffer=null;}
+    })();
+    document.addEventListener('pointerdown',()=>{if(greetCtx&&greetCtx.state!=='running'&&greetBuffer)playGreeting();});
     resize();addEventListener('resize',resize);document.addEventListener('visibilitychange',()=>{if(!document.hidden) resize()});
     frame=requestAnimationFrame(animate);
   </script>
