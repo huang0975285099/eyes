@@ -7,9 +7,10 @@ const core = document.querySelector('.core');
 const micButton = document.getElementById('mic-button');
 const micCaption = document.getElementById('mic-caption');
 const voiceStatus = document.getElementById('voice-status');
+const inputLevelEl = document.getElementById('input-level');
 const stage = document.querySelector('.stage');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
-let width, height, stageWidth, pixelRatio, stars = [], audioContext, analyser, micStream, audioData;
+let width, height, stageWidth, pixelRatio, stars = [], audioContext, analyser, micStream, audioData, coreCanvasW = 0, coreCanvasH = 0, coreWidth = 0;
 let targetLevel = 0, level = 0, listening = false, frame = 0, silenceSince = 0;
 const shockwaves = []; // 发送冲击波：光轮从球体爆发，冲出屏幕边缘
 let chatState='idle'; // idle | listening | thinking | speaking
@@ -21,6 +22,7 @@ function resize() {
   spaceCanvas.width = width * pixelRatio; spaceCanvas.height = height * pixelRatio;
   spaceCtx.setTransform(pixelRatio,0,0,pixelRatio,0,0);
   const coreRect = coreCanvas.getBoundingClientRect();
+  coreCanvasW = coreRect.width; coreCanvasH = coreRect.height; coreWidth = core.clientWidth;
   coreCanvas.width = Math.max(1, Math.round(coreRect.width * pixelRatio));
   coreCanvas.height = Math.max(1, Math.round(coreRect.height * pixelRatio));
   coreCtx.setTransform(pixelRatio,0,0,pixelRatio,0,0);
@@ -41,6 +43,22 @@ function sampleMicrophone() {
   targetLevel = clamp((rms-.008)*14,0,1);
 }
 
+// 发光点 sprite 预渲染：把"圆点 + shadow 光晕"烘焙进离屏 canvas，
+// 用 drawImage 复用替代逐点 arc+fill+shadow（星点 750 + 球体粒子 190），大幅降低 shadow 渲染开销。
+function buildGlowSprite(size,dotColor,glowColor,dotR,glowBlur){
+  const c=document.createElement('canvas');c.width=c.height=size;
+  const g=c.getContext('2d');g.shadowColor=glowColor;g.shadowBlur=glowBlur;g.fillStyle=dotColor;
+  g.beginPath();g.arc(size/2,size/2,dotR,0,Math.PI*2);g.fill();return c;
+}
+// 星点 sprite：青(190)/紫(255) 两色相；drawImage 按 radius 缩放、globalAlpha 控透明
+const starSpriteSize=96,starSpriteDotR=3.2;
+const starSprite190=buildGlowSprite(starSpriteSize,'hsla(190,98%,84%,1)','hsla(190,100%,76%,1)',starSpriteDotR,13);
+const starSprite255=buildGlowSprite(starSpriteSize,'hsla(255,98%,84%,1)','hsla(255,100%,76%,1)',starSpriteDotR,13);
+// 球体粒子 sprite：青点/紫点，统一青色光晕
+const dotSpriteSize=32,dotSpriteDotR=2;
+const dotSpriteCyan=buildGlowSprite(dotSpriteSize,'rgba(139,239,255,1)','#69dfff',dotSpriteDotR,6);
+const dotSpritePurple=buildGlowSprite(dotSpriteSize,'rgba(194,160,255,1)','#69dfff',dotSpriteDotR,6);
+
 const orbitLabels=[...document.querySelectorAll('.orbit-label')];
 // 每个标签一颗独立“卫星”：各自轨道半径、速度、倾角与升交点方位，多平面交错环绕球体。
 const satelliteParams=orbitLabels.map((_,index)=>({
@@ -51,7 +69,7 @@ const satelliteParams=orbitLabels.map((_,index)=>({
   node:index*.97+(index%2)*.55,                      // 轨道平面方位角铺开
 }));
 function drawCore(t) {
-  const cw=coreCanvas.clientWidth, ch=coreCanvas.clientHeight;
+  const cw=coreCanvasW, ch=coreCanvasH;
   coreCtx.clearRect(0,0,cw,ch);
   level += (targetLevel-level) * (targetLevel>level ? .3 : .08);
   const idle = reduceMotion.matches ? .1 : .08*Math.sin(t*.0011)+.045*Math.sin(t*.0023+1.4);
@@ -167,8 +185,12 @@ function drawCore(t) {
     const x=cx+Math.cos(a)*radial+wobble*.22, y=cy+Math.sin(a)*radial+wobble;
     const size=(i%13===0?1.45:.65)+(Math.sin(time*3+i)*.22)+energy*.9;
     const alpha=.16+((Math.sin(time*2.4+i*1.73)+1)*.16)+energy*.36;
-    coreCtx.beginPath();coreCtx.fillStyle=`rgba(${i%5===0?'194,160,255':'139,239,255'},${alpha})`;coreCtx.shadowBlur=i%13===0?7:2;coreCtx.shadowColor='#69dfff';coreCtx.arc(x,y,size,0,Math.PI*2);coreCtx.fill();
+    const sprite=i%5===0?dotSpritePurple:dotSpriteCyan;
+    const dw=dotSpriteSize*size/dotSpriteDotR; // 点视觉半径=size：sprite 缩放比=size/dotR
+    coreCtx.globalAlpha=Math.max(0,Math.min(1,alpha));
+    coreCtx.drawImage(sprite,x-dw/2,y-dw/2,dw,dw);
   }
+  coreCtx.globalAlpha=1;
   coreCtx.restore();
   // 思考态动画（含 TTS 生成等待）：能量光环——呼吸光晕 + 向外扩散的声呐环 + 螺旋上升光尘（柔和，无生硬光束）
   if(chatState==='thinking'||(chatState==='speaking'&&!ttsLive)){
@@ -202,8 +224,9 @@ function drawCore(t) {
     }
     coreCtx.restore();
   }
+  coreCtx.restore(); // 还原 drawCore 开头 save()：避免 translate/rotate/scale 每帧累积与状态栈泄漏
   core.style.filter=`brightness(${1+energy*.24}) saturate(${1+energy*.2})`;
-  const orbit=Math.min(core.clientWidth*1.434,stageWidth*.5-112);
+  const orbit=Math.min(coreWidth*1.434,stageWidth*.5-112);
   const persp=1400; // 透视焦距：近处卫星放大、远处缩小
   orbitLabels.forEach((label,index)=>{
     const p=satelliteParams[index];
@@ -223,8 +246,7 @@ function drawCore(t) {
     label.style.filter=`blur(${((1-depth)*1.3).toFixed(2)}px)`;
     label.style.zIndex=z>0?'4':'0';
   });
-  const inputLevel=document.getElementById('input-level');
-  if(inputLevel) inputLevel.textContent=Math.round(level*100)+'%';
+  if(inputLevelEl) inputLevelEl.textContent=Math.round(level*100)+'%';
   // 实时音量条：直观确认麦克风信号在驱动动效
   if(listening){
     checkVAD(level,t); // VAD 自动分段：停顿后截取一段送识别
@@ -237,7 +259,7 @@ function drawCore(t) {
     } else silenceSince=0;
   } else {
     silenceSince=0;
-    if(wakeListening) checkWakeVAD(level,t); // 唤醒词 VAD：切段送 ASR，命中“老叶老叶”即进入会话
+    if(wakeListening) checkWakeVAD(level,t); // 唤醒词 VAD：切段送 ASR，命中“眉州眉州”即进入会话
   }
 }
 
@@ -291,12 +313,16 @@ function drawSpace(t) {
       const alpha=(1-dist/limit)*(.055+pulse*.14);spaceCtx.beginPath();spaceCtx.moveTo(a.x,a.y);spaceCtx.lineTo(b.x,b.y);spaceCtx.strokeStyle=`rgba(83,197,255,${alpha})`;spaceCtx.lineWidth=.5+pulse*.6;spaceCtx.stroke();
     }
   }
+  spaceCtx.shadowBlur=0; // drawImage 复用烘焙好的光晕，关闭画布 shadow 避免图像被二次投影
   for(const p of stars) {
     const flicker=.45+Math.sin(t*.001*p.s*8+p.p)*.3+Math.sin(t*.00031+p.p*2)*.11;
     const radius=p.r*(1+pulse*1.2*(.5+.5*Math.sin(t*.002+p.p)));
-    spaceCtx.beginPath();spaceCtx.fillStyle=`hsla(${p.hue},98%,${76+pulse*18}%,${p.a*flicker+pulse*.24})`;spaceCtx.shadowBlur=(p.r>1.15?12:5)+pulse*18;spaceCtx.shadowColor=`hsla(${p.hue},100%,76%,1)`;
-    spaceCtx.arc(p.x+Math.sin(t*.0004+p.p)*2,p.y+Math.cos(t*.00032+p.p)*2,radius,0,Math.PI*2);spaceCtx.fill();
+    const sprite=p.hue>200?starSprite255:starSprite190;
+    const dw=starSpriteSize*radius/starSpriteDotR; // 点视觉半径=radius：sprite 缩放比=radius/dotR
+    spaceCtx.globalAlpha=Math.max(0,Math.min(1,p.a*flicker+pulse*.24));
+    spaceCtx.drawImage(sprite,p.x+Math.sin(t*.0004+p.p)*2-dw/2,p.y+Math.cos(t*.00032+p.p)*2-dw/2,dw,dw);
   }
+  spaceCtx.globalAlpha=1;
   spaceCtx.shadowBlur=0;
   // 发送冲击波：光轮从球心爆发，2.2 秒由慢到快冲出屏幕边缘后消散
   if(shockwaves.length){

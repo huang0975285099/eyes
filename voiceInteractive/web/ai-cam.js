@@ -103,6 +103,7 @@ function closeCamWindow(deviceId){
   if(!slot)return;
   slot.win.classList.remove('open');
   setTimeout(()=>{ // 延迟释放摄像头与移除窗口，让退出动画跑完
+    if(slot.win.classList.contains('open'))return; // 期间被重新打开，取消关闭清理
     if(slot.stream){slot.stream.getTracks().forEach(t=>t.stop());slot.stream=null;}
     const v=slot.win.querySelector('video'); if(v)v.srcObject=null;
     slot.win.remove();
