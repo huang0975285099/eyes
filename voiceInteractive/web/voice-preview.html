@@ -430,40 +430,6 @@
       if(len>160)scale=.68;else if(len>110)scale=.78;else if(len>60)scale=.88;
       replyBox.style.fontSize=(base*scale).toFixed(1)+'px';
     }
-    // 唤醒词（与主应用同款逻辑）：识别文本归一化后子串匹配"老叶老叶"，命中应答"我在"
-    let awake=false;
-    const WAKE_PHRASES=['老叶老叶','老爷老爷','老叶老叶老叶'];
-    const norm=s=>s.replace(/[\s，。！？、,.!?；;：:"'“”‘’（）()\[\]【】—…\-]/g,'').toLowerCase();
-    const isWakeText=text=>WAKE_PHRASES.some(p=>norm(text).includes(norm(p)));
-    async function respondWake(restText){
-      awake=true;turnActive=false;asrContext='';
-      chatState='speaking';voiceStatus.textContent='✦ 我在';
-      let buffer=null;
-      try{
-        const resp=await fetch('http://localhost:8770/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'我在。'})});
-        if(resp.ok&&audioContext&&audioContext.state!=='closed')buffer=await audioContext.decodeAudioData(await resp.arrayBuffer());
-      }catch(_){buffer=null;}
-      if(buffer&&audioContext&&audioContext.state!=='closed'){
-        if(audioContext.state==='suspended')await audioContext.resume();
-        chatState='speaking';ttsLive=true;
-        const an=audioContext.createAnalyser();an.fftSize=1024;an.smoothingTimeConstant=.78;
-        const src=audioContext.createBufferSource();src.buffer=buffer;
-        src.connect(an);an.connect(audioContext.destination);
-        ttsAnalyser=an;ttsSource=src;
-        await new Promise(res=>{src.onended=res;src.start();});
-        ttsAnalyser=null;ttsSource=null;ttsLive=false;
-      }
-      chatState='listening';
-      if(listening){
-        voiceStatus.textContent='✦ 我在 · 请讲';
-        if(restText){ // 唤醒词后直接跟的问题：剥掉唤醒词直接上屏
-          replyText.textContent='';aiText.textContent='';turnActive=true;
-          replyText.textContent=restText;asrContext=restText;fitReplyFont();
-          voiceStatus.textContent='✦ 我在 · 停顿后自动提问';
-        }
-        startNewRecorder();
-      }
-    }
     let mediaRecorder=null,recordedChunks=[],asrBusy=false,asrQueue=[];
     let segSilenceStart=0,hasVoiceInSeg=false,segVoiceStart=0;
     let conversationHistory=[],turnActive=false,lastVoiceAt=0,asrContext='';
@@ -471,9 +437,8 @@
       replyText.textContent='';aiText.textContent='';
       replyBox.style.fontSize=''; // 恢复默认字号
       recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
-      conversationHistory=[];turnActive=false;asrContext='';awake=false;
+      conversationHistory=[];turnActive=false;asrContext='';
       chatState='listening';
-      voiceStatus.textContent='✦ 待唤醒 · 说「老叶老叶」开始对话';
       preloadSendCue(); // 提前加载发送音效
       startNewRecorder();
     }
@@ -502,20 +467,14 @@
         // context=已识别前文，帮助分段边界断词连贯（qwen-asr 原生支持）
         const resp=await fetch('http://localhost:8770/transcribe?context='+encodeURIComponent(asrContext.slice(-200)),{method:'POST',body:blob,headers:{'Content-Type':blob.type||'audio/webm'}});
         const data=await resp.json();
-        if(data.text&&!awake){ // 未唤醒：只找唤醒词，其余文字不上屏
-          if(isWakeText(data.text)){
-            const rest=data.text.replace(/老\s*叶\s*老\s*叶|老\s*爷\s*老\s*爷/g,'').replace(/^[，。、,.\s]+|[，。、,.\s]+$/g,'');
-            respondWake(rest);
-          }
-          else voiceStatus.textContent='✦ 待唤醒 · 说「老叶老叶」开始对话';
-        }else if(data.text){
+        if(data.text){
           if(!turnActive){replyText.textContent='';aiText.textContent='';turnActive=true;} // 新一轮清空上一轮内容
           replyText.textContent+=data.text; // 追加到现有文字，光标跟随
           asrContext+=data.text;
           fitReplyFont();
         }
         if(data.error)voiceStatus.textContent='✦ 识别失败：'+data.error;
-        else if(chatState==='listening')voiceStatus.textContent=awake?'✦ 聆听中 · 停顿后自动提问':'✦ 待唤醒 · 说「老叶老叶」开始对话';
+        else if(chatState==='listening')voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
       }catch(error){
         voiceStatus.textContent='✦ 识别失败：'+error.message;
       }
