@@ -334,7 +334,7 @@ def load_config(path: Path) -> Config:
         config_path=path.resolve(),
         input_device=raw.get("input_device", "Deli-1080P-Camera-Audio"),
         output_device=raw.get("output_device", "Deli-1080P-Camera Audio"),
-        wake_phrases=tuple(raw.get("wake_phrases", ["叮咚叮咚"])),
+        wake_phrases=tuple(raw.get("wake_phrases", ["叮咚叮咚", "丁冬丁冬", "丁东丁东"])),
         command_timeout_seconds=float(raw.get("command_timeout_seconds", 8.0)),
         conversation_history_turns=max(
             1, int(raw.get("conversation_history_turns", 6))

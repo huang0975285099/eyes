@@ -18,7 +18,7 @@ function fitReplyFont(){
   if(len>160)scale=.68;else if(len>110)scale=.78;else if(len>60)scale=.88;
   replyBox.style.fontSize=(base*scale).toFixed(1)+'px';
 }
-let mediaRecorder=null,recordedChunks=[],asrBusy=false,asrQueue=[];
+let mediaRecorder=null,recordedChunks=[],asrBusy=false,asrQueue=[],micDest=null;
 let segSilenceStart=0,hasVoiceInSeg=false,segVoiceStart=0;
 let typeTimer=null; // 打字机定时器（外层引用，便于结束会话时清除）
 let conversationHistory=[],turnActive=false,lastVoiceAt=0,asrContext='';
@@ -36,13 +36,14 @@ function startNewRecorder(){
   if(!micStream){mediaRecorder=null;return;}
   recordedChunks.length=0;segSilenceStart=0;hasVoiceInSeg=false;
   try{
-    const rec=new MediaRecorder(micStream);
+    const rec=new MediaRecorder(micDest?micDest.stream:micStream);
     rec.ondataavailable=e=>{if(e.data.size>0)recordedChunks.push(e.data);};
-    rec.onstop=()=>{
+    rec.onstop=async()=>{
       const chunks=recordedChunks.splice(0,recordedChunks.length);
       if(chunks.length>0){
         const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
-        asrQueue.push(blob);processASRQueue();
+        const rms=await segRMS(audioContext,blob);
+        if(rms>=SEG_RMS_MIN){asrQueue.push(blob);processASRQueue();} // 段能量过低（远场/噪声）丢弃
       }
       if(listening&&chatState==='listening')startNewRecorder();
     };
@@ -76,9 +77,22 @@ async function processASRQueue(){
   if(goodbye){sendGoodbye();return;} // “再见”走告别流程：发送音效+动画 → AI 告别 → 结束会话
   if(asrQueue.length>0)processASRQueue();
 }
-// VAD 流水线（抗远处杂音）：触发门槛 0.055 + 连续 160ms 确认才算真语音；
-// 远处声音音量小且断续，过不了确认；杂音也不更新发送计时（否则对话永不发出）
-const VAD_OPEN=.15, VAD_CONFIRM_MS=160;
+// VAD 流水线（抗远场人声串扰）：触发门槛 + 连续确认才算真语音；
+// level 经 (rms-.008)*14 放大，远场也被推高，故瞬时门槛区分力有限
+// ⚠ 0.5 米 vs 1 米仅 2 倍距离、RMS 区分窗口极窄：门限卡高则误杀近场、卡低则漏远场，软件无法兼顾
+// 故 SEG_RMS_MIN 保持保守值保近场识别，1 米外串扰请靠硬件（指向性麦）或调低 Windows 麦克风增益
+const VAD_OPEN=.22, VAD_CONFIRM_MS=220;
+// 段能量门限：原始 RMS 低于此值视为远场/噪声，丢弃不送识别（0.5↔1 米场景下勿再调高，会误杀近场）
+const SEG_RMS_MIN=0.02;
+async function segRMS(ctx,blob){
+  try{
+    const buf=await ctx.decodeAudioData(await blob.arrayBuffer());
+    const d=buf.getChannelData(0);
+    let s=0;const n=d.length;
+    for(let i=0;i<n;i++)s+=d[i]*d[i];
+    return Math.sqrt(s/n);
+  }catch(_){return 1;} // 解码失败不丢弃，避免误伤
+}
 let voiceCandStart=0;
 function checkVAD(level,t){
   if(chatState!=='listening')return;
@@ -293,13 +307,13 @@ async function stopRecognition(){
 }
 
 // ===== 唤醒词“叮咚叮咚”：idle 态持续监听麦克风，命中后自动进入会话 =====
-let wakeStream=null,wakeCtx=null,wakeAnalyser=null,wakeData=null;
+let wakeStream=null,wakeCtx=null,wakeAnalyser=null,wakeData=null,wakeDest=null;
 let wakeRecorder=null,wakeChunks=[],wakeAsrBusy=false,wakeQueue=[];
 let wakeListening=false,wakeCandStart=0,wakeSilence=0,wakeVoice=false,wakeVoiceStart=0;
-// 唤醒词判定：清理标点空白后，“叮咚”出现 ≥2 次即命中（兼容“叮咚叮咚”/“叮咚 叮咚”等）
+// 唤醒词判定：清理标点空白后，"叮咚/丁冬/丁东"出现 ≥2 次即命中（兼容同音异字）
 function isWakeWord(text){
   const clean=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
-  return (clean.match(/叮咚/g)||[]).length>=2;
+  return (clean.match(/叮咚|丁冬|丁东/g)||[]).length>=2;
 }
 // 退出词“再见”判定：清理标点空白后包含“再见”即命中（兼容“再见”/“好的再见”/“再见啦”等）
 function isGoodbye(text){
@@ -314,7 +328,9 @@ async function startWakeWord(){
     const src=wakeCtx.createMediaStreamSource(wakeStream);
     const hp=wakeCtx.createBiquadFilter();hp.type='highpass';hp.frequency.value=150;hp.Q.value=.7;
     wakeAnalyser=wakeCtx.createAnalyser();wakeAnalyser.fftSize=1024;wakeAnalyser.smoothingTimeConstant=.78;
-    src.connect(hp);hp.connect(wakeAnalyser);wakeData=new Uint8Array(wakeAnalyser.fftSize);
+    src.connect(hp);hp.connect(wakeAnalyser);
+    wakeDest=wakeCtx.createMediaStreamDestination();hp.connect(wakeDest); // 录音流也走高通，识别音频享到降噪
+    wakeData=new Uint8Array(wakeAnalyser.fftSize);
     wakeListening=true;
     if(chatState==='idle'){voiceStatus.textContent='✦  说出“叮咚叮咚”唤醒我';micCaption.textContent='等待唤醒';}
     startWakeRecorder();
@@ -327,14 +343,16 @@ function startWakeRecorder(){
   if(!wakeStream||!wakeListening){wakeRecorder=null;return;}
   wakeChunks.length=0;
   try{
-    const rec=new MediaRecorder(wakeStream);
+    const rec=new MediaRecorder(wakeDest?wakeDest.stream:wakeStream);
     rec.ondataavailable=e=>{if(e.data.size>0)wakeChunks.push(e.data);};
-    rec.onstop=()=>{
+    rec.onstop=async()=>{
       if(!wakeListening){wakeChunks.length=0;return;} // 已停止，丢弃残留
       const chunks=wakeChunks.splice(0,wakeChunks.length);
       if(chunks.length>0){
         const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
-        wakeQueue.push(blob);processWakeASR();
+        const rms=await segRMS(wakeCtx,blob);
+        console.log('[wake] rms=',rms.toFixed(3),'min=',SEG_RMS_MIN,'pass=',rms>=SEG_RMS_MIN);
+        if(rms>=SEG_RMS_MIN){wakeQueue.push(blob);processWakeASR();}
       }
       startWakeRecorder(); // 连续分段录制
     };
@@ -349,6 +367,7 @@ async function processWakeASR(){
   try{
     const resp=await fetchWithTimeout('http://localhost:8770/transcribe',{method:'POST',body:blob,headers:{'Content-Type':blob.type||'audio/webm'}},30000);
     const data=await resp.json();
+    console.log('[wake] asr=',JSON.stringify(data),'isWake=',data.text?isWakeWord(data.text):false);
     if(data.text&&isWakeWord(data.text)){
       wakeListening=false; // 立即停掉监听，防止重复触发
       voiceStatus.textContent='✦  唤醒成功 · 进入会话';
@@ -378,7 +397,7 @@ async function stopWakeWord(){
   try{wakeRecorder&&wakeRecorder.state==='recording'&&wakeRecorder.stop();}catch(_){}
   wakeRecorder=null;
   wakeStream?.getTracks().forEach(track=>track.stop());wakeStream=null;
-  await wakeCtx?.close();wakeCtx=null;wakeAnalyser=null;wakeData=null;
+  await wakeCtx?.close();wakeCtx=null;wakeAnalyser=null;wakeData=null;wakeDest=null;
   wakeQueue.length=0;wakeAsrBusy=false;
   wakeCandStart=0;wakeSilence=0;wakeVoice=false;wakeVoiceStart=0;
   micCaption.textContent='开始会话';
@@ -395,7 +414,9 @@ async function startMicrophone(ack) {
     analyser=audioContext.createAnalyser();analyser.fftSize=1024;analyser.smoothingTimeConstant=.78;
     // 高通滤波器：切除 150Hz 以下的低频（远处人声经距离衰减后只剩低频闷声，近处说话不受影响）
     const highpass=audioContext.createBiquadFilter();highpass.type='highpass';highpass.frequency.value=150;highpass.Q.value=.7;
-    audioContext.createMediaStreamSource(micStream).connect(highpass);highpass.connect(analyser);audioData=new Uint8Array(analyser.fftSize);listening=true;
+    audioContext.createMediaStreamSource(micStream).connect(highpass);highpass.connect(analyser);
+    micDest=audioContext.createMediaStreamDestination();highpass.connect(micDest); // 录音流也走高通，识别音频享到降噪
+    audioData=new Uint8Array(analyser.fftSize);listening=true;
     micCaption.textContent='麦克风监听中';micButton.setAttribute('aria-label','麦克风输入中');
     if(ack){
       await speakWakeAck(ack); // 唤醒确认：先回一句“我在。”再进入聆听
@@ -416,7 +437,7 @@ async function stopMicrophone() {
   if(typeTimer){clearInterval(typeTimer);typeTimer=null;} // 兜底：确保打字机停止
   await stopRecognition(); // 先停止录音并识别（需在 micStream 仍存活时完成数据收集）
   micStream?.getTracks().forEach(track=>track.stop());micStream=null;
-  await audioContext?.close();audioContext=null;analyser=null;audioData=null;
+  await audioContext?.close();audioContext=null;analyser=null;audioData=null;micDest=null;
   ttsAnalyser=null;ttsSource=null;ttsLive=false;
   asrQueue.length=0;asrBusy=false; // 丢弃队列里待识别的音频，防止结束后还有文字写回
   micCaption.textContent='开始会话';micButton.setAttribute('aria-label','开启麦克风');

@@ -2,7 +2,9 @@
   "input_device": "麦克风 (Deli-1080P-Camera-Audio)",
   "output_device": "Speakers (Deli-1080P-Camera Audio)",
   "wake_phrases": [
-    "叮咚叮咚"
+    "叮咚叮咚",
+    "丁冬丁冬",
+    "丁东丁东"
   ],
   "command_timeout_seconds": 30.0,
   "conversation_history_turns": 6,

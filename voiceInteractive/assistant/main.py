@@ -115,7 +115,6 @@ def main() -> int:
             try:
                 asr_process = subprocess.Popen(
                     [sys.executable, "-u", "-m", "assistant.asr_server"],
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 print("ASR 服务（8770）后台启动中……")
             except Exception as error:
