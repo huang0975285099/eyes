@@ -117,18 +117,5 @@ function isVoiceCommand(text){
   if(/摄像头/.test(s)&&/(关闭|关掉|关上|收起|关了)/.test(s))return 'close_cam';
   return null;
 }
-// 语音指令执行：跳过 Ollama，直接执行动作 + TTS 语音反馈，播完回聆听
-async function handleVoiceCommand(cmd){
-  turnActive=false;asrContext='';
-  if(mediaRecorder){const r=mediaRecorder;mediaRecorder=null;r.onstop=null;try{r.stop();}catch(_){}} // 暂停录音，避免反馈被录入
-  let reply='';
-  if(cmd==='open_cam'){voiceStatus.textContent='✦ 正在打开摄像头…';openAllCameras();reply='好的，摄像头已打开。';}
-  else if(cmd==='close_cam'){voiceStatus.textContent='✦ 正在关闭摄像头…';closeAllCameras();reply='好的，摄像头已关闭。';}
-  await speakAnswer(reply,true); // 语音反馈，播完即返回（不回聆听、不重启录音）
-  if(!listening){chatState='idle';return;} // 期间点了结束会话
-  recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
-  chatState='listening';voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
-  startNewRecorder();
-}
 // 点击任意卫星标签：同时弹出所有摄像头窗口
 orbitLabels.forEach(label=>label.addEventListener('click',openAllCameras));

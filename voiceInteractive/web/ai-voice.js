@@ -49,11 +49,12 @@ function startNewRecorder(){
     rec.start();mediaRecorder=rec;
   }catch(_){mediaRecorder=null;}
 }
+let pendingCommand=null; // 待执行的语音指令（识别时设标志，停顿后随 autoSendChat 执行，与正常提问时序一致）
 async function processASRQueue(){
   if(asrBusy||asrQueue.length===0)return;
   asrBusy=true;
   const blob=asrQueue.shift();
-  let goodbye=false, cmd=null;
+  let goodbye=false;
   try{
     // context=已识别前文，帮助分段边界断词连贯（qwen-asr 原生支持）
     const resp=await fetchWithTimeout('http://localhost:8770/transcribe?context='+encodeURIComponent(asrContext.slice(-200)),{method:'POST',body:blob,headers:{'Content-Type':blob.type||'audio/webm'}},30000);
@@ -64,7 +65,7 @@ async function processASRQueue(){
       asrContext+=data.text;
       fitReplyFont();
       if(isGoodbye(data.text))goodbye=true; // “再见”照常上屏，稍后走告别流程（发送→AI告别→结束）
-      else { const c=isVoiceCommand(replyText.textContent); if(c)cmd=c; } // 语音指令：打开/关闭摄像头（按累计文字匹配，兼容分段识别）
+      else { const c=isVoiceCommand(replyText.textContent); if(c)pendingCommand=c; } // 语音指令：先上屏，停顿后随 autoSendChat 一起执行（与正常提问时序一致）
     }
     if(data.error&&chatState==='listening')voiceStatus.textContent='✦ 识别失败：'+data.error;
     else if(chatState==='listening')voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
@@ -73,7 +74,6 @@ async function processASRQueue(){
   }
   asrBusy=false; // 识别完成不重置发送计时：lastVoiceAt 只由说话声音更新，文字出现后很快自动发送
   if(goodbye){sendGoodbye();return;} // “再见”走告别流程：发送音效+动画 → AI 告别 → 结束会话
-  if(cmd){handleVoiceCommand(cmd);return;} // 语音指令：不发给 Ollama，直接执行并语音反馈
   if(asrQueue.length>0)processASRQueue();
 }
 // VAD 流水线（抗远处杂音）：触发门槛 0.055 + 连续 160ms 确认才算真语音；
@@ -168,6 +168,18 @@ async function autoSendChat(){
   const question=replyText.textContent.trim();
   if(!question){chatState='listening';return;}
   if(mediaRecorder){const r=mediaRecorder;mediaRecorder=null;r.onstop=null;try{r.stop();}catch(_){}} // 暂停录音，防止播报被录入
+  // 语音指令（打开/关闭摄像头）：说完停顿后随发送流程一起执行，共享发送音效+冲击波，跳过 Ollama
+  if(pendingCommand){
+    const cmd=pendingCommand;pendingCommand=null;
+    const reply=cmd==='open_cam'?'好的，摄像头已打开。':'好的，摄像头已关闭。';
+    await speakAnswer(reply,true); // 先语音反馈
+    if(!listening){chatState='idle';return;} // 期间点了结束会话
+    recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
+    chatState='listening';voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
+    startNewRecorder(); // 回聆听
+    if(cmd==='open_cam')openAllCameras(); else if(cmd==='close_cam')closeAllCameras(); // 最后执行动作（异步，不阻塞对话）
+    return;
+  }
   voiceStatus.textContent='✦ 正在思考…';
   conversationHistory.push({role:'user',content:question});
   if(conversationHistory.length>12)conversationHistory.splice(0,conversationHistory.length-12);
@@ -415,7 +427,7 @@ function resetUI(){
   aiText.textContent='';
   replyBox.style.fontSize='';
   voiceStatus.textContent='✦ 待机中';
-  conversationHistory=[];asrContext='';turnActive=false;
+  conversationHistory=[];asrContext='';turnActive=false;pendingCommand=null;
   shockwaves.length=0;
 }
 
