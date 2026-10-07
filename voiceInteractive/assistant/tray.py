@@ -44,11 +44,6 @@ class SystemTray:
                 self.toggle_scene_broadcast,
                 checked=lambda _: self.dashboard.store.scene_broadcast_enabled(),
             ),
-            pystray.MenuItem(
-                "人脸识别",
-                self.toggle_face_recognition,
-                checked=lambda _: self.dashboard.face_service.enabled,
-            ),
             pystray.MenuItem("测试通知", self.test_notification),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出老叶", self.exit_application),
@@ -108,13 +103,6 @@ class SystemTray:
                     frame, self.dashboard.config.scene_broadcast_cooldown_seconds
                 )
         self._refresh("动态画面播报已开启" if enabled else "动态画面播报已关闭")
-
-    def toggle_face_recognition(self, *_: Any) -> None:
-        enabled = not self.dashboard.face_service.enabled
-        self.dashboard.face_service.set_enabled(enabled)
-        if enabled:
-            self.dashboard.native_camera.ensure_enabled()
-        self._refresh("人脸识别已开启" if enabled else "人脸识别已关闭")
 
     def notify_motion(self, event: dict) -> None:
         if not self.notifications_enabled:

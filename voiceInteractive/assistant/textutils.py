@@ -292,7 +292,7 @@ def is_vision_command(text: str) -> bool:
     return (
         "什么" in normalized
         and ("看到" in normalized or "看见" in normalized)
-    ) or is_person_identity_query(text) or any(
+    ) or any(
         phrase in normalized
         for phrase in (
             "你看到了什么",
@@ -304,34 +304,7 @@ def is_vision_command(text: str) -> bool:
             "看看前面",
             "看一下前面",
             "你能看到什么",
-            # 询问画面中人员身份的问句也走视觉分支，与人员库匹配后回答。
-            "画面里的人是谁",
-            "画面里的人是",
-            "画面里有谁",
-            "摄像头里的人是谁",
-            "摄像头里有谁",
-            "镜头里的人是谁",
-            "镜头里有谁",
-            "这个人是谁",
-            "这位是谁",
-            "那位是谁",
-            "里面是谁",
-            "他是谁",
-            "她是谁",
         )
-    )
-
-
-def is_person_identity_query(text: str) -> bool:
-    """Questions asking who is visible must use the local face database."""
-    normalized = normalize_text(text)
-    if any(phrase in normalized for phrase in ("这个人是谁", "那个人是谁", "这位是谁", "那位是谁")):
-        return True
-    if normalized in {"他是谁", "她是谁", "是谁"}:
-        return True
-    scene_words = ("画面", "镜头", "摄像头", "屏幕", "眼前")
-    return any(word in normalized for word in scene_words) and (
-        "是谁" in normalized or "有谁" in normalized or "谁在" in normalized
     )
 
 
@@ -378,11 +351,6 @@ def is_vision_follow_up(text: str) -> bool:
     )
 
 
-def is_person_location_query(text: str) -> bool:
-    normalized = normalize_text(text)
-    return any(phrase in normalized for phrase in ("在哪", "在哪里", "哪边", "什么位置"))
-
-
 def select_actionable_recognition(
     alternatives: list[str], wake_phrases: tuple[str, ...], state: str
 ) -> str:
@@ -401,7 +369,6 @@ def select_actionable_recognition(
                 is_exit_command,
                 is_end_conversation_command,
                 is_vision_command,
-                is_person_location_query,
             )
         )
 

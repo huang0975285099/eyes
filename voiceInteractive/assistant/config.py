@@ -173,32 +173,6 @@ class Config:
     yolo_confidence: float
     yolo_image_size: int
     yolo_timeout_seconds: float
-    face_recognition_enabled: bool
-    face_python_executable: str
-    face_detector_model_path: Path
-    face_recognizer_model_path: Path
-    face_database_path: Path
-    face_detector_score_threshold: float
-    face_match_threshold: float
-    face_match_margin: float
-    face_min_size: int
-    face_min_blur: float
-    face_result_max_age_seconds: float
-    face_timeout_seconds: float
-    face_greeting_enabled: bool
-    face_greeting_cooldown_seconds: float
-    gesture_control_enabled: bool
-    gesture_python_executable: str
-    gesture_hand_model_path: Path
-    gesture_face_model_path: Path
-    gesture_min_confidence: float
-    gesture_submit_interval_seconds: float
-    gesture_confirm_frames: int
-    gesture_action_cooldown_seconds: float
-    gesture_result_max_age_seconds: float
-    gesture_timeout_seconds: float
-    gesture_expression_enabled: bool
-    gesture_expression_cooldown_seconds: float
     model_path: Path
     model_url: str
 
@@ -301,35 +275,6 @@ def load_config(path: Path) -> Config:
     yolo_model_path = Path(raw.get("yolo_model_path", "models/yolov8n.pt"))
     if not yolo_model_path.is_absolute():
         yolo_model_path = APP_DIR / yolo_model_path
-    face_detector_model_path = Path(
-        raw.get(
-            "face_detector_model_path",
-            "models/face/face_detection_yunet_2023mar.onnx",
-        )
-    )
-    if not face_detector_model_path.is_absolute():
-        face_detector_model_path = APP_DIR / face_detector_model_path
-    face_recognizer_model_path = Path(
-        raw.get(
-            "face_recognizer_model_path",
-            "models/face/face_recognition_sface_2021dec.onnx",
-        )
-    )
-    if not face_recognizer_model_path.is_absolute():
-        face_recognizer_model_path = APP_DIR / face_recognizer_model_path
-    face_database_path = Path(raw.get("face_database_path", "data/faces/faces.db"))
-    if not face_database_path.is_absolute():
-        face_database_path = APP_DIR / face_database_path
-    gesture_hand_model_path = Path(
-        raw.get("gesture_hand_model_path", "models/gesture/hand_landmarker.task")
-    )
-    if not gesture_hand_model_path.is_absolute():
-        gesture_hand_model_path = APP_DIR / gesture_hand_model_path
-    gesture_face_model_path = Path(
-        raw.get("gesture_face_model_path", "models/gesture/face_landmarker.task")
-    )
-    if not gesture_face_model_path.is_absolute():
-        gesture_face_model_path = APP_DIR / gesture_face_model_path
     return Config(
         config_path=path.resolve(),
         input_device=raw.get("input_device", "Deli-1080P-Camera-Audio"),
@@ -445,64 +390,6 @@ def load_config(path: Path) -> Config:
         yolo_image_size=max(320, min(1280, int(raw.get("yolo_image_size", 640)))),
         yolo_timeout_seconds=max(
             2.0, float(raw.get("yolo_timeout_seconds", 30.0))
-        ),
-        face_recognition_enabled=bool(raw.get("face_recognition_enabled", False)),
-        face_python_executable=str(
-            raw.get("face_python_executable", raw.get("yolo_python_executable", "python"))
-        ).strip(),
-        face_detector_model_path=face_detector_model_path,
-        face_recognizer_model_path=face_recognizer_model_path,
-        face_database_path=face_database_path,
-        face_detector_score_threshold=max(
-            0.5, min(0.99, float(raw.get("face_detector_score_threshold", 0.88)))
-        ),
-        face_match_threshold=max(
-            0.1, min(0.95, float(raw.get("face_match_threshold", 0.48)))
-        ),
-        face_match_margin=max(
-            0.0, min(0.5, float(raw.get("face_match_margin", 0.05)))
-        ),
-        face_min_size=max(40, int(raw.get("face_min_size", 80))),
-        face_min_blur=max(0.0, float(raw.get("face_min_blur", 35.0))),
-        face_result_max_age_seconds=max(
-            2.0, float(raw.get("face_result_max_age_seconds", 5.0))
-        ),
-        face_timeout_seconds=max(
-            2.0, float(raw.get("face_timeout_seconds", 20.0))
-        ),
-        face_greeting_enabled=bool(raw.get("face_greeting_enabled", True)),
-        face_greeting_cooldown_seconds=min(
-            3600.0, max(30.0, float(raw.get("face_greeting_cooldown_seconds", 300.0)))
-        ),
-        gesture_control_enabled=bool(raw.get("gesture_control_enabled", False)),
-        gesture_python_executable=str(
-            raw.get("gesture_python_executable", raw.get("yolo_python_executable", "python"))
-        ).strip(),
-        gesture_hand_model_path=gesture_hand_model_path,
-        gesture_face_model_path=gesture_face_model_path,
-        gesture_min_confidence=max(
-            0.1, min(0.95, float(raw.get("gesture_min_confidence", 0.5)))
-        ),
-        gesture_submit_interval_seconds=max(
-            0.2, float(raw.get("gesture_submit_interval_seconds", 0.5))
-        ),
-        gesture_confirm_frames=max(
-            2, min(10, int(raw.get("gesture_confirm_frames", 2)))
-        ),
-        gesture_action_cooldown_seconds=max(
-            1.0, float(raw.get("gesture_action_cooldown_seconds", 3.0))
-        ),
-        gesture_result_max_age_seconds=max(
-            2.0, float(raw.get("gesture_result_max_age_seconds", 4.0))
-        ),
-        gesture_timeout_seconds=max(
-            2.0, float(raw.get("gesture_timeout_seconds", 20.0))
-        ),
-        gesture_expression_enabled=bool(
-            raw.get("gesture_expression_enabled", True)
-        ),
-        gesture_expression_cooldown_seconds=min(
-            600.0, max(15.0, float(raw.get("gesture_expression_cooldown_seconds", 90.0)))
         ),
         model_path=model_path,
         model_url=raw.get("model_url", DEFAULT_MODEL_URL),

@@ -177,6 +177,27 @@ function playDoneCue(){
   src.connect(g);g.connect(audioContext.destination);src.start();
 }
 
+// blob 转 base64 字符串（去掉 data: 前缀）
+function blobToBase64(blob){
+  return new Promise((res,rej)=>{
+    const r=new FileReader();
+    r.onload=()=>{const s=String(r.result||'');res(s.includes(',')?s.split(',')[1]:s);};
+    r.onerror=()=>rej(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+// 视觉问句判定：含“摄像头”+描述意图，并提取编号（阿拉伯/中文数字）；未指定编号时回退1号
+function isVisionQuestion(text){
+  const s=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
+  if(!/摄像头/.test(s))return null;
+  if(!/(是什么|有什么|是啥|里有啥|里是啥|看到了什么|看到什么|看见什么|看见了什么|画面是什么|画面里|拍到了什么|拍到什么|描述一下|描述|里面有啥|里面有什么)/.test(s))return null;
+  const cn={'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9};
+  let idx=null,m=s.match(/([一二三四五六七八九]|\d+)\s*号摄像头/);
+  if(!m)m=s.match(/摄像头\s*([一二三四五六七八九]|\d+)/);
+  if(m){const raw=m[1];idx=cn[raw]!==undefined?cn[raw]:(/^\d+$/.test(raw)?parseInt(raw,10):null);}
+  if(!idx||idx<1)return {index:1,fallback:true};
+  return {index:idx,fallback:false};
+}
 async function autoSendChat(){
   chatState='thinking';turnActive=false;playSendCue();spawnShockwave();
   const question=replyText.textContent.trim();
@@ -192,6 +213,47 @@ async function autoSendChat(){
     chatState='listening';voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
     startNewRecorder(); // 回聆听
     if(cmd==='open_cam')openAllCameras(); else if(cmd==='close_cam')closeAllCameras(); // 最后执行动作（异步，不阻塞对话）
+    return;
+  }
+  // 视觉问句：“X号摄像头里是什么” → 截取该窗口当前帧送后端视觉模型描述
+  const vq=isVisionQuestion(question);
+  if(vq){
+    const slot=camSlots[vq.index-1];
+    if(!slot||!slot.stream){
+      const msg=vq.fallback?'当前没有打开的摄像头，请先说“打开摄像头”。':`没有找到${vq.index}号摄像头，请先打开它。`;
+      await speakAnswer(msg,true);
+      if(!listening){chatState='idle';return;}
+      recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
+      chatState='listening';voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
+      startNewRecorder();
+      return;
+    }
+    const blob=await captureCamFrame(vq.index);
+    if(!blob){
+      await speakAnswer(`${vq.index}号摄像头画面还没准备好，稍等一下再问。`,true);
+      if(!listening){chatState='idle';return;}
+      recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
+      chatState='listening';voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
+      startNewRecorder();
+      return;
+    }
+    voiceStatus.textContent=`✦ 正在分析${vq.index}号摄像头画面…`;
+    try{
+      const b64=await blobToBase64(blob);
+      const resp=await fetchWithTimeout('http://localhost:8770/vision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:question,image:b64})},60000);
+      const data=await resp.json();
+      if(chatState!=='thinking')return; // 会话已结束，丢弃迟到的回答
+      if(!data.text||data.error)throw new Error(data.error||'视觉模型没有返回描述');
+      const ans=data.text.length>2000?data.text.slice(0,2000)+'…':data.text;
+      conversationHistory.push({role:'user',content:question});
+      conversationHistory.push({role:'assistant',content:ans});
+      if(conversationHistory.length>12)conversationHistory.splice(0,conversationHistory.length-12);
+      await speakAnswer(data.text);
+    }catch(error){
+      if(chatState==='idle')return; // 已结束会话
+      voiceStatus.textContent='✦ 画面分析失败：'+(error.name==='AbortError'?'视觉模型响应超时':error.message);
+      chatState='listening';turnActive=false;asrContext='';startNewRecorder();
+    }
     return;
   }
   voiceStatus.textContent='✦ 正在思考…';

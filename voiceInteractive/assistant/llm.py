@@ -216,16 +216,9 @@ class OllamaClient:
             },
         ]
         model_answer = self._chat(messages, 0.2, 180, on_segment, cancel_event)
-        answer = model_answer
         if cancel_event is None or not cancel_event.is_set():
-            if local_identity_note:
-                if on_segment is not None:
-                    on_segment(local_identity_note)
-                answer = f"{answer.rstrip()} {local_identity_note}".strip()
-            # Keep local identities out of later model requests too: history is
-            # sent back to the provider on the next turn.
             self.remember(question, model_answer)
-        return answer
+        return model_answer
 
     def detect_person(self, image_bytes: bytes) -> bool:
         image_base64 = base64.b64encode(image_bytes).decode("ascii")
@@ -258,38 +251,6 @@ class OllamaClient:
             },
         ]
         return self._chat(messages, 0.2, 80).strip()
-
-    def describe_target_context(self, marked_image_bytes: bytes) -> str:
-        """Describe nearby landmarks only, without a name or conversation history."""
-        image_base64 = base64.b64encode(marked_image_bytes).decode("ascii")
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "只描述绿色方框标注的人与画面中清楚可见的门、桌子、走廊等参照物的"
-                    "位置关系。只用一句简短中文；看不清就回答'周围参照物不清楚'。"
-                    "不要猜姓名、身份、职业或画面外的位置，不要Markdown。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": "绿色框中的人相对于周围物体在哪里？",
-                "images": [image_base64],
-            },
-        ]
-        response = self._request(
-            "/api/chat",
-            {
-                "model": self.config.ollama_model,
-                "messages": messages,
-                "stream": False,
-                "think": False,
-                "keep_alive": self.config.ollama_keep_alive,
-                "options": {"temperature": 0.1, "num_predict": 70},
-            },
-            timeout_seconds=20.0,
-        )
-        return str(response.get("message", {}).get("content", "")).strip()
 
 
 class OnlineQwenClient:
@@ -547,14 +508,9 @@ class OnlineQwenClient:
             },
         ]
         model_answer = self._chat(messages, 0.2, 180, on_segment, cancel_event)
-        answer = model_answer
         if cancel_event is None or not cancel_event.is_set():
-            if local_identity_note:
-                if on_segment is not None:
-                    on_segment(local_identity_note)
-                answer = f"{answer.rstrip()} {local_identity_note}".strip()
             self.remember(question, model_answer)
-        return answer
+        return model_answer
 
     def detect_person(self, image_bytes: bytes) -> bool:
         image_base64 = base64.b64encode(image_bytes).decode("ascii")
@@ -679,7 +635,7 @@ class ModelRouter:
         local_identity_note: str = "",
     ) -> str:
         return self._client().ask_vision(
-            question, image_bytes, on_segment, cancel_event, local_identity_note
+            question, image_bytes, on_segment, cancel_event
         )
 
     def detect_person(self, image_bytes: bytes) -> bool:
@@ -687,11 +643,6 @@ class ModelRouter:
 
     def describe_scene(self, image_bytes: bytes) -> str:
         return self._client().describe_scene(image_bytes)
-
-    def describe_target_context(self, marked_image_bytes: bytes) -> str:
-        # Named-person location queries remain local even when general Q&A
-        # currently uses an online model.
-        return self.local.describe_target_context(marked_image_bytes)
 
     def switch(self, provider: str) -> dict[str, str]:
         normalized = self.PROVIDER_ALIASES.get(provider.strip().casefold())

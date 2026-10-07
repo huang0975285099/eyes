@@ -26,8 +26,6 @@ from .paths import APP_DIR
 
 if TYPE_CHECKING:
     from .camera import CameraFrameStore, PersonPresenceMonitor
-    from .face import FaceRecognitionService
-    from .gesture import GestureService
 
 
 def list_native_cameras(max_index: int = 9) -> None:
@@ -285,8 +283,6 @@ class _CameraRuntime:
     motion_score: float = 0.0
     last_alert_at: float = 0.0
     last_frame_at: float = 0.0
-    last_face_submit_at: float = 0.0
-    last_gesture_submit_at: float = 0.0
     latest_jpeg: bytes | None = None
     frame_sequence: int = 0
     preview_clients: int = 0
@@ -301,14 +297,10 @@ class NativeCameraMonitor:
         config: Config,
         store: CameraFrameStore,
         presence_monitor: PersonPresenceMonitor,
-        face_service: FaceRecognitionService,
-        gesture_service: GestureService | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.presence_monitor = presence_monitor
-        self.face_service = face_service
-        self.gesture_service = gesture_service
         self.archive = MotionEventArchive(
             config.native_camera_event_retention_days,
             config.native_camera_save_snapshots,
@@ -423,24 +415,6 @@ class NativeCameraMonitor:
                 runtime.state = "等待后台监控" if enabled else "无人值守监控已关闭"
                 runtime.error = ""
             self._frame_ready.notify_all()
-        if enabled:
-            resume_face = getattr(self.face_service, "resume", None)
-            if callable(resume_face):
-                resume_face()
-            if self.gesture_service is not None:
-                resume_gesture = getattr(self.gesture_service, "resume", None)
-                if callable(resume_gesture):
-                    resume_gesture()
-        else:
-            # Preview may keep the camera open, but must not keep queued or
-            # in-flight recognition actions alive after monitoring is stopped.
-            pause_face = getattr(self.face_service, "pause", None)
-            if callable(pause_face):
-                pause_face()
-            if self.gesture_service is not None:
-                pause_gesture = getattr(self.gesture_service, "pause", None)
-                if callable(pause_gesture):
-                    pause_gesture()
 
     def ensure_enabled(self) -> None:
         """视觉子功能依赖后台帧源，调用方开启时顺带拉起监控（已开启则不动作）。"""
@@ -755,19 +729,6 @@ class NativeCameraMonitor:
                 and not presence_status["presence_checking"]
             ):
                 self.presence_monitor.submit(jpeg, "baseline")
-
-            if self.face_service.enabled and now - runtime.last_face_submit_at >= 1.2:
-                if self.face_service.submit(jpeg):
-                    runtime.last_face_submit_at = now
-
-            gesture_interval = self.config.gesture_submit_interval_seconds
-            if (
-                self.gesture_service is not None
-                and self.gesture_service.enabled
-                and now - runtime.last_gesture_submit_at >= gesture_interval
-            ):
-                if self.gesture_service.submit(jpeg):
-                    runtime.last_gesture_submit_at = now
 
         with self._lock:
             rule = runtime.motion_rule

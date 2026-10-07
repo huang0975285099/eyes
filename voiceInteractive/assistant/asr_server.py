@@ -66,6 +66,51 @@ def _ollama_chat(messages: list[dict]) -> str:
     return str(answer).strip()
 
 
+def _ollama_vision(question: str, image_bytes: bytes) -> str:
+    """调用本地 Ollama 视觉模型，根据摄像头画面回答问题。
+
+    依赖模型本身支持图像（Ollama 的 images 字段）。模型不能看图时
+    Ollama 会忽略图像或报错，由调用方提示用户。
+    """
+    import base64
+    import urllib.request
+
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    system_prompt = _CONFIG.get("ollama_system_prompt", "")
+    messages: list[dict] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"{question}\n请根据这张摄像头的当前画面直接回答。"
+                "只描述确实能看到的内容，不确定的要明确说明。"
+                "不要根据外貌猜测人物姓名或身份。"
+            ),
+            "images": [image_b64],
+        }
+    )
+    payload = {
+        "model": _CONFIG.get("ollama_model", "qwen3.5:4b"),
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "keep_alive": _CONFIG.get("ollama_keep_alive", "10m"),
+        "options": {"temperature": 0.4, "num_predict": 256},
+    }
+    req = urllib.request.Request(
+        str(_CONFIG.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/")
+        + "/api/chat",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    timeout = float(_CONFIG.get("ollama_timeout_seconds", 120))
+    resp = urllib.request.urlopen(req, timeout=timeout)
+    answer = json.loads(resp.read().decode("utf-8")).get("message", {}).get("content", "")
+    return str(answer).strip()
+
+
 def _tts_bytes(text: str) -> bytes:
     """用 edge-tts 生成语音 MP3。优先走配置代理，失败时直连重试。"""
     import edge_tts
@@ -159,6 +204,28 @@ class ASRHandler(BaseHTTPRequestHandler):
                     raise ValueError("消息列表为空")
                 answer = _ollama_chat(messages)
                 print(f"AI：{answer}")
+                self._respond({"text": answer})
+            except Exception as error:
+                self._respond(
+                    {"text": "", "error": str(error)},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+        if path == "/vision":
+            try:
+                import base64
+                payload = self._read_json_body()
+                question = str(payload.get("text", "")).strip()
+                image_b64 = str(payload.get("image", "")).strip()
+                if not question or not image_b64:
+                    raise ValueError("缺少问题或图像")
+                if image_b64.startswith("data:") and "," in image_b64:
+                    image_b64 = image_b64.split(",", 1)[1]
+                image_bytes = base64.b64decode(image_b64)
+                if len(image_bytes) > 8 * 1024 * 1024:
+                    raise ValueError("图像过大")
+                answer = _ollama_vision(question, image_bytes)
+                print(f"[视觉] {question} -> {answer}")
                 self._respond({"text": answer})
             except Exception as error:
                 self._respond(

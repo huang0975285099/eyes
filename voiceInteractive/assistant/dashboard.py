@@ -16,8 +16,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .camera import CameraFrameStore, PersonPresenceMonitor, YoloPersonDetector
 from .config import Config
-from .face import FaceRecognitionService
-from .gesture import GestureService
 from .llm import ModelRouter
 from .native_camera import NativeCameraMonitor
 from .paths import APP_DIR
@@ -36,18 +34,14 @@ class DashboardHTTPServer(ThreadingHTTPServer):
         config: Config,
         model_router: ModelRouter,
         presence_monitor: PersonPresenceMonitor,
-        face_service: FaceRecognitionService,
         native_camera: NativeCameraMonitor,
-        gesture_service: GestureService,
     ):
         super().__init__(address, handler)
         self.store = store
         self.config = config
         self.model_router = model_router
         self.presence_monitor = presence_monitor
-        self.face_service = face_service
         self.native_camera = native_camera
-        self.gesture_service = gesture_service
 
 
 class DashboardHTTPServerV6(DashboardHTTPServer):
@@ -118,17 +112,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "enabled": self.server.store.scene_broadcast_enabled(),
                         "cooldown_seconds": self.server.config.scene_broadcast_cooldown_seconds,
                     },
-                    "face_recognition": {
-                        "enabled": self.server.face_service.enabled,
-                        "recommended_samples": 15,
-                        "greeting_cooldown_seconds": self.server.config.face_greeting_cooldown_seconds,
-                    },
-                    "gesture": {
-                        "enabled": self.server.gesture_service.enabled,
-                        "expression_enabled": self.server.config.gesture_expression_enabled,
-                        "action_cooldown_seconds": self.server.config.gesture_action_cooldown_seconds,
-                        "expression_cooldown_seconds": self.server.config.gesture_expression_cooldown_seconds,
-                    },
                     "native_camera": {
                         "enabled": self.server.native_camera.enabled,
                         "retention_days": self.server.config.native_camera_event_retention_days,
@@ -161,8 +144,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if request_path == "/api/status":
             status = self.server.store.status()
-            status["face_recognition"] = self.server.face_service.status()
-            status["gesture"] = self.server.gesture_service.status()
             status["native_camera"] = self.server.native_camera.status()
             self._send_json(status)
             return
@@ -176,54 +157,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             body = path.read_bytes()
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "private, max-age=3600")
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if request_path == "/api/people":
-            self._send_json({"people": self.server.face_service.database.list_people()})
-            return
-        videos_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/videos", request_path)
-        if videos_match:
-            database = self.server.face_service.database
-            if database.get_person(videos_match.group(1)) is None:
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-            self._send_json({"videos": database.list_videos(videos_match.group(1))})
-            return
-        video_match = re.fullmatch(
-            r"/api/people/([0-9a-f]{32})/videos/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}\.(?:webm|mp4))",
-            request_path,
-        )
-        if video_match:
-            self._send_face_video(video_match.group(1), video_match.group(2))
-            return
-        samples_match = re.fullmatch(
-            r"/api/people/([0-9a-f]{32})/samples", request_path
-        )
-        if samples_match:
-            database = self.server.face_service.database
-            if database.get_person(samples_match.group(1)) is None:
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-            self._send_json(
-                {"samples": database.list_samples(samples_match.group(1))}
-            )
-            return
-        sample_photo_match = re.fullmatch(
-            r"/api/people/([0-9a-f]{32})/samples/(\d+)/photo", request_path
-        )
-        if sample_photo_match:
-            photo_path = self.server.face_service.database.sample_photo_path(
-                sample_photo_match.group(1), int(sample_photo_match.group(2))
-            )
-            if photo_path is None or not photo_path.is_file():
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-            body = photo_path.read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(body)))
@@ -317,74 +250,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.end_headers()
         self.wfile.write(frame)
-
-    def _send_face_video(self, person_id: str, filename: str, head_only: bool = False) -> None:
-        path = self.server.face_service.database.video_path(person_id, filename)
-        if path is None:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        try:
-            size = path.stat().st_size
-        except OSError:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        start, end = 0, size - 1
-        range_header = self.headers.get("Range")
-        if range_header:
-            match = (
-                re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
-                if len(range_header) <= 80 else None
-            )
-            if match and (match.group(1) or match.group(2)):
-                if match.group(1):
-                    start = int(match.group(1))
-                    end = int(match.group(2)) if match.group(2) else size - 1
-                else:
-                    suffix = int(match.group(2))
-                    start = max(0, size - suffix)
-                    end = size - 1
-            if not match or size == 0 or start >= size or end < start:
-                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                self.send_header("Content-Range", f"bytes */{size}")
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            end = min(end, size - 1)
-        length = max(0, end - start + 1)
-        self.send_response(HTTPStatus.PARTIAL_CONTENT if range_header else HTTPStatus.OK)
-        self.send_header("Content-Type", "video/mp4" if filename.endswith(".mp4") else "video/webm")
-        self.send_header("Content-Length", str(length))
-        self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Cache-Control", "private, no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        if range_header:
-            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self.end_headers()
-        if head_only:
-            return
-        try:
-            with path.open("rb") as source:
-                source.seek(start)
-                remaining = length
-                while remaining:
-                    chunk = source.read(min(64 * 1024, remaining))
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    remaining -= len(chunk)
-        except OSError:
-            return
-
-    def do_HEAD(self) -> None:
-        request_path = self.path.partition("?")[0]
-        video_match = re.fullmatch(
-            r"/api/people/([0-9a-f]{32})/videos/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}\.(?:webm|mp4))",
-            request_path,
-        )
-        if video_match:
-            self._send_face_video(video_match.group(1), video_match.group(2), head_only=True)
-            return
-        self.send_error(HTTPStatus.NOT_FOUND)
 
     def _send_camera_stream(self, camera_id: str) -> None:
         if not self.server.native_camera.has_camera(camera_id):
@@ -569,53 +434,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError) as error:
                 self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
-        if request_path == "/api/face-recognition":
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-                if content_length <= 0 or content_length > 1024:
-                    raise ValueError("无效的请求内容")
-                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
-                enabled = payload.get("enabled")
-                if not isinstance(enabled, bool):
-                    raise ValueError("enabled 必须是布尔值")
-                self.server.face_service.set_enabled(enabled)
-                if enabled:
-                    self.server.native_camera.ensure_enabled()
-                self._send_json({"ok": True, "enabled": enabled})
-            except (ValueError, json.JSONDecodeError) as error:
-                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
-            return
-        if request_path == "/api/gesture":
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-                if content_length <= 0 or content_length > 1024:
-                    raise ValueError("无效的请求内容")
-                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
-                enabled = payload.get("enabled")
-                if not isinstance(enabled, bool):
-                    raise ValueError("enabled 必须是布尔值")
-                self.server.gesture_service.set_enabled(enabled)
-                if enabled:
-                    self.server.native_camera.ensure_enabled()
-                self._send_json({"ok": True, "enabled": enabled})
-            except (ValueError, json.JSONDecodeError) as error:
-                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
-            return
-        if request_path == "/api/people":
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-                if content_length <= 0 or content_length > 4096:
-                    raise ValueError("无效的请求内容")
-                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
-                if payload.get("consent") is not True:
-                    raise ValueError("录入前必须确认已获得本人同意")
-                person = self.server.face_service.database.add_person(
-                    str(payload.get("name", "")), payload.get("aliases", [])
-                )
-                self._send_json({"ok": True, "person": person}, HTTPStatus.CREATED)
-            except (ValueError, json.JSONDecodeError) as error:
-                self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
-            return
         if request_path == "/api/scene-broadcast":
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -646,121 +464,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
             return
-        sample_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/samples", request_path)
-        if sample_match:
-            self._handle_face_sample(sample_match.group(1))
-            return
-        video_match = re.fullmatch(r"/api/people/([0-9a-f]{32})/video", request_path)
-        if video_match:
-            self._handle_face_video(video_match.group(1))
-            return
         self.send_error(HTTPStatus.NOT_FOUND)
-
-    def _handle_face_sample(self, person_id: str) -> None:
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            content_length = 0
-        if content_length <= 0 or content_length > self.MAX_FRAME_BYTES:
-            self._send_json({"ok": False, "error": "无效的照片大小"}, HTTPStatus.BAD_REQUEST)
-            return
-        frame = self.rfile.read(content_length)
-        if not (frame.startswith(b"\xff\xd8") and frame.endswith(b"\xff\xd9")):
-            self._send_json({"ok": False, "error": "只支持JPEG照片"}, HTTPStatus.BAD_REQUEST)
-            return
-        try:
-            result = self.server.face_service.enroll(person_id, frame)
-            self._send_json({"ok": True, **result}, HTTPStatus.CREATED)
-        except (ValueError, RuntimeError) as error:
-            self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
-
-    def _handle_face_video(self, person_id: str) -> None:
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            content_length = 0
-        if content_length <= 0 or content_length > self.MAX_VIDEO_BYTES:
-            self._send_json(
-                {"ok": False, "error": "视频大小无效或超过80MB"},
-                HTTPStatus.BAD_REQUEST,
-            )
-            return
-        content_type = self.headers.get("Content-Type", "video/webm").split(";", 1)[0]
-        if content_type not in {"video/webm", "video/mp4", "application/octet-stream"}:
-            self._send_json(
-                {"ok": False, "error": "只支持WebM或MP4视频"},
-                HTTPStatus.BAD_REQUEST,
-            )
-            return
-        try:
-            result = self.server.face_service.enroll_video(
-                person_id, self.rfile.read(content_length), content_type
-            )
-            self._send_json({"ok": True, **result}, HTTPStatus.CREATED)
-        except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
-            self._send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
-
-    def do_PUT(self) -> None:
-        request_path = self.path.partition("?")[0]
-        person_match = re.fullmatch(r"/api/people/([0-9a-f]{32})", request_path)
-        if not person_match:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-            if content_length <= 0 or content_length > 4096:
-                raise ValueError("无效的请求内容")
-            payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
-            person = self.server.face_service.database.update_person(
-                person_match.group(1), str(payload.get("name", "")), payload.get("aliases", [])
-            )
-            self._send_json({"ok": True, "person": person})
-        except (ValueError, json.JSONDecodeError) as error:
-            self._send_json(
-                {"ok": False, "error": str(error)},
-                HTTPStatus.BAD_REQUEST,
-            )
-
-    def do_DELETE(self) -> None:
-        request_path = self.path.partition("?")[0]
-        video_match = re.fullmatch(
-            r"/api/people/([0-9a-f]{32})/videos/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}\.(?:webm|mp4))",
-            request_path,
-        )
-        if video_match:
-            try:
-                deleted = self.server.face_service.database.delete_video(
-                    video_match.group(1), video_match.group(2)
-                )
-            except OSError as error:
-                self._send_json({"ok": False, "error": f"视频正在使用或无法删除：{error}"}, HTTPStatus.CONFLICT)
-                return
-            if not deleted:
-                self._send_json({"ok": False, "error": "视频不存在"}, HTTPStatus.NOT_FOUND)
-                return
-            self._send_json({"ok": True})
-            return
-        sample_match = re.fullmatch(
-            r"/api/people/([0-9a-f]{32})/samples/(\d+)", request_path
-        )
-        if sample_match:
-            deleted = self.server.face_service.database.delete_sample(
-                sample_match.group(1), int(sample_match.group(2))
-            )
-            if not deleted:
-                self._send_json({"ok": False, "error": "样本不存在"}, HTTPStatus.NOT_FOUND)
-                return
-            self._send_json({"ok": True})
-            return
-        person_match = re.fullmatch(r"/api/people/([0-9a-f]{32})", request_path)
-        if not person_match:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        deleted = self.server.face_service.database.delete_person(person_match.group(1))
-        if not deleted:
-            self._send_json({"ok": False, "error": "人员不存在"}, HTTPStatus.NOT_FOUND)
-            return
-        self._send_json({"ok": True})
 
 
 class CameraDashboard:
@@ -780,14 +484,10 @@ class CameraDashboard:
         self.presence_monitor = PersonPresenceMonitor(
             self.store, person_detector, config.person_monitor_enabled
         )
-        self.face_service = FaceRecognitionService(config)
-        self.gesture_service = GestureService(config)
         self.native_camera = NativeCameraMonitor(
             config,
             self.store,
             self.presence_monitor,
-            self.face_service,
-            self.gesture_service,
         )
         self.server: DashboardHTTPServer | None = None
         self.servers: list[DashboardHTTPServer] = []
@@ -811,9 +511,7 @@ class CameraDashboard:
             self.config,
             self.model_router,
             self.presence_monitor,
-            self.face_service,
             self.native_camera,
-            self.gesture_service,
         )
         self.servers.append(self.server)
         thread = threading.Thread(
@@ -831,9 +529,7 @@ class CameraDashboard:
                     self.config,
                     self.model_router,
                     self.presence_monitor,
-                    self.face_service,
                     self.native_camera,
-                    self.gesture_service,
                 )
                 self.servers.append(ipv6_server)
                 ipv6_thread = threading.Thread(
@@ -860,5 +556,3 @@ class CameraDashboard:
             server.shutdown()
             server.server_close()
         self.presence_monitor.close()
-        self.face_service.close()
-        self.gesture_service.close()

@@ -118,5 +118,19 @@ function isVoiceCommand(text){
   if(/摄像头/.test(s)&&/(关闭|关掉|关上|收起|关了)/.test(s))return 'close_cam';
   return null;
 }
+// 截取第 index 个摄像头窗口的当前帧（JPEG blob）；画面未就绪返回 null
+function captureCamFrame(index){
+  const slot=camSlots[index-1];
+  if(!slot||!slot.stream)return null;
+  const video=slot.win.querySelector('video');
+  if(!video||video.readyState<2||!video.videoWidth)return null;
+  const max=1024; // 限制最长边，控制上传体积
+  let w=video.videoWidth,h=video.videoHeight;
+  if(Math.max(w,h)>max){const s=max/Math.max(w,h);w=Math.round(w*s);h=Math.round(h*s);}
+  const c=document.createElement('canvas');
+  c.width=w;c.height=h;
+  c.getContext('2d').drawImage(video,0,0,w,h);
+  return new Promise(res=>c.toBlob(b=>res(b),'image/jpeg',0.8));
+}
 // 点击任意卫星标签：同时弹出所有摄像头窗口
 orbitLabels.forEach(label=>label.addEventListener('click',openAllCameras));

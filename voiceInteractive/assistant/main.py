@@ -11,7 +11,6 @@ from pathlib import Path
 from vosk import Model, SetLogLevel
 
 from .config import DEFAULT_CONFIG, load_config
-from .core import VoiceAssistant
 from .dashboard import CameraDashboard
 from .llm import ModelRouter
 from .native_camera import list_native_cameras
@@ -22,7 +21,6 @@ from .platform_utils import (
 )
 from .speaker import Speaker
 from .textutils import ensure_model
-from .tools import OnlineSearchTools
 from .tray import SystemTray
 
 
@@ -91,7 +89,6 @@ def main() -> int:
     ollama = ModelRouter(config, args.config.resolve())
     model_info = ollama.info()
     model_service_name = model_info["label"]
-    online_tools = OnlineSearchTools(config)
     ollama_ready, ollama_status = ollama.check()
     if ollama_ready:
         print(f"{model_service_name}：已连接 / {ollama_status}")
@@ -104,8 +101,6 @@ def main() -> int:
                 print(f"Ollama：模型预热失败，将在首次提问时重试 / {error}")
     else:
         print(f"{model_service_name}：不可用 / {ollama_status}")
-    print("正在加载离线中文识别模型……")
-    model = Model(str(model_path))
     dashboard = CameraDashboard(config, ollama) if config.web_enabled else None
     tray = None
     asr_process = None
@@ -128,15 +123,11 @@ def main() -> int:
             except Exception as error:
                 print(f"系统托盘启动失败，语音助手仍可继续运行：{error}", file=sys.stderr)
     try:
-        VoiceAssistant(
-            config,
-            model,
-            input_device,
-            speaker,
-            ollama,
-            online_tools,
-            dashboard,
-        ).run()
+        if dashboard:
+            print("语音助手已启动（dashboard + ASR 服务模式，浏览器访问 http://localhost:8765/）")
+            dashboard.store.shutdown_event.wait()
+        else:
+            print("未启用 Web 服务，按 Ctrl+C 退出。")
     finally:
         if asr_process is not None:
             asr_process.terminate()
