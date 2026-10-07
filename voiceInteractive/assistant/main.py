@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +24,11 @@ from .speaker import Speaker
 from .textutils import ensure_model
 from .tools import OnlineSearchTools
 from .tray import SystemTray
+
+
+def _port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -101,8 +108,18 @@ def main() -> int:
     model = Model(str(model_path))
     dashboard = CameraDashboard(config, ollama) if config.web_enabled else None
     tray = None
+    asr_process = None
     if dashboard:
         dashboard.start()
+        if not _port_in_use(8770):
+            try:
+                asr_process = subprocess.Popen(
+                    [sys.executable, "-u", "-m", "assistant.asr_server"],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                print("ASR 服务（8770）后台启动中……")
+            except Exception as error:
+                print(f"ASR 服务启动失败：{error}", file=sys.stderr)
         if config.tray_enabled and not args.no_tray:
             try:
                 tray = SystemTray(dashboard, config.tray_notifications_enabled)
@@ -122,6 +139,12 @@ def main() -> int:
             dashboard,
         ).run()
     finally:
+        if asr_process is not None:
+            asr_process.terminate()
+            try:
+                asr_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                asr_process.kill()
         if tray:
             if dashboard:
                 dashboard.store.set_tray_active(False)

@@ -158,6 +158,7 @@ class ASRHandler(BaseHTTPRequestHandler):
                 if not isinstance(messages, list) or not messages:
                     raise ValueError("消息列表为空")
                 answer = _ollama_chat(messages)
+                print(f"AI：{answer}")
                 self._respond({"text": answer})
             except Exception as error:
                 self._respond(
@@ -202,8 +203,9 @@ class ASRHandler(BaseHTTPRequestHandler):
             print(
                 f"[transcribe] 音频{content_length/1024:.0f}KB "
                 f"读取{(t_read-t0)*1000:.0f}ms 解码{(t_decode-t_read)*1000:.0f}ms "
-                f"推理{(t_infer-t_decode)*1000:.0f}ms → {text[:30]}"
+                f"推理{(t_infer-t_decode)*1000:.0f}ms"
             )
+            print(f"用户：{text}")
             self._respond({"text": text})
         except Exception as error:
             self._respond({"text": "", "error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
