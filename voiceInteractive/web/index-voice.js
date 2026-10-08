@@ -212,12 +212,13 @@ function isVisionQuestion(text){
 }
 let clarifyCam=false; // "打开摄像头"未指明本地/人名时，置位等下一句澄清
 function resetToListen(){
-  recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
+  recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];asrContext='';
   chatState='listening';voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
   startNewRecorder();
 }
 async function autoSendChat(){
   chatState='thinking';turnActive=false;playSendCue();spawnShockwave();
+  asrContext=''; // 本轮已说完：清空识别上下文，避免跨轮累积导致 ASR 复述历史
   const question=replyText.textContent.trim();
   if(!question){chatState='listening';return;}
   if(mediaRecorder){const r=mediaRecorder;mediaRecorder=null;r.onstop=null;try{r.stop();}catch(_){}} // 暂停录音，防止播报被录入
@@ -286,7 +287,7 @@ async function autoSendChat(){
       voiceStatus.textContent=`✦ 正在分析${vq.name}的摄像头画面…`;
       try{
         const b64=await blobToBase64(rblob);
-        const resp=await fetchWithTimeout('http://localhost:8770/vision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:question,image:b64})},60000);
+        const resp=await fetchWithTimeout('http://localhost:8770/vision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:question,image:b64,source:'desktop'})},60000);
         const data=await resp.json();
         if(chatState!=='thinking')return;
         if(!data.text||data.error)throw new Error(data.error||'视觉模型没有返回描述');
@@ -324,7 +325,7 @@ async function autoSendChat(){
     voiceStatus.textContent=`✦ 正在分析${vq.index}号摄像头画面…`;
     try{
       const b64=await blobToBase64(blob);
-      const resp=await fetchWithTimeout('http://localhost:8770/vision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:question,image:b64})},60000);
+      const resp=await fetchWithTimeout('http://localhost:8770/vision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:question,image:b64,source:'camera'})},60000);
       const data=await resp.json();
       if(chatState!=='thinking')return; // 会话已结束，丢弃迟到的回答
       if(!data.text||data.error)throw new Error(data.error||'视觉模型没有返回描述');

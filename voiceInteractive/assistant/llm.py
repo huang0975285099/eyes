@@ -84,20 +84,28 @@ class OllamaClient:
         )
         return str(result.get("message", {}).get("content", "")).strip()
 
-    def vision(self, question: str, image_bytes: bytes, num_predict: int = 256) -> str:
+    def vision(self, question: str, image_bytes: bytes, source: str = "camera", num_predict: int = 256) -> str:
         image_b64 = base64.b64encode(image_bytes).decode("ascii")
         messages: list[dict] = []
         system_prompt = self.config.ollama_system_prompt
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
+        if source == "desktop":
+            vision_prompt = (
+                f"{question}\n这是电脑桌面的推流画面，不是物理摄像头。"
+                "请从桌面角度回答：当前正在使用什么应用程序、用户在做什么操作。"
+                "只描述确实能看到的内容，不确定的要明确说明。"
+            )
+        else:
+            vision_prompt = (
+                f"{question}\n请根据这张摄像头的当前画面直接回答。"
+                "只描述确实能看到的内容，不确定的要明确说明。"
+                "不要根据外貌猜测人物姓名或身份。"
+            )
         messages.append(
             {
                 "role": "user",
-                "content": (
-                    f"{question}\n请根据这张摄像头的当前画面直接回答。"
-                    "只描述确实能看到的内容，不确定的要明确说明。"
-                    "不要根据外貌猜测人物姓名或身份。"
-                ),
+                "content": vision_prompt,
                 "images": [image_b64],
             }
         )

@@ -78,9 +78,13 @@ def main() -> int:
     try:
         if dashboard:
             print("语音助手已启动（dashboard + ASR 服务模式，浏览器访问 http://localhost:8765/）")
-            dashboard.store.shutdown_event.wait()
+            # Windows 上无超时的 Event.wait() 无法被 Ctrl+C 中断，用短超时循环让信号能被处理
+            while not dashboard.store.shutdown_event.is_set():
+                dashboard.store.shutdown_event.wait(timeout=0.5)
         else:
             print("未启用 Web 服务，按 Ctrl+C 退出。")
+    except KeyboardInterrupt:
+        print("\n正在退出语音助手……")
     finally:
         if asr_process is not None:
             asr_process.terminate()

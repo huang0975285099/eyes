@@ -123,6 +123,33 @@ def _check_ollama() -> None:
         print("  启动命令：ollama serve  （或启动 Ollama 应用程序）")
 
 
+def _save_vision_frame(image_bytes: bytes) -> str:
+    """存视觉问答截图到 data/vision/，返回时间戳（文件名前缀）。失败不影响主流程。"""
+    from datetime import datetime
+    try:
+        vision_dir = APP_DIR / "data" / "vision"
+        vision_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        (vision_dir / f"frame_{ts}.jpg").write_bytes(image_bytes)
+        return ts
+    except Exception as error:  # noqa: BLE001
+        print(f"[vision] 截图存盘失败：{error}", flush=True)
+        return ""
+
+
+def _save_vision_text(ts: str, question: str, answer: str) -> None:
+    """存视觉问答的问题与 AI 描述到同名 .txt。"""
+    if not ts:
+        return
+    try:
+        vision_dir = APP_DIR / "data" / "vision"
+        (vision_dir / f"frame_{ts}.txt").write_text(
+            f"问题：{question}\n\n描述：{answer}\n", encoding="utf-8"
+        )
+    except Exception as error:  # noqa: BLE001
+        print(f"[vision] 描述存盘失败：{error}", flush=True)
+
+
 class ASRHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:
         return
@@ -196,7 +223,10 @@ class ASRHandler(BaseHTTPRequestHandler):
                 image_bytes = base64.b64decode(image_b64)
                 if len(image_bytes) > 8 * 1024 * 1024:
                     raise ValueError("图像过大")
-                answer = _OLLAMA.vision(question, image_bytes)
+                ts = _save_vision_frame(image_bytes)  # 存截图（立即，失败也留底）
+                source = str(payload.get("source", "")).strip()
+                answer = _OLLAMA.vision(question, image_bytes, source=source)
+                _save_vision_text(ts, question, answer)  # 存问题+AI描述
                 print(f"[视觉] {question} -> {answer}")
                 self._respond({"text": answer})
             except Exception as error:
