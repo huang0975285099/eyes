@@ -1,4 +1,4 @@
-"""Windows 控制台、网络代理与音频设备工具。"""
+"""Windows 控制台与音频设备工具。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import ctypes
 import os
 import re
 import sys
-import urllib.request
 
 import sounddevice as sd
 
@@ -28,12 +27,6 @@ def _matchable_device_name(name: str) -> str:
     for alias, canonical in _DEVICE_NAME_ALIASES.items():
         normalized = normalized.replace(alias, canonical)
     return re.sub(r"\(\d+-\s*", "(", normalized)
-
-
-def build_proxy_opener(proxy_url: str):
-    normalized = str(proxy_url).strip()
-    proxy_mapping = {"http": normalized, "https": normalized} if normalized else {}
-    return urllib.request.build_opener(urllib.request.ProxyHandler(proxy_mapping))
 
 
 def configure_windows_console() -> None:

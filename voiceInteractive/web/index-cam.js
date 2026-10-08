@@ -105,23 +105,30 @@ function closeCamWindow(deviceId){
   setTimeout(()=>{ // 延迟释放摄像头与移除窗口，让退出动画跑完
     if(slot.win.classList.contains('open'))return; // 期间被重新打开，取消关闭清理
     if(slot.stream){slot.stream.getTracks().forEach(t=>t.stop());slot.stream=null;}
+    if(slot.pc){try{slot.pc.close();}catch(_){}slot.pc=null;} // 释放远端 WebRTC 连接
     const v=slot.win.querySelector('video'); if(v)v.srcObject=null;
     slot.win.remove();
     camSlots=camSlots.filter(s=>s!==slot);
   },320);
 }
 function closeAllCameras(){[...camSlots].forEach(s=>closeCamWindow(s.deviceId));} // 关闭所有摄像头窗口
-// 语音指令判定：清理标点空白后匹配“打开/关闭 + 摄像头”（兼容“帮我打开摄像头”“把摄像头关掉”等）
+// 语音指令判定：返回 {type} 或 null。type ∈ open_cam(本地)/close_cam/open_remote_cam(含name)/open_cam_ambiguous(只说打开摄像头)
 function isVoiceCommand(text){
   const s=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
-  if(/摄像头/.test(s)&&/(打开|开启|显示|出来|调出|开一下)/.test(s))return 'open_cam';
-  if(/摄像头/.test(s)&&/(关闭|关掉|关上|收起|关了)/.test(s))return 'close_cam';
+  if(!/摄像头/.test(s))return null;
+  if(/(关闭|关掉|关上|收起|关了)/.test(s))return {type:'close_cam'};
+  if(/本地/.test(s)&&/(打开|开启|显示|出来|调出|开一下)/.test(s))return {type:'open_cam'};
+  // 打开+人名+摄像头：提取人名（兼容"帮我打开张三的摄像头""打开张三摄像头"）
+  const m=s.match(/^(?:帮我|麻烦|请|你)?(?:打开|开启|显示|出来|调出|开一下)(.+?)(?:的)?摄像头/);
+  if(m&&m[1]&&!/^(本地|这个|那个|这些|那些|所有|全部|全部的)$/.test(m[1])){
+    return {type:'open_remote_cam',name:m[1]};
+  }
+  if(/(打开|开启|显示|出来|调出|开一下)/.test(s))return {type:'open_cam_ambiguous'};
   return null;
 }
-// 截取第 index 个摄像头窗口的当前帧（JPEG blob）；画面未就绪返回 null
-function captureCamFrame(index){
-  const slot=camSlots[index-1];
-  if(!slot||!slot.stream)return null;
+// 截取摄像头窗口的当前帧（JPEG blob）；本地/远端窗口通用，画面未就绪返回 null
+function captureCamFrame(slot){
+  if(!slot)return null;
   const video=slot.win.querySelector('video');
   if(!video||video.readyState<2||!video.videoWidth)return null;
   const max=1024; // 限制最长边，控制上传体积
@@ -131,6 +138,72 @@ function captureCamFrame(index){
   c.width=w;c.height=h;
   c.getContext('2d').drawImage(video,0,0,w,h);
   return new Promise(res=>c.toBlob(b=>res(b),'image/jpeg',0.8));
+}
+// 按用户名找已打开的远端摄像头窗口（容错包含匹配）
+function findRemoteSlot(name){
+  const q=String(name||'').trim();
+  if(!q)return null;
+  return camSlots.find(s=>{
+    if(!s.deviceId||!s.deviceId.startsWith('remote:'))return false;
+    const un=s.userName||'';
+    return un&&(un.includes(q)||q.includes(un));
+  })||null;
+}
+// 等 ICE 候选收集完成（或超时），保证 offer SDP 完整（SRS 要求完整 ICE）
+function waitForIceGathering(conn,timeoutMs){
+  return new Promise(resolve=>{
+    if(conn.iceGatheringState==='complete')return resolve();
+    const timer=setTimeout(()=>{conn.onicegatheringstatechange=null;resolve();},timeoutMs);
+    conn.onicegatheringstatechange=()=>{if(conn.iceGatheringState==='complete'){clearTimeout(timer);conn.onicegatheringstatechange=null;resolve();}};
+  });
+}
+// 用 SRS /rtc/v1/play/ 播放某路远端流（WebRTC SDP 交换，参考 starplatform control-panel）
+async function startWebRtcPlayback(slot,srsHost,streamName){
+  const video=slot.win.querySelector('video');
+  const fb=slot.win.querySelector('.cam-fallback');
+  try{
+    const conn=new RTCPeerConnection();slot.pc=conn;
+    conn.addTransceiver('video',{direction:'recvonly'});
+    conn.addTransceiver('audio',{direction:'recvonly'});
+    conn.ontrack=(e)=>{if(slot.pc!==conn)return;video.srcObject=e.streams[0];video.hidden=false;fb.hidden=true;video.play().catch(()=>{});};
+    conn.onconnectionstatechange=()=>{
+      if(slot.pc!==conn)return;
+      const st=conn.connectionState;
+      if(st==='failed'||st==='disconnected'){video.hidden=true;fb.hidden=false;fb.textContent='画面已断开';}
+    };
+    const offer=await conn.createOffer();
+    await conn.setLocalDescription(offer);
+    await waitForIceGathering(conn,2000);
+    if(slot.pc!==conn)return; // 已被新一轮取代
+    const apiUrl=`http://${srsHost}:1985/rtc/v1/play/`;
+    const streamUrl=`webrtc://${srsHost}/live/${streamName}`;
+    const resp=await fetch(apiUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api:apiUrl,streamurl:streamUrl,sdp:conn.localDescription.sdp})});
+    const data=await resp.json();
+    if(slot.pc!==conn)return;
+    if(data.code!==0)throw new Error(data.message||`SRS play 错误 code=${data.code}`);
+    await conn.setRemoteDescription({type:'answer',sdp:data.sdp});
+  }catch(err){
+    console.error('[remote-cam] WebRTC 播放失败:',err);
+    video.hidden=true;fb.hidden=false;fb.textContent='远端画面播放失败';
+    if(slot.pc===conn){try{conn.close();}catch(_){}slot.pc=null;}
+  }
+}
+// 打开远端摄像头（按 /cameras 匹配结果），每个匹配项开一个 WHEP 窗口
+function openRemoteCameras(items){
+  if(!items||items.length===0){
+    const slot=ensureCamWindow('__none__','未找到摄像头');placeCamWindow(slot.win);
+    const v=slot.win.querySelector('video');v.hidden=true;
+    const fb=slot.win.querySelector('.cam-fallback');fb.hidden=false;fb.textContent='没找到这个名字的摄像头';
+    return;
+  }
+  items.forEach(it=>{
+    const key='remote:'+(it.stream_name||Math.random());
+    const label=(it.user_name||it.account||it.stream_name||'远端')+'（远端）';
+    const slot=ensureCamWindow(key,label);
+    slot.userName=it.user_name||it.account||''; // 供 findRemoteSlot 按人名查找
+    if(!slot.win.classList.contains('open'))placeCamWindow(slot.win);
+    startWebRtcPlayback(slot,it.srs_host,it.stream_name);
+  });
 }
 // 点击任意卫星标签：同时弹出所有摄像头窗口
 orbitLabels.forEach(label=>label.addEventListener('click',openAllCameras));

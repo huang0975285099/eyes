@@ -1,6 +1,6 @@
 """Qwen3-ASR 独立转写服务。
 
-独立进程加载 torch + Qwen3-ASR 模型，避免与主应用（vosk 等）的 DLL 冲突。
+独立进程加载 torch + Qwen3-ASR 模型，避免与主应用的 DLL 冲突。
 Dashboard 通过 HTTP 转发 /api/asr 请求到本服务的 /transcribe。
 
 启动：python -m assistant.asr_server
@@ -18,6 +18,7 @@ import torch
 from qwen_asr import Qwen3ASRModel
 
 from .paths import APP_DIR
+from .remote_cameras import RemoteCameraRegistry
 
 _ASR_PORT = 8770
 _MODEL: Qwen3ASRModel | None = None
@@ -36,6 +37,10 @@ def _to_simplified(text: str) -> str:
         return text
     return _T2S.convert(text)
 _CONFIG = json.loads((APP_DIR / "config.json").read_text(encoding="utf-8"))
+
+# 远程摄像头名单缓存：启动时登录 go-proxy 拉流，后台定时刷新
+_REMOTE_CAMERAS = RemoteCameraRegistry(_CONFIG)
+_REMOTE_CAMERAS.start()
 
 
 def _ollama_chat(messages: list[dict]) -> str:
@@ -186,6 +191,21 @@ class ASRHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/cameras":
+            query = parse_qs(parsed.query).get("q", [""])[0]
+            try:
+                items = _REMOTE_CAMERAS.search(query)
+                self._respond({"items": items})
+            except Exception as error:  # noqa: BLE001
+                self._respond(
+                    {"items": [], "error": str(error)},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
     def _read_json_body(self) -> dict:
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0 or content_length > 1024 * 1024:
@@ -196,6 +216,15 @@ class ASRHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        if path == "/log": # 前端调试日志转发到终端（fire-and-forget）
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                msg = self.rfile.read(content_length).decode("utf-8", "ignore") if content_length > 0 else ""
+                print(msg)
+            except Exception:
+                pass
+            self._respond({"ok": True})
+            return
         if path == "/chat":
             try:
                 payload = self._read_json_body()
@@ -227,6 +256,27 @@ class ASRHandler(BaseHTTPRequestHandler):
                 answer = _ollama_vision(question, image_bytes)
                 print(f"[视觉] {question} -> {answer}")
                 self._respond({"text": answer})
+            except Exception as error:
+                self._respond(
+                    {"text": "", "error": str(error)},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+        if path == "/remote-vision":
+            try:
+                payload = self._read_json_body()
+                name = str(payload.get("name", "")).strip()
+                if not name:
+                    raise ValueError("缺少用户名")
+                frame = _REMOTE_CAMERAS.latest_frame(name)
+                user_name = frame.get("user_name", name)
+                question = (
+                    f"请描述{user_name}的摄像头当前画面内容，包括可见的人、物体、动作和环境。"
+                    "只描述确实能看到的内容，不要猜测。"
+                )
+                answer = _ollama_vision(question, frame["image_bytes"])
+                print(f"[远端视觉] {name} -> {answer[:60]}")
+                self._respond({"text": answer, "user_name": user_name})
             except Exception as error:
                 self._respond(
                     {"text": "", "error": str(error)},
@@ -319,7 +369,12 @@ def main() -> None:
     _get_model()
     server = ThreadingHTTPServer(("127.0.0.1", _ASR_PORT), ASRHandler)
     print(f"ASR 转写服务已启动：http://127.0.0.1:{_ASR_PORT}/")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nASR 服务正在停止……")
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":

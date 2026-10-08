@@ -5,6 +5,13 @@ function fetchWithTimeout(url, opts, ms=30000){
   return fetch(url,Object.assign({},opts,{signal:ctrl.signal})).finally(()=>clearTimeout(id));
 }
 
+// 前端日志转发到后端终端：console.log 同时 fire-and-forget POST 到 asr_server /log
+function serverLog(...args){
+  const msg=args.join(' ');
+  console.log(msg);
+  try{fetch('http://localhost:8770/log',{method:'POST',headers:{'Content-Type':'text/plain'},body:msg}).catch(()=>{});}catch(_){}
+}
+
 // 语音对话闭环（本地 Qwen3-ASR + Ollama + edge-tts）：
 // 说话实时上屏 → 停顿 1.4s 自动发送 → 思考动画 → 回答打字机上屏 → 语音播报（球体随 AI 音量起伏）
 const replyText=document.getElementById('reply-text');
@@ -195,29 +202,106 @@ function isVisionQuestion(text){
   let idx=null,m=s.match(/([一二三四五六七八九]|\d+)\s*号摄像头/);
   if(!m)m=s.match(/摄像头\s*([一二三四五六七八九]|\d+)/);
   if(m){const raw=m[1];idx=cn[raw]!==undefined?cn[raw]:(/^\d+$/.test(raw)?parseInt(raw,10):null);}
-  if(!idx||idx<1)return {index:1,fallback:true};
-  return {index:idx,fallback:false};
+  if(idx&&idx>=1)return {index:idx,fallback:false};
+  // 远端：XXX的摄像头（提取人名，走 go-proxy 取帧+ai-check）
+  const rm=s.match(/(.+?)的摄像头/);
+  if(rm&&rm[1]&&!/^(本地|这个|那个|这些|那些|所有|全部)$/.test(rm[1])){
+    return {remote:true,name:rm[1]};
+  }
+  return {index:1,fallback:true};
+}
+let clarifyCam=false; // "打开摄像头"未指明本地/人名时，置位等下一句澄清
+function resetToListen(){
+  recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
+  chatState='listening';voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
+  startNewRecorder();
 }
 async function autoSendChat(){
   chatState='thinking';turnActive=false;playSendCue();spawnShockwave();
   const question=replyText.textContent.trim();
   if(!question){chatState='listening';return;}
   if(mediaRecorder){const r=mediaRecorder;mediaRecorder=null;r.onstop=null;try{r.stop();}catch(_){}} // 暂停录音，防止播报被录入
+  // 澄清态：上次“打开摄像头”未指明本地/人名，等这句回答
+  if(clarifyCam){
+    clarifyCam=false;
+    const cs=String(question).replace(/[\s，,。.！!？?、~～]/g,'');
+    if(/本地/.test(cs)){pendingCommand={type:'open_cam'};}
+    else if(/(关闭|关掉|关了|不用|算了|不要)/.test(cs)){pendingCommand={type:'close_cam'};}
+    else{const nm=String(question).replace(/[\s，,。.！!？?、~～]/g,'').replace(/^(?:本地|那个|这个|所有|全部)/,'');pendingCommand=nm?{type:'open_remote_cam',name:nm}:{type:'open_cam_ambiguous'};}
+  }
   // 语音指令（打开/关闭摄像头）：说完停顿后随发送流程一起执行，共享发送音效+冲击波，跳过 Ollama
   if(pendingCommand){
     const cmd=pendingCommand;pendingCommand=null;
-    const reply=cmd==='open_cam'?'好的，摄像头已打开。':'好的，摄像头已关闭。';
-    await speakAnswer(reply,true); // 先语音反馈
-    if(!listening){chatState='idle';return;} // 期间点了结束会话
-    recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
-    chatState='listening';voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
-    startNewRecorder(); // 回聆听
-    if(cmd==='open_cam')openAllCameras(); else if(cmd==='close_cam')closeAllCameras(); // 最后执行动作（异步，不阻塞对话）
-    return;
+    if(cmd.type==='close_cam'){
+      await speakAnswer('好的，摄像头已关闭。',true);
+      if(!listening){chatState='idle';return;}
+      resetToListen();closeAllCameras();return;
+    }
+    if(cmd.type==='open_cam'){
+      await speakAnswer('好的，本地摄像头已打开。',true);
+      if(!listening){chatState='idle';return;}
+      resetToListen();openAllCameras();return;
+    }
+    if(cmd.type==='open_cam_ambiguous'){
+      clarifyCam=true;
+      await speakAnswer('本地的还是谁的？',true);
+      if(!listening){chatState='idle';return;}
+      resetToListen();return;
+    }
+    // 远端：按用户名查名单 → 多匹配多窗口 WHEP
+    voiceStatus.textContent=`✦ 正在查找${cmd.name}的摄像头…`;
+    try{
+      const resp=await fetchWithTimeout('http://localhost:8770/cameras?q='+encodeURIComponent(cmd.name),{},15000);
+      const data=await resp.json();
+      const items=data.items||[];
+      if(items.length===0){
+        await speakAnswer(`没找到${cmd.name}的摄像头，请确认用户名或设备是否在线。`,true);
+        if(!listening){chatState='idle';return;}resetToListen();return;
+      }
+      const names=items.map(i=>i.user_name||i.account||i.stream_name).filter(Boolean).join('、');
+      await speakAnswer(`好的，已打开${names}的摄像头。`,true);
+      if(!listening){chatState='idle';return;}resetToListen();
+      openRemoteCameras(items);
+      return;
+    }catch(err){
+      await speakAnswer(`查找${cmd.name}的摄像头失败，请稍后再试。`,true);
+      if(!listening){chatState='idle';return;}resetToListen();return;
+    }
   }
   // 视觉问句：“X号摄像头里是什么” → 截取该窗口当前帧送后端视觉模型描述
   const vq=isVisionQuestion(question);
   if(vq){
+    if(vq.remote){
+      // 远端画面描述：截取已打开的远端窗口当前帧 → 本地视觉模型（与本地统一，不依赖 go-proxy）
+      const rslot=findRemoteSlot(vq.name);
+      if(!rslot){
+        await speakAnswer(`没有打开${vq.name}的摄像头，请先说打开${vq.name}的摄像头。`,true);
+        if(!listening){chatState='idle';return;}resetToListen();return;
+      }
+      const rblob=await captureCamFrame(rslot);
+      if(!rblob){
+        await speakAnswer(`${vq.name}的摄像头画面还没准备好，稍等一下再问。`,true);
+        if(!listening){chatState='idle';return;}resetToListen();return;
+      }
+      voiceStatus.textContent=`✦ 正在分析${vq.name}的摄像头画面…`;
+      try{
+        const b64=await blobToBase64(rblob);
+        const resp=await fetchWithTimeout('http://localhost:8770/vision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:question,image:b64})},60000);
+        const data=await resp.json();
+        if(chatState!=='thinking')return;
+        if(!data.text||data.error)throw new Error(data.error||'视觉模型没有返回描述');
+        const ans=data.text.length>2000?data.text.slice(0,2000)+'…':data.text;
+        conversationHistory.push({role:'user',content:question});
+        conversationHistory.push({role:'assistant',content:ans});
+        if(conversationHistory.length>12)conversationHistory.splice(0,conversationHistory.length-12);
+        await speakAnswer(data.text);
+      }catch(error){
+        if(chatState==='idle')return;
+        voiceStatus.textContent='✦ 画面分析失败：'+(error.name==='AbortError'?'视觉模型响应超时':error.message);
+        chatState='listening';turnActive=false;asrContext='';startNewRecorder();
+      }
+      return;
+    }
     const slot=camSlots[vq.index-1];
     if(!slot||!slot.stream){
       const msg=vq.fallback?'当前没有打开的摄像头，请先说“打开摄像头”。':`没有找到${vq.index}号摄像头，请先打开它。`;
@@ -228,7 +312,7 @@ async function autoSendChat(){
       startNewRecorder();
       return;
     }
-    const blob=await captureCamFrame(vq.index);
+    const blob=await captureCamFrame(slot);
     if(!blob){
       await speakAnswer(`${vq.index}号摄像头画面还没准备好，稍等一下再问。`,true);
       if(!listening){chatState='idle';return;}
@@ -413,7 +497,7 @@ function startWakeRecorder(){
       if(chunks.length>0){
         const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
         const rms=await segRMS(wakeCtx,blob);
-        console.log('[wake] rms=',rms.toFixed(3),'min=',SEG_RMS_MIN,'pass=',rms>=SEG_RMS_MIN);
+        serverLog('[wake] rms=',rms.toFixed(3),'min=',SEG_RMS_MIN,'pass=',rms>=SEG_RMS_MIN);
         if(rms>=SEG_RMS_MIN){wakeQueue.push(blob);processWakeASR();}
       }
       startWakeRecorder(); // 连续分段录制
@@ -429,7 +513,7 @@ async function processWakeASR(){
   try{
     const resp=await fetchWithTimeout('http://localhost:8770/transcribe',{method:'POST',body:blob,headers:{'Content-Type':blob.type||'audio/webm'}},30000);
     const data=await resp.json();
-    console.log('[wake] asr=',JSON.stringify(data),'isWake=',data.text?isWakeWord(data.text):false);
+    serverLog('[wake] asr=',JSON.stringify(data),'isWake=',data.text?isWakeWord(data.text):false);
     if(data.text&&isWakeWord(data.text)){
       wakeListening=false; // 立即停掉监听，防止重复触发
       voiceStatus.textContent='✦  唤醒成功 · 进入会话';

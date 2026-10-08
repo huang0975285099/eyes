@@ -10,9 +10,6 @@ from pathlib import Path
 from .paths import APP_DIR
 
 DEFAULT_CONFIG = APP_DIR / "config.json"
-DEFAULT_MODEL_URL = (
-    "https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip"
-)
 
 
 @dataclass(frozen=True)
@@ -120,13 +117,6 @@ class Config:
     tts_rate: str
     tts_volume: str
     tts_proxy: str
-    llm_provider: str
-    online_api_base_url: str
-    online_api_key: str
-    online_api_key_env: str
-    online_config_db: Path | None
-    online_model: str
-    online_timeout_seconds: float
     ollama_enabled: bool
     ollama_url: str
     ollama_model: str
@@ -136,7 +126,6 @@ class Config:
     internet_tools_enabled: bool
     internet_timeout_seconds: float
     internet_retry_count: int
-    network_proxy: str
     weather_default_location: str
     code_run_timeout_seconds: float
     web_enabled: bool
@@ -173,8 +162,6 @@ class Config:
     yolo_confidence: float
     yolo_image_size: int
     yolo_timeout_seconds: float
-    model_path: Path
-    model_url: str
 
 
 @dataclass(frozen=True)
@@ -265,13 +252,6 @@ def load_config(path: Path) -> Config:
         (camera for camera in native_cameras if camera.enabled and camera.primary),
         native_cameras[0],
     )
-    model_path = Path(raw.get("model_path", "models/vosk-model-small-cn-0.22"))
-    if not model_path.is_absolute():
-        model_path = APP_DIR / model_path
-    online_config_db_value = str(raw.get("online_config_db", "")).strip()
-    online_config_db = Path(online_config_db_value) if online_config_db_value else None
-    if online_config_db is not None and not online_config_db.is_absolute():
-        online_config_db = APP_DIR / online_config_db
     yolo_model_path = Path(raw.get("yolo_model_path", "models/yolov8n.pt"))
     if not yolo_model_path.is_absolute():
         yolo_model_path = APP_DIR / yolo_model_path
@@ -297,13 +277,6 @@ def load_config(path: Path) -> Config:
         tts_rate=raw.get("tts_rate", "+0%"),
         tts_volume=raw.get("tts_volume", "+0%"),
         tts_proxy=str(raw.get("tts_proxy", "")).strip(),
-        llm_provider=str(raw.get("llm_provider", "ollama")).strip().casefold(),
-        online_api_base_url=str(raw.get("online_api_base_url", "")).rstrip("/"),
-        online_api_key=str(raw.get("online_api_key", "")).strip(),
-        online_api_key_env=str(raw.get("online_api_key_env", "QWEN_API_KEY")).strip(),
-        online_config_db=online_config_db,
-        online_model=str(raw.get("online_model", "qwen3.8-flash")).strip(),
-        online_timeout_seconds=float(raw.get("online_timeout_seconds", 120.0)),
         ollama_enabled=bool(raw.get("ollama_enabled", True)),
         ollama_url=str(raw.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/"),
         ollama_model=str(raw.get("ollama_model", "qwen3.5:4b")),
@@ -320,7 +293,6 @@ def load_config(path: Path) -> Config:
             1.0, float(raw.get("internet_timeout_seconds", 10.0))
         ),
         internet_retry_count=max(0, int(raw.get("internet_retry_count", 2))),
-        network_proxy=str(raw.get("network_proxy", "")).strip(),
         weather_default_location=str(
             raw.get("weather_default_location", "Los Angeles")
         ).strip(),
@@ -391,6 +363,4 @@ def load_config(path: Path) -> Config:
         yolo_timeout_seconds=max(
             2.0, float(raw.get("yolo_timeout_seconds", 30.0))
         ),
-        model_path=model_path,
-        model_url=raw.get("model_url", DEFAULT_MODEL_URL),
     )
