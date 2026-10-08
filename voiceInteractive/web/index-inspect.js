@@ -6,7 +6,6 @@
 //   camSlots,captureCamFrame,attachCamDrag(index-cam.js)；resolveCameraSlot,speakAnswer(index-voice.js)
 
 const INSPECT_INTERVAL = 30000;   // 截帧间隔 30s
-const INSPECT_COOLDOWN = 120000;  // 告警冷却 120s
 const INSPECT_PROMPT =
   '巡检分析：逐个查看画面中每个人，重点检查其口鼻处是否有口罩遮挡。仅返回一个JSON对象，不要任何解释文字或markdown代码块。' +
   '格式：{"person_count":整数,"no_mask":整数,"summary":"一句话"}。' +
@@ -163,38 +162,27 @@ async function inspectOnce(e){
     serverLog('[巡检]',e.label,'模型原始返回:',data.text);
     const result=parseInspectResult(data.text);
     if(!result){ serverLog('[巡检]',e.label,'JSON解析失败，跳过'); return; }
-    const now=Date.now();
-    serverLog('[巡检]',e.label,'解析: person_count='+result.person_count,'no_mask='+result.no_mask,'alerting='+e.alerting,'summary='+JSON.stringify(result.summary));
+    serverLog('[巡检]',e.label,'解析: person_count='+result.person_count,'no_mask='+result.no_mask,'summary='+JSON.stringify(result.summary));
     if(result.no_mask>0){
-      // 异常态：红脉冲 + 告警窗
+      // 异常态：红脉冲 + 告警窗 + 播报 + 存盘（每次检测违规都弹窗+播报）
       e.slot.win.classList.add('alerting');
       if(e.lastUrl)URL.revokeObjectURL(e.lastUrl);
       e.lastUrl=URL.createObjectURL(blob);
-      const shouldAlert=!e.alerting||(now-e.lastAlertTs>=INSPECT_COOLDOWN);
-      serverLog('[巡检]',e.label,'异常态 shouldAlert='+shouldAlert,'距上次='+(e.alerting?(now-e.lastAlertTs)+'ms':'首次'));
-      if(shouldAlert){
-        showAlertWin(e, e.lastUrl, result);
-        inspectSpeak(e.label+'巡检告警：画面中'+result.person_count+'人，其中'+result.no_mask+'人未戴口罩。');
-        // 存盘取证（轻量端点，不重复推理）
-        fetchWithTimeout('http://localhost:8770/vision_save',
-          {method:'POST',headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({image:b64, text:INSPECT_PROMPT, answer:data.text})},30000).catch(()=>{});
-        e.alerting=true; e.lastAlertTs=now;
-        // 记入历史（独立 URL，不随告警窗关闭 revoke）
-        inspectHistory.push({label:e.label, url:URL.createObjectURL(blob), person_count:result.person_count, no_mask:result.no_mask, summary:result.summary, time:new Date()});
-        if(inspectHistory.length>30){const old=inspectHistory.shift(); URL.revokeObjectURL(old.url);}
-        _showHistoryBtn();
-        serverLog('[巡检]',e.label,'已触发告警+播报+存盘');
-      }else{
-        // 冷却内：只更新告警窗截图，不播报
-        if(e.alertWin)e.alertWin.querySelector('.alert-img').src=e.lastUrl;
-        serverLog('[巡检]',e.label,'冷却内，仅更新截图');
-      }
+      showAlertWin(e, e.lastUrl, result);
+      inspectSpeak(e.label+'巡检告警：画面中'+result.person_count+'人，其中'+result.no_mask+'人未戴口罩。');
+      // 存盘取证（轻量端点，不重复推理）
+      fetchWithTimeout('http://localhost:8770/vision_save',
+        {method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({image:b64, text:INSPECT_PROMPT, answer:data.text})},30000).catch(()=>{});
+      // 记入历史（独立 URL，不随告警窗关闭 revoke）
+      inspectHistory.push({label:e.label, url:URL.createObjectURL(blob), person_count:result.person_count, no_mask:result.no_mask, summary:result.summary, time:new Date()});
+      if(inspectHistory.length>30){const old=inspectHistory.shift(); URL.revokeObjectURL(old.url);}
+      _showHistoryBtn();
+      serverLog('[巡检]',e.label,'已触发告警+播报+存盘');
     }else{
       // 正常态：恢复不语音，仅视觉复位 + 静默关告警窗
       e.slot.win.classList.remove('alerting');
       hideAlertWin(e);
-      e.alerting=false;
       serverLog('[巡检]',e.label,'正常态，复位');
     }
   }catch(err){
