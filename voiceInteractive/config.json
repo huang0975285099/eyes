@@ -19,5 +19,8 @@
   "remote_camera_api_base": "http://10.0.6.226:51351",
   "remote_camera_account": "admin",
   "remote_camera_password": "mzjy.com",
-  "remote_camera_srs_host": "10.0.6.226"
+  "remote_camera_srs_host": "10.0.6.226",
+  "vision_api_enabled": true,
+  "vision_api_base": "http://10.0.6.226:11435/v1",
+  "vision_api_model": "qwen3-vl-8b"
 }

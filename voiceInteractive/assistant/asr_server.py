@@ -123,6 +123,14 @@ def _check_ollama() -> None:
         print("  启动命令：ollama serve  （或启动 Ollama 应用程序）")
 
 
+def _check_vision_api() -> None:
+    """启动前探测远端视觉推理 API；可用则图片描述/巡检走该 API，否则走本地模型。"""
+    if not _OLLAMA.check_vision_api():
+        print("ℹ 视觉推理API不可用，图片描述/巡检将走本地 qwen3.5:4b")
+        return
+    print(f"✓ 视觉推理API可用：{_CONFIG.vision_api_base} 模型 {_CONFIG.vision_api_model}（图片描述/巡检走该API）")
+
+
 def _save_vision_frame(image_bytes: bytes) -> str:
     """存视觉问答截图到 data/vision/，返回时间戳（文件名前缀）。失败不影响主流程。"""
     from datetime import datetime
@@ -222,15 +230,41 @@ class ASRHandler(BaseHTTPRequestHandler):
                 image_bytes = base64.b64decode(image_b64)
                 if len(image_bytes) > 8 * 1024 * 1024:
                     raise ValueError("图像过大")
-                ts = _save_vision_frame(image_bytes)  # 存截图（立即，失败也留底）
+                save = payload.get("save", True)  # 巡检正常帧不存盘，默认 True 兼容语音触发
+                ts = _save_vision_frame(image_bytes) if save else ""  # 存截图（立即，失败也留底）
                 source = str(payload.get("source", "")).strip()
                 answer = _OLLAMA.vision(question, image_bytes, source=source)
-                _save_vision_text(ts, question, answer)  # 存问题+AI描述
+                if save:
+                    _save_vision_text(ts, question, answer)  # 存问题+AI描述
                 print(f"[视觉] {question}")
                 self._respond({"text": answer})
             except Exception as error:
                 self._respond(
                     {"text": "", "error": str(error)},
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+        if path == "/vision_save":
+            # 巡检告警帧存盘取证（仅写文件，不重复推理）
+            try:
+                import base64
+                payload = self._read_json_body()
+                image_b64 = str(payload.get("image", "")).strip()
+                question = str(payload.get("text", "")).strip()
+                answer = str(payload.get("answer", "")).strip()
+                if not image_b64:
+                    raise ValueError("缺少图像")
+                if image_b64.startswith("data:") and "," in image_b64:
+                    image_b64 = image_b64.split(",", 1)[1]
+                image_bytes = base64.b64decode(image_b64)
+                if len(image_bytes) > 8 * 1024 * 1024:
+                    raise ValueError("图像过大")
+                ts = _save_vision_frame(image_bytes)
+                _save_vision_text(ts, question, answer)
+                self._respond({"ok": True, "ts": ts})
+            except Exception as error:
+                self._respond(
+                    {"ok": False, "error": str(error)},
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
             return
@@ -304,6 +338,7 @@ class ASRHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     _check_ollama()
+    _check_vision_api()
     _get_model()
     server = ThreadingHTTPServer(("127.0.0.1", _ASR_PORT), ASRHandler)
     print(f"ASR 转写服务已启动：http://127.0.0.1:{_ASR_PORT}/")

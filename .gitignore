@@ -19,3 +19,4 @@ Thumbs.db
 .venv/
 .tmp-go-cache/
 *.whl
+data/

@@ -231,6 +231,18 @@ async function autoSendChat(){
       if(!listening){chatState='idle';return;}
       resetToListen();closeAllCameras();return;
     }
+    if(cmd.type==='start_inspect'){
+      await startInspect(cmd.index!=null?(cmd.index+'号'):'');
+      if(!listening){chatState='idle';return;}
+      resetToListen();return;
+    }
+    if(cmd.type==='stop_inspect'){
+      let tgt=null;
+      if(cmd.index!=null){ tgt=resolveCameraSlot(cmd.index+'号'); if(!tgt){ await speakAnswer('没找到'+cmd.index+'号摄像头。',true); if(!listening){chatState='idle';return;} resetToListen();return; } }
+      await stopInspect(tgt,false);
+      if(!listening){chatState='idle';return;}
+      resetToListen();return;
+    }
     if(cmd.type==='open_cam'){
       await speakAnswer('好的，本地摄像头已打开。',true);
       if(!listening){chatState='idle';return;}
@@ -692,8 +704,9 @@ async function playGreeting(){
   if(greetCtx.state!=='running')return; // 自动播放被拦截，等首次点击
   chatState='speaking';ttsLive=true; // 复用 AI 播报通路：球体随音量起伏
   const an=greetCtx.createAnalyser();an.fftSize=1024;an.smoothingTimeConstant=.78;
+  const gain=greetCtx.createGain();gain.gain.value=0.5; // 音量降至 50%
   const src=greetCtx.createBufferSource();src.buffer=greetBuffer;
-  src.connect(an);an.connect(greetCtx.destination);
+  src.connect(an);an.connect(gain);gain.connect(greetCtx.destination);
   ttsAnalyser=an;ttsSource=src;
   await new Promise(res=>{src.onended=res;src.start();});
   ttsAnalyser=null;ttsSource=null;ttsLive=false;
@@ -701,7 +714,7 @@ async function playGreeting(){
   if(chatState==='speaking')chatState='idle';
   try{greetCtx.close();}catch(_){}greetCtx=null; // 欢迎语音只播一次，播完即释放 AudioContext，避免泄漏
 }
-(async()=>{
+const greetPromise=(async()=>{
   try{
     greetCtx=new (window.AudioContext||window.webkitAudioContext)();
     const resp=await fetch('/test_chinese.wav');
@@ -712,7 +725,8 @@ preloadAck(); // 预取唤醒确认语"我在。"音频字节，唤醒时即时�
 // 首次交互：恢复欢迎语（如被自动播放拦截）→ 启动唤醒词监听
 document.addEventListener('pointerdown',async(e)=>{
   if(e.target.closest('#mic-button')||e.target.closest('#end-button'))return; // 按钮各自处理
-  if(greetBuffer&&greetCtx&&greetCtx.state!=='running')await playGreeting();
+  if(greetBuffer&&greetCtx&&greetCtx.state!=='running')await playGreeting(); // 自动播放被拦：本次点击触发播放
+  await greetPromise; // 等待欢迎语播完（自动播放正在播的情况），避免麦克风录入欢迎语误触发唤醒
   if(!listening&&!wakeListening)startWakeWord();
 });
 resize();addEventListener('resize',resize);document.addEventListener('visibilitychange',()=>{if(!document.hidden) resize()});

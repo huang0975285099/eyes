@@ -16,6 +16,7 @@ function attachCamDrag(win){
   let dragging=false, sx=0, sy=0, ox=0, oy=0;
   head.addEventListener('pointerdown',(e)=>{
     if(e.target.closest('.cam-close'))return; // 点关闭按钮不触发拖动
+    if(win.classList.contains('inspecting'))return; // 巡检锁定，禁止拖动
     dragging=true; sx=e.clientX; sy=e.clientY;
     const rect=win.getBoundingClientRect(); ox=rect.left; oy=rect.top;
     win.classList.add('dragging'); head.setPointerCapture(e.pointerId);
@@ -102,6 +103,7 @@ async function openAllCameras(){
 function closeCamWindow(deviceId){
   const slot=camSlots.find(s=>s.deviceId===deviceId);
   if(!slot)return;
+  if(typeof stopInspect==='function' && typeof inspectStates!=='undefined' && inspectStates.has(deviceId)){ stopInspect(slot,true); } // 巡检中关闭：先停该路巡检
   if(slot===activeCamSlot)activeCamSlot=null; // 关闭的是活动摄像头则清空上下文
   slot.win.classList.remove('open');
   setTimeout(()=>{ // 延迟释放摄像头与移除窗口，让退出动画跑完
@@ -118,6 +120,15 @@ function closeAllCameras(){[...camSlots].forEach(s=>closeCamWindow(s.deviceId));
 function isVoiceCommand(text){
   const s=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
   if(!/摄像头/.test(s))return null;
+  // 巡检命令（必须同时含"摄像头"+"巡检"，避免对话中误触发）
+  if(/巡检/.test(s)){
+    const cn={'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9};
+    const m=s.match(/([一二三四五六七八九]|\d+)\s*号/);
+    let idx=null;
+    if(m){const raw=m[1];idx=cn[raw]!==undefined?cn[raw]:(/^\d+$/.test(raw)?parseInt(raw,10):null);}
+    if(/(停止|结束|取消|关掉|关闭|暂停)/.test(s))return {type:'stop_inspect',index:idx};
+    return {type:'start_inspect',index:idx};
+  }
   if(/(关闭|关掉|关上|收起|关了)/.test(s))return {type:'close_cam'};
   if(/本地/.test(s)&&/(打开|开启|显示|出来|调出|开一下)/.test(s))return {type:'open_cam'};
   // 打开+人名+摄像头：提取人名（兼容"帮我打开张三的摄像头""打开张三摄像头"）

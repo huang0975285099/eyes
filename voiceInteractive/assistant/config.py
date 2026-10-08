@@ -34,6 +34,9 @@ class Config:
     remote_camera_account: str
     remote_camera_password: str
     remote_camera_srs_host: str
+    vision_api_enabled: bool
+    vision_api_base: str
+    vision_api_model: str
 
 
 def load_config(path: Path) -> Config:
@@ -60,4 +63,7 @@ def load_config(path: Path) -> Config:
         remote_camera_account=str(raw.get("remote_camera_account", "")),
         remote_camera_password=str(raw.get("remote_camera_password", "")),
         remote_camera_srs_host=str(raw.get("remote_camera_srs_host", "")),
+        vision_api_enabled=bool(raw.get("vision_api_enabled", False)),
+        vision_api_base=str(raw.get("vision_api_base", "")).rstrip("/"),
+        vision_api_model=str(raw.get("vision_api_model", "qwen3-vl-8b")),
     )

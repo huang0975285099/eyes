@@ -1,5 +1,5 @@
 // ===== 语音助手文本判定规则（从 index-voice.js 拆出，纯函数） =====
-// 视觉问句判定：含描述意图；有“摄像头”按编号/人名，无则用传入的 activeCamSlot 上下文
+// 视觉问句判定：含描述意图；有"摄像头"按编号/人名，无则用传入的 activeCamSlot 上下文
 function isVisionQuestion(text, activeCamSlot){
   const s=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
   if(!/(是什么|有什么|是啥|里有啥|里是啥|看到了什么|看到什么|看见什么|看见了什么|画面是什么|画面里|拍到了什么|拍到什么|描述一下|描述|里面有啥|里面有什么|看到了啥|看到啥)/.test(s))return null;
@@ -15,16 +15,17 @@ function isVisionQuestion(text, activeCamSlot){
     }
     return {index:1,fallback:true};
   }
-  // 无“摄像头”但有描述意图 + 有活动摄像头上下文 → 描述刚打开的那个
+  // 无"摄像头"但有描述意图：必须上文打开过摄像头（activeCamSlot 非空）才成立，
+  // 否则返回 null 走普通对话——避免无摄像头上下文时误触发视觉描述
   if(activeCamSlot)return {active:true};
   return null;
 }
-// 唤醒词判定：清理标点空白后“叮咚/丁冬/丁东”出现≥2次
+// 唤醒词判定：清理标点空白后"叮咚/丁冬/丁东"出现≥2次
 function isWakeWord(text){
   const clean=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
   return (clean.match(/叮咚|丁冬|丁东/g)||[]).length>=2;
 }
-// 退出词“再见”判定：清理标点空白后包含“再见”即命中
+// 退出词"再见"判定：清理标点空白后包含"再见"即命中
 function isGoodbye(text){
   return /再见/.test(String(text).replace(/[\s，,。.！!？?、~～]/g,''));
 }
