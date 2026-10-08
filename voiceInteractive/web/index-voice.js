@@ -142,12 +142,31 @@ async function preloadSendCue(){
     sendCueBuffer=await audioContext.decodeAudioData(await resp.arrayBuffer());
   }catch(_){sendCueBuffer=null;}
 }
-// 唤醒确认语"我在。"：页面加载时预取音频字节，唤醒时用主音频上下文即时解码播放
+// ASR 后端就绪检测：模型加载到 GPU 需要数秒，期间页面已打开但 /transcribe 不可用
+let asrReady=false;
+let _asrReadyResolve;
+const asrReadyPromise=new Promise(r=>{_asrReadyResolve=r;});
+async function _pollASR(){
+  voiceStatus.textContent='✦ 服务预热中…';
+  micCaption.textContent='预热中';
+  while(!asrReady){
+    try{
+      const resp=await fetchWithTimeout('http://localhost:8770/ready',{},3000);
+      if(resp.ok&&(await resp.json()).ready){asrReady=true;break;}
+    }catch(_){}
+    await new Promise(r=>setTimeout(r,1000));
+  }
+  preloadAck(); // ASR 就绪后才预取唤醒确认语（避免端口未监听时白白失败）
+  voiceStatus.textContent='✦ 待机中';
+  micCaption.textContent='开始会话';
+  _asrReadyResolve();
+}
+// 唤醒确认语"我在。"：ASR 就绪后预取音频字节，唤醒时用主音频上下文即时解码播放
 let ackArrayBuffer=null; // null=未取，false=取失败，ArrayBuffer=就绪
 async function preloadAck(){
   if(ackArrayBuffer!==null)return;
   try{
-    const resp=await fetchWithTimeout('http://localhost:8770/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'我在。'})},30000);
+    const resp=await fetchWithTimeout('http://localhost:8770/tts?preload=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'我在。'})},30000);
     ackArrayBuffer=resp.ok?await resp.arrayBuffer():false;
   }catch(_){ackArrayBuffer=false;}
 }
@@ -477,8 +496,9 @@ async function speakWakeAck(text){
   replyText.textContent='';aiText.textContent=text;fitReplyFont();
   // 优先用预取的音频字节解码（即时），否则现取现解码
   let buffer=null;
+  let usedPreload=false;
   if(ackArrayBuffer&&audioContext&&audioContext.state!=='closed'){
-    try{buffer=await audioContext.decodeAudioData(ackArrayBuffer.slice(0));}catch(_){buffer=null;}
+    try{buffer=await audioContext.decodeAudioData(ackArrayBuffer.slice(0));usedPreload=true;}catch(_){buffer=null;}
   }
   if(!buffer){
     try{
@@ -486,6 +506,7 @@ async function speakWakeAck(text){
       if(resp.ok){const arr=await resp.arrayBuffer();if(audioContext&&audioContext.state!=='closed')buffer=await audioContext.decodeAudioData(arr);}
     }catch(_){buffer=null;}
   }
+  if(usedPreload)serverLog('AI：'+text); // 预取路径未走 /tts，补打日志（现取路径由服务端打印）
   if(buffer&&audioContext&&audioContext.state!=='closed'){
     if(audioContext.state==='suspended')await audioContext.resume();
     ttsAnalyser=audioContext.createAnalyser();ttsAnalyser.fftSize=1024;ttsAnalyser.smoothingTimeConstant=.78;
@@ -528,6 +549,7 @@ let wakeListening=false,wakeCandStart=0,wakeSilence=0,wakeVoice=false,wakeVoiceS
 
 async function startWakeWord(){
   if(wakeListening||listening)return;
+  if(!asrReady){voiceStatus.textContent='✦ 服务预热中…请稍候';return;}
   try{
     wakeStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});
     wakeCtx=new AudioContext();
@@ -721,12 +743,13 @@ const greetPromise=(async()=>{
     if(resp.ok){greetBuffer=await greetCtx.decodeAudioData(await resp.arrayBuffer());await playGreeting();}
   }catch(_){greetCtx=null;greetBuffer=null;}
 })();
-preloadAck(); // 预取唤醒确认语"我在。"音频字节，唤醒时即时解码播放
+_pollASR(); // 启动 ASR 后端就绪检测，预热期间显示状态、阻止麦克风交互
 // 首次交互：恢复欢迎语（如被自动播放拦截）→ 启动唤醒词监听
 document.addEventListener('pointerdown',async(e)=>{
   if(e.target.closest('#mic-button')||e.target.closest('#end-button'))return; // 按钮各自处理
   if(greetBuffer&&greetCtx&&greetCtx.state!=='running')await playGreeting(); // 自动播放被拦：本次点击触发播放
   await greetPromise; // 等待欢迎语播完（自动播放正在播的情况），避免麦克风录入欢迎语误触发唤醒
+  await asrReadyPromise; // 等待 ASR 后端就绪（已就绪则立即通过）
   if(!listening&&!wakeListening)startWakeWord();
 });
 resize();addEventListener('resize',resize);document.addEventListener('visibilitychange',()=>{if(!document.hidden) resize()});

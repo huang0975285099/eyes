@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -26,6 +27,8 @@ from .remote_cameras import RemoteCameraRegistry
 
 _ASR_PORT = 8770
 _MODEL: Qwen3ASRModel | None = None
+_MODEL_READY = threading.Event()
+_MODEL_LOCK = threading.Lock()
 
 # 繁简转换：Qwen3-ASR 可能输出繁体，统一转简体；opencc 不可用时原样返回
 try:
@@ -99,15 +102,18 @@ def _load_audio_bytes(data: bytes):
 def _get_model() -> Qwen3ASRModel:
     global _MODEL
     if _MODEL is None:
-        print("正在加载 Qwen3-ASR 模型到 GPU …")
-        _MODEL = Qwen3ASRModel.from_pretrained(
-            str(APP_DIR / "models" / "Qwen3-ASR-0.6B"),
-            dtype=torch.float16,
-            device_map="cuda",
-            max_inference_batch_size=1,
-            max_new_tokens=256,
-        )
-        print(f"模型加载完成，显存占用 {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
+        with _MODEL_LOCK:
+            if _MODEL is None:  # 双检：避免后台线程与首个请求并发重复加载
+                print("正在加载 Qwen3-ASR 模型到 GPU …")
+                _MODEL = Qwen3ASRModel.from_pretrained(
+                    str(APP_DIR / "models" / "Qwen3-ASR-0.6B"),
+                    dtype=torch.float16,
+                    device_map="cuda",
+                    max_inference_batch_size=1,
+                    max_new_tokens=256,
+                )
+                print(f"模型加载完成，显存占用 {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
+                _MODEL_READY.set()
     return _MODEL
 
 
@@ -171,6 +177,9 @@ class ASRHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/ready":
+            self._respond({"ready": _MODEL_READY.is_set()})
+            return
         if parsed.path == "/cameras":
             query = parse_qs(parsed.query).get("q", [""])[0]
             try:
@@ -274,7 +283,9 @@ class ASRHandler(BaseHTTPRequestHandler):
                 text = str(payload.get("text", "")).strip()
                 if not text:
                     raise ValueError("文本为空")
-                print(f"AI：{text}")  # 统一在此打印 AI 回答（覆盖对话/视觉/语音指令/告别/唤醒确认所有播报内容）
+                # preload=1 表示前端预取音频字节（非真实播报），跳过日志打印
+                if query.get("preload", [""])[0] != "1":
+                    print(f"AI：{text}")  # 统一在此打印 AI 回答（覆盖对话/视觉/语音指令/告别/唤醒确认所有播报内容）
                 mp3 = _tts_bytes(text)
                 self._respond_binary(mp3, "audio/mpeg")
             except Exception as error:
@@ -339,9 +350,10 @@ class ASRHandler(BaseHTTPRequestHandler):
 def main() -> None:
     _check_ollama()
     _check_vision_api()
-    _get_model()
     server = ThreadingHTTPServer(("127.0.0.1", _ASR_PORT), ASRHandler)
-    print(f"ASR 转写服务已启动：http://127.0.0.1:{_ASR_PORT}/")
+    print(f"ASR 转写服务已启动：http://127.0.0.1:{_ASR_PORT}/  （模型后台加载中）")
+    # 后台线程加载模型，不阻塞 HTTP 服务；加载完成前 /transcribe 会阻塞等待，/ready 返回 false
+    threading.Thread(target=_get_model, name="asr-model-load", daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

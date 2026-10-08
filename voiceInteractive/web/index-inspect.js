@@ -5,7 +5,7 @@
 //   audioContext,ttsLive(index-ui.js)；fetchWithTimeout,blobToBase64(voice-utils.js)；
 //   camSlots,captureCamFrame,attachCamDrag(index-cam.js)；resolveCameraSlot,speakAnswer(index-voice.js)
 
-const INSPECT_INTERVAL = 30000;   // 截帧间隔 30s
+const INSPECT_INTERVAL = 60000;   // 截帧间隔 60s
 const INSPECT_PROMPT =
   '巡检分析：逐个查看画面中每个人，重点检查其口鼻处是否有口罩遮挡。仅返回一个JSON对象，不要任何解释文字或markdown代码块。' +
   '格式：{"person_count":整数,"no_mask":整数,"summary":"一句话"}。' +
@@ -154,10 +154,12 @@ async function inspectOnce(e){
     const blob=await captureCamFrame(e.slot);
     if(!blob){ serverLog('[巡检]',e.label,'画面未就绪，跳过本轮'); return; }
     const b64=await blobToBase64(blob);
+    const t0=Date.now();
     const resp=await fetchWithTimeout('http://localhost:8770/vision',
       {method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({text:INSPECT_PROMPT, image:b64, source:'camera', save:false})},60000);
     const data=await resp.json();
+    serverLog('[巡检]',e.label,'视觉耗时:'+(Date.now()-t0)+'ms');
     if(!data.text||data.error){ serverLog('[巡检]',e.label,'视觉返回错误:',data.error||'(空)'); return; }
     serverLog('[巡检]',e.label,'模型原始返回:',data.text);
     const result=parseInspectResult(data.text);
