@@ -161,6 +161,7 @@ function waitForIceGathering(conn,timeoutMs){
 async function startWebRtcPlayback(slot,srsHost,streamName){
   const video=slot.win.querySelector('video');
   const fb=slot.win.querySelector('.cam-fallback');
+  if(slot.pc){try{slot.pc.close();}catch(_){}slot.pc=null;} // 重复打开时先关旧连接，避免泄漏
   try{
     const conn=new RTCPeerConnection();slot.pc=conn;
     conn.addTransceiver('video',{direction:'recvonly'});

@@ -1,15 +1,14 @@
-"""Ollama 大模型客户端。
+"""本地 Ollama 客户端。
 
-仅保留本地 Ollama 接口（``info`` / ``check`` / ``warm_up``），供 Web Dashboard
-与启动流程使用。在线 Qwen 客户端与多提供方路由（``OnlineQwenClient`` /
-``ModelRouter.switch`` 等）已随在线大模型支持一并移除。
+提供 check / warm_up / info / chat / vision，供主进程启动预热（main.py）与
+ASR 服务（asr_server.py）共享。二者各自独立进程 import 本模块，无共享运行时状态。
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.request
-from pathlib import Path
 
 from .config import Config
 
@@ -40,9 +39,7 @@ class OllamaClient:
             return False, "配置中已关闭"
         try:
             response = self._request("/api/tags")
-            names = {
-                str(model.get("name", "")) for model in response.get("models", [])
-            }
+            names = {str(model.get("name", "")) for model in response.get("models", [])}
             if self.config.ollama_model not in names:
                 return False, f"未安装模型 {self.config.ollama_model}"
             return True, self.config.ollama_model
@@ -50,7 +47,7 @@ class OllamaClient:
             return False, str(error)
 
     def warm_up(self) -> None:
-        """Load the model before the first spoken question to avoid cold-start delay."""
+        """Load the model before the first request to avoid cold-start delay."""
         self._request(
             "/api/generate",
             {
@@ -62,15 +59,6 @@ class OllamaClient:
             },
         )
 
-
-class ModelRouter:
-    """LLM 入口；仅本地 Ollama，保留 config_path 供 Dashboard 持久化音频设备选择。"""
-
-    def __init__(self, config: Config, config_path: Path) -> None:
-        self.config = config
-        self.config_path = config_path
-        self.local = OllamaClient(config)
-
     def info(self) -> dict[str, str]:
         return {
             "provider": "ollama",
@@ -78,8 +66,50 @@ class ModelRouter:
             "label": self.config.ollama_model,
         }
 
-    def check(self) -> tuple[bool, str]:
-        return self.local.check()
+    def chat(self, messages: list[dict], temperature: float = 0.4, num_predict: int = 512) -> str:
+        system_prompt = self.config.ollama_system_prompt
+        all_messages = (
+            [{"role": "system", "content": system_prompt}] if system_prompt else []
+        ) + messages
+        result = self._request(
+            "/api/chat",
+            {
+                "model": self.config.ollama_model,
+                "messages": all_messages,
+                "stream": False,
+                "think": False,
+                "keep_alive": self.config.ollama_keep_alive,
+                "options": {"temperature": temperature, "num_predict": num_predict},
+            },
+        )
+        return str(result.get("message", {}).get("content", "")).strip()
 
-    def warm_up(self) -> None:
-        self.local.warm_up()
+    def vision(self, question: str, image_bytes: bytes, num_predict: int = 256) -> str:
+        image_b64 = base64.b64encode(image_bytes).decode("ascii")
+        messages: list[dict] = []
+        system_prompt = self.config.ollama_system_prompt
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"{question}\n请根据这张摄像头的当前画面直接回答。"
+                    "只描述确实能看到的内容，不确定的要明确说明。"
+                    "不要根据外貌猜测人物姓名或身份。"
+                ),
+                "images": [image_b64],
+            }
+        )
+        result = self._request(
+            "/api/chat",
+            {
+                "model": self.config.ollama_model,
+                "messages": messages,
+                "stream": False,
+                "think": False,
+                "keep_alive": self.config.ollama_keep_alive,
+                "options": {"temperature": 0.4, "num_predict": num_predict},
+            },
+        )
+        return str(result.get("message", {}).get("content", "")).strip()

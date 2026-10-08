@@ -1,7 +1,9 @@
 """Qwen3-ASR 独立转写服务。
 
 独立进程加载 torch + Qwen3-ASR 模型，避免与主应用的 DLL 冲突。
-Dashboard 通过 HTTP 转发 /api/asr 请求到本服务的 /transcribe。
+前端 web/index-voice.js 直连 http://localhost:8770/ 的以下端点：
+/transcribe（语音识别）、/tts（合成）、/chat（对话）、/vision（画面描述）、
+/cameras（远端摄像头查询）、/log（前端日志转发）。
 
 启动：python -m assistant.asr_server
 """
@@ -17,13 +19,15 @@ from urllib.parse import parse_qs, urlparse
 import torch
 from qwen_asr import Qwen3ASRModel
 
+from .config import load_config
+from .llm import OllamaClient
 from .paths import APP_DIR
 from .remote_cameras import RemoteCameraRegistry
 
 _ASR_PORT = 8770
 _MODEL: Qwen3ASRModel | None = None
 
-# 繁体转简体（Qwen3-ASR 可能输出繁体，统一转简体）
+# 繁简转换：Qwen3-ASR 可能输出繁体，统一转简体；opencc 不可用时原样返回
 try:
     from opencc import OpenCC
     _T2S = OpenCC("t2s")
@@ -32,88 +36,15 @@ except Exception:
 
 
 def _to_simplified(text: str) -> str:
-    """繁体转简体；opencc 不可用时原样返回。"""
     if _T2S is None or not text:
         return text
     return _T2S.convert(text)
-_CONFIG = json.loads((APP_DIR / "config.json").read_text(encoding="utf-8"))
 
-# 远程摄像头名单缓存：启动时登录 go-proxy 拉流，后台定时刷新
+
+_CONFIG = load_config(APP_DIR / "config.json")
+_OLLAMA = OllamaClient(_CONFIG)
 _REMOTE_CAMERAS = RemoteCameraRegistry(_CONFIG)
 _REMOTE_CAMERAS.start()
-
-
-def _ollama_chat(messages: list[dict]) -> str:
-    """调用本地 Ollama 生成回答。"""
-    import urllib.request
-
-    system_prompt = _CONFIG.get("ollama_system_prompt", "")
-    all_messages = (
-        [{"role": "system", "content": system_prompt}] if system_prompt else []
-    ) + messages
-    payload = {
-        "model": _CONFIG.get("ollama_model", "qwen3.5:4b"),
-        "messages": all_messages,
-        "stream": False,
-        "think": False,
-        "keep_alive": _CONFIG.get("ollama_keep_alive", "10m"),
-        "options": {"temperature": 0.4, "num_predict": 512},
-    }
-    req = urllib.request.Request(
-        str(_CONFIG.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/")
-        + "/api/chat",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    timeout = float(_CONFIG.get("ollama_timeout_seconds", 120))
-    resp = urllib.request.urlopen(req, timeout=timeout)
-    answer = json.loads(resp.read().decode("utf-8")).get("message", {}).get("content", "")
-    return str(answer).strip()
-
-
-def _ollama_vision(question: str, image_bytes: bytes) -> str:
-    """调用本地 Ollama 视觉模型，根据摄像头画面回答问题。
-
-    依赖模型本身支持图像（Ollama 的 images 字段）。模型不能看图时
-    Ollama 会忽略图像或报错，由调用方提示用户。
-    """
-    import base64
-    import urllib.request
-
-    image_b64 = base64.b64encode(image_bytes).decode("ascii")
-    system_prompt = _CONFIG.get("ollama_system_prompt", "")
-    messages: list[dict] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append(
-        {
-            "role": "user",
-            "content": (
-                f"{question}\n请根据这张摄像头的当前画面直接回答。"
-                "只描述确实能看到的内容，不确定的要明确说明。"
-                "不要根据外貌猜测人物姓名或身份。"
-            ),
-            "images": [image_b64],
-        }
-    )
-    payload = {
-        "model": _CONFIG.get("ollama_model", "qwen3.5:4b"),
-        "messages": messages,
-        "stream": False,
-        "think": False,
-        "keep_alive": _CONFIG.get("ollama_keep_alive", "10m"),
-        "options": {"temperature": 0.4, "num_predict": 256},
-    }
-    req = urllib.request.Request(
-        str(_CONFIG.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/")
-        + "/api/chat",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    timeout = float(_CONFIG.get("ollama_timeout_seconds", 120))
-    resp = urllib.request.urlopen(req, timeout=timeout)
-    answer = json.loads(resp.read().decode("utf-8")).get("message", {}).get("content", "")
-    return str(answer).strip()
 
 
 def _tts_bytes(text: str) -> bytes:
@@ -123,9 +54,9 @@ def _tts_bytes(text: str) -> bytes:
     async def _generate(proxy):
         communicate = edge_tts.Communicate(
             text,
-            _CONFIG.get("tts_voice", "zh-CN-YunyangNeural"),
-            rate=_CONFIG.get("tts_rate", "+25%"),
-            volume=_CONFIG.get("tts_volume", "+0%"),
+            _CONFIG.tts_voice,
+            rate=_CONFIG.tts_rate,
+            volume=_CONFIG.tts_volume,
             proxy=proxy,
         )
         parts = []
@@ -134,7 +65,7 @@ def _tts_bytes(text: str) -> bytes:
                 parts.append(chunk["data"])
         return b"".join(parts)
 
-    proxy = _CONFIG.get("tts_proxy") or None
+    proxy = _CONFIG.tts_proxy or None
     try:
         return asyncio.run(_generate(proxy))
     except Exception:
@@ -144,7 +75,7 @@ def _tts_bytes(text: str) -> bytes:
 
 
 def _load_audio_bytes(data: bytes):
-    """用 PyAV 从内存直接解码音频为 (numpy_array, sample_rate)，避免临时文件磁盘 IO。"""
+    """用 PyAV 从内存直接解码音频为 (numpy_array, sample_rate)。"""
     import av
     import io
     import numpy as np
@@ -178,6 +109,18 @@ def _get_model() -> Qwen3ASRModel:
         )
         print(f"模型加载完成，显存占用 {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
     return _MODEL
+
+
+def _check_ollama() -> None:
+    """启动前探测 Ollama；未运行则打印警告（ASR/TTS 仍可用，仅对话不可用）。"""
+    ready, status = _OLLAMA.check()
+    if ready:
+        return
+    if "未安装模型" in status:
+        print(f"⚠ 警告：Ollama 在运行，但未找到模型，请执行：ollama pull {_CONFIG.ollama_model}")
+    else:
+        print(f"⚠ 警告：Ollama 未启动或不可用 / {status}，语音对话将不可用（识别/播报不受影响）。")
+        print("  启动命令：ollama serve  （或启动 Ollama 应用程序）")
 
 
 class ASRHandler(BaseHTTPRequestHandler):
@@ -216,7 +159,7 @@ class ASRHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
-        if path == "/log": # 前端调试日志转发到终端（fire-and-forget）
+        if path == "/log":
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
                 msg = self.rfile.read(content_length).decode("utf-8", "ignore") if content_length > 0 else ""
@@ -231,7 +174,7 @@ class ASRHandler(BaseHTTPRequestHandler):
                 messages = payload.get("messages")
                 if not isinstance(messages, list) or not messages:
                     raise ValueError("消息列表为空")
-                answer = _ollama_chat(messages)
+                answer = _OLLAMA.chat(messages)
                 print(f"AI：{answer}")
                 self._respond({"text": answer})
             except Exception as error:
@@ -253,7 +196,7 @@ class ASRHandler(BaseHTTPRequestHandler):
                 image_bytes = base64.b64decode(image_b64)
                 if len(image_bytes) > 8 * 1024 * 1024:
                     raise ValueError("图像过大")
-                answer = _ollama_vision(question, image_bytes)
+                answer = _OLLAMA.vision(question, image_bytes)
                 print(f"[视觉] {question} -> {answer}")
                 self._respond({"text": answer})
             except Exception as error:
@@ -289,7 +232,6 @@ class ASRHandler(BaseHTTPRequestHandler):
             audio_bytes = self.rfile.read(content_length)
             t_read = time.perf_counter()
             model = _get_model()
-            # context=已识别前文：帮助分段边界的断词连贯（流水线分段识别用）
             context = str(query.get("context", [""])[0] or "")[:200]
             audio_array, sample_rate = _load_audio_bytes(audio_bytes)
             t_decode = time.perf_counter()
@@ -324,27 +266,8 @@ class ASRHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def _check_ollama() -> None:
-    """启动前探测 Ollama 是否在运行；未运行则打印警告（ASR/TTS 仍可用，仅对话不可用）。"""
-    import urllib.error
-    import urllib.request
-
-    base = str(_CONFIG.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/")
-    model = _CONFIG.get("ollama_model", "qwen3.5:4b")
-    try:
-        resp = urllib.request.urlopen(f"{base}/api/tags", timeout=3)
-        installed = {m.get("name", "") for m in json.loads(resp.read().decode("utf-8")).get("models", [])}
-        name_base = model.split(":")[0]
-        if not any(name == model or name.split(":")[0] == name_base for name in installed):
-            print(f"⚠ 警告：Ollama 在运行，但未找到模型 {model}，请执行：ollama pull {model}")
-    except Exception:
-        print(f"⚠ 警告：Ollama 未启动（{base}），语音对话将不可用（识别/播报不受影响）。")
-        print("  启动命令：ollama serve  （或启动 Ollama 应用程序）")
-
-
 def main() -> None:
     _check_ollama()
-    # 启动时预加载模型，避免首次请求等待
     _get_model()
     server = ThreadingHTTPServer(("127.0.0.1", _ASR_PORT), ASRHandler)
     print(f"ASR 转写服务已启动：http://127.0.0.1:{_ASR_PORT}/")

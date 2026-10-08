@@ -203,7 +203,7 @@ function isVisionQuestion(text){
   if(!m)m=s.match(/摄像头\s*([一二三四五六七八九]|\d+)/);
   if(m){const raw=m[1];idx=cn[raw]!==undefined?cn[raw]:(/^\d+$/.test(raw)?parseInt(raw,10):null);}
   if(idx&&idx>=1)return {index:idx,fallback:false};
-  // 远端：XXX的摄像头（提取人名，走 go-proxy 取帧+ai-check）
+  // 远端：XXX的摄像头（提取人名，前端截远端窗口帧 → 本地视觉模型）
   const rm=s.match(/(.+?)的摄像头/);
   if(rm&&rm[1]&&!/^(本地|这个|那个|这些|那些|所有|全部)$/.test(rm[1])){
     return {remote:true,name:rm[1]};

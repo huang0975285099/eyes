@@ -1,7 +1,7 @@
 """语音助手启动入口：python run.py
 
 等价于 python -m assistant，调 assistant.main.main()。
-命令行参数透传给 main()（如 --config、--list-devices、--list-cameras、--download-model、--test-speaker、--no-tray）。
+命令行参数透传给 main()：--config、--list-cameras、--no-tray。
 """
 
 from __future__ import annotations

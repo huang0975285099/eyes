@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import DEFAULT_CONFIG, load_config
 from .dashboard import CameraDashboard
-from .llm import ModelRouter
+from .llm import OllamaClient
 from .native_camera import list_native_cameras
 from .platform_utils import configure_windows_console
 from .tray import SystemTray
@@ -41,7 +41,7 @@ def main() -> int:
         return 0
 
     config = load_config(args.config.resolve())
-    ollama = ModelRouter(config, args.config.resolve())
+    ollama = OllamaClient(config)
     model_info = ollama.info()
     model_service_name = model_info["label"]
     ollama_ready, ollama_status = ollama.check()
@@ -72,7 +72,6 @@ def main() -> int:
             try:
                 tray = SystemTray(dashboard, config.tray_notifications_enabled)
                 tray.start()
-                dashboard.store.set_tray_active(True)
                 print("系统托盘：已启动")
             except Exception as error:
                 print(f"系统托盘启动失败，语音助手仍可继续运行：{error}", file=sys.stderr)
@@ -90,8 +89,6 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 asr_process.kill()
         if tray:
-            if dashboard:
-                dashboard.store.set_tray_active(False)
             tray.stop()
         if dashboard:
             dashboard.stop()

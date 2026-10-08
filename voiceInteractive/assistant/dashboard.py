@@ -1,8 +1,8 @@
-"""Web Dashboard HTTP 服务（精简版：仅托管 index.html 静态资源 + 生命周期事件）。
+"""Web Dashboard HTTP 服务：托管 web/ 静态资源 + 生命周期事件。
 
-移除了摄像头/人员检测/YOLO 等 index.html 不用的组件，仅保留：
-- 静态文件托管（/ + /index.html + 兜底 web/ 目录）
-- CameraFrameStore（供 main.py 的 shutdown_event/restart_event/set_tray_active）
+职责：
+- 静态文件托管（/ 与 /index.html + 兜底 web/ 目录的 css/js/mp3/wav）
+- AppLifecycle（shutdown/restart 事件，供 main.py 与 tray 协调）
 - HTTP server 启停骨架（IPv4 + IPv6）
 """
 
@@ -17,8 +17,8 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .camera import CameraFrameStore
 from .config import Config
+from .lifecycle import AppLifecycle
 from .paths import APP_DIR
 
 
@@ -56,7 +56,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
             return
-        # 兜底：服务 web/ 目录下的静态文件（css/js/mp3/wav 等）
         web_root = (APP_DIR / "web").resolve()
         candidate = (web_root / request_path.lstrip("/")).resolve()
         try:
@@ -79,7 +78,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 class CameraDashboard:
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.store = CameraFrameStore(APP_DIR / "data" / "conversations.json")
+        self.store = AppLifecycle()
         self.server: DashboardHTTPServer | None = None
         self.servers: list[DashboardHTTPServer] = []
         self.threads: list[threading.Thread] = []
