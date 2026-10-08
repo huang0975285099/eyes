@@ -1,16 +1,4 @@
-// fetch 超时封装：后端卡住时不会让 UI 永久停在"正在思考/聆听"
-function fetchWithTimeout(url, opts, ms=30000){
-  const ctrl=new AbortController();
-  const id=setTimeout(()=>ctrl.abort(),ms);
-  return fetch(url,Object.assign({},opts,{signal:ctrl.signal})).finally(()=>clearTimeout(id));
-}
 
-// 前端日志转发到后端终端：console.log 同时 fire-and-forget POST 到 asr_server /log
-function serverLog(...args){
-  const msg=args.join(' ');
-  console.log(msg);
-  try{fetch('http://localhost:8770/log',{method:'POST',headers:{'Content-Type':'text/plain'},body:msg}).catch(()=>{});}catch(_){}
-}
 
 // 语音对话闭环（本地 Qwen3-ASR + Ollama + edge-tts）：
 // 说话实时上屏 → 停顿 1.4s 自动发送 → 思考动画 → 回答打字机上屏 → 语音播报（球体随 AI 音量起伏）
@@ -188,36 +176,8 @@ function playDoneCue(){
   src.connect(g);g.connect(audioContext.destination);src.start();
 }
 
-// blob 转 base64 字符串（去掉 data: 前缀）
-function blobToBase64(blob){
-  return new Promise((res,rej)=>{
-    const r=new FileReader();
-    r.onload=()=>{const s=String(r.result||'');res(s.includes(',')?s.split(',')[1]:s);};
-    r.onerror=()=>rej(r.error);
-    r.readAsDataURL(blob);
-  });
-}
 let activeCamSlot=null; // 最近打开/操作的摄像头窗口，供"你看到了什么"等无指明视觉问句复用上下文
-// 视觉问句判定：含描述意图；有"摄像头"按编号/人名，无则用 activeCamSlot 上下文
-function isVisionQuestion(text){
-  const s=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
-  if(!/(是什么|有什么|是啥|里有啥|里是啥|看到了什么|看到什么|看见什么|看见了什么|画面是什么|画面里|拍到了什么|拍到什么|描述一下|描述|里面有啥|里面有什么|看到了啥|看到啥)/.test(s))return null;
-  if(/摄像头/.test(s)){
-    const cn={'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9};
-    let idx=null,m=s.match(/([一二三四五六七八九]|\d+)\s*号摄像头/);
-    if(!m)m=s.match(/摄像头\s*([一二三四五六七八九]|\d+)/);
-    if(m){const raw=m[1];idx=cn[raw]!==undefined?cn[raw]:(/^\d+$/.test(raw)?parseInt(raw,10):null);}
-    if(idx&&idx>=1)return {index:idx,fallback:false};
-    const rm=s.match(/(.+?)的摄像头/);
-    if(rm&&rm[1]&&!/^(本地|这个|那个|这些|那些|所有|全部)$/.test(rm[1])){
-      return {remote:true,name:rm[1]};
-    }
-    return {index:1,fallback:true};
-  }
-  // 无"摄像头"但有描述意图 + 有活动摄像头上下文 → 描述刚打开的那个
-  if(activeCamSlot)return {active:true};
-  return null;
-}
+
 // 从"1号"/"张三"等指明文本定位已打开的摄像头窗口
 function resolveCameraSlot(text){
   const s=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
@@ -329,7 +289,7 @@ async function autoSendChat(){
     return;
   }
   // 视觉问句："X号摄像头里是什么" → 截取该窗口当前帧送后端视觉模型描述
-  const vq=isVisionQuestion(question);
+  const vq=isVisionQuestion(question, activeCamSlot);
   if(vq){
     if(vq.remote){
       // 远端画面描述：截取已打开的远端窗口当前帧 → 本地视觉模型（与本地统一，不依赖 go-proxy）
@@ -553,14 +513,7 @@ let wakeStream=null,wakeCtx=null,wakeAnalyser=null,wakeData=null,wakeDest=null;
 let wakeRecorder=null,wakeChunks=[],wakeAsrBusy=false,wakeQueue=[];
 let wakeListening=false,wakeCandStart=0,wakeSilence=0,wakeVoice=false,wakeVoiceStart=0;
 // 唤醒词判定：清理标点空白后，"叮咚/丁冬/丁东"出现 ≥2 次即命中（兼容同音异字）
-function isWakeWord(text){
-  const clean=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
-  return (clean.match(/叮咚|丁冬|丁东/g)||[]).length>=2;
-}
-// 退出词"再见"判定：清理标点空白后包含"再见"即命中（兼容"再见"/"好的再见"/"再见啦"等）
-function isGoodbye(text){
-  return /再见/.test(String(text).replace(/[\s，,。.！!？?、~～]/g,''));
-}
+
 async function startWakeWord(){
   if(wakeListening||listening)return;
   try{
