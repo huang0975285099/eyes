@@ -32,65 +32,9 @@
   "open_browser": true,
   "tray_enabled": true,
   "tray_notifications_enabled": true,
-  "camera_name_keywords": [
-    "Deli",
-    "1080P",
-    "MM101S"
-  ],
-  "camera_frame_max_age_seconds": 6.0,
-  "camera_snapshot_timeout_seconds": 3.0,
-  "native_camera_enabled": false,
-  "native_cameras": [
-    {
-      "id": "camera_1",
-      "name": "Deli MM101S 1",
-      "index": 0,
-      "enabled": true,
-      "primary": true,
-      "motion": {
-        "enabled": false,
-        "sensitivity": 70,
-        "min_area_percent": 0.8,
-        "consecutive_frames": 3,
-        "confirmation_seconds": 0.0,
-        "cooldown_seconds": 5.0,
-        "roi": null
-      }
-    },
-    {
-      "id": "camera_2",
-      "name": "Deli MM101S 2",
-      "index": 1,
-      "enabled": false,
-      "primary": false
-    }
-  ],
-  "native_camera_width": 640,
-  "native_camera_height": 480,
-  "native_camera_fps": 20,
-  "native_camera_save_snapshots": true,
-  "native_camera_event_retention_days": 7,
-  "native_camera_event_max_megabytes": 1024,
-  "native_camera_cleanup_interval_minutes": 60,
-  "person_monitor_enabled": false,
-  "person_alert_voice": true,
-  "person_detector": "yolo",
-  "person_motion_sensitivity": 70,
-  "person_motion_min_area_percent": 0.8,
-  "person_motion_consecutive_frames": 3,
-  "person_motion_cooldown_seconds": 5.0,
-  "scene_broadcast_enabled": false,
-  "scene_broadcast_cooldown_seconds": 12.0,
-  "yolo_python_executable": "C:/Users/Administrator/AppData/Local/Programs/Python/Python314/python.exe",
-  "yolo_model_path": "D:/project/turbopi_ros2/turbopi_python_new/yolov8n.pt",
-  "yolo_device": "0",
-  "yolo_confidence": 0.35,
-  "yolo_image_size": 640,
-  "yolo_timeout_seconds": 30.0,
   "remote_camera_enabled": true,
   "remote_camera_api_base": "http://10.0.6.226:51351",
   "remote_camera_account": "admin",
   "remote_camera_password": "mzjy.com",
-  "remote_camera_srs_host": "10.0.6.226",
-  "remote_camera_refresh_seconds": 60
+  "remote_camera_srs_host": "10.0.6.226"
 }

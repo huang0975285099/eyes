@@ -24,27 +24,6 @@ class CameraFrameStore:
         self._assistant_status = "等待摄像头连接"
         self._last_answer = ""
         self._tray_active = False
-        self._presence_enabled = True
-        self._presence_initialized = False
-        self._person_present = False
-        self._presence_checking = False
-        self._presence_status = "等待建立画面基线"
-        self._presence_error = ""
-        self._presence_event_id = 0
-        self._presence_event_time = ""
-        self._presence_snapshot: bytes | None = None
-        self._pending_presence_alert = False
-        self._scene_broadcast_enabled = False
-        self._scene_broadcast_status = "动态画面播报已关闭"
-        self._scene_broadcast_error = ""
-        self._scene_broadcast_request_id = 0
-        self._pending_scene_broadcast: tuple[int, bytes] | None = None
-        self._processing_scene_broadcast_id: int | None = None
-        self._scene_broadcast_last_requested_at = 0.0
-        self._scene_broadcast_event_id = 0
-        self._scene_broadcast_event_time = ""
-        self._scene_broadcast_snapshot: bytes | None = None
-        self._last_scene_description = ""
         self._conversation_log_path = conversation_log_path
         self._conversation_revision = 0
         self._conversations: list[dict] = []
@@ -226,162 +205,6 @@ class CameraFrameStore:
             self._snapshot_ready.notify_all()
             return self._analysis_snapshot_id
 
-    def begin_presence_check(self) -> bool:
-        with self._lock:
-            if not self._presence_enabled or self._presence_checking:
-                return False
-            self._presence_checking = True
-            self._presence_status = "正在确认画面是否有人"
-            self._presence_error = ""
-            return True
-
-    def finish_presence_check(
-        self, person_present: bool, frame: bytes, reason: str
-    ) -> bool:
-        with self._lock:
-            if not self._presence_enabled:
-                self._presence_checking = False
-                return False
-            was_initialized = self._presence_initialized
-            previous = self._person_present
-            self._presence_initialized = True
-            self._person_present = person_present
-            self._presence_checking = False
-            self._presence_error = ""
-            triggered = (
-                reason != "baseline"
-                and was_initialized
-                and not previous
-                and person_present
-            )
-            if triggered:
-                self._presence_event_id += 1
-                self._presence_event_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self._presence_snapshot = frame
-                self._pending_presence_alert = True
-                self._presence_status = "检测到有人进入画面"
-            else:
-                self._presence_status = "画面中有人" if person_present else "画面中无人"
-            return triggered
-
-    def fail_presence_check(self, error: str) -> None:
-        with self._lock:
-            self._presence_checking = False
-            if not self._presence_enabled:
-                return
-            self._presence_error = error
-            self._presence_status = "人物检测暂时不可用"
-
-    def set_presence_enabled(self, enabled: bool) -> None:
-        with self._lock:
-            self._presence_enabled = enabled
-            self._presence_initialized = False
-            self._person_present = False
-            self._presence_checking = False
-            self._presence_error = ""
-            self._pending_presence_alert = False
-            self._presence_status = (
-                "等待建立画面基线" if enabled else "动态人物监测已关闭"
-            )
-
-    def presence_snapshot(self) -> tuple[int, bytes | None]:
-        with self._lock:
-            return self._presence_event_id, self._presence_snapshot
-
-    def consume_presence_alert(self) -> int | None:
-        with self._lock:
-            if not self._pending_presence_alert:
-                return None
-            self._pending_presence_alert = False
-            return self._presence_event_id
-
-    def set_scene_broadcast_enabled(self, enabled: bool) -> None:
-        with self._lock:
-            if self._scene_broadcast_enabled == enabled:
-                return
-            self._scene_broadcast_enabled = enabled
-            self._pending_scene_broadcast = None
-            self._processing_scene_broadcast_id = None
-            self._scene_broadcast_last_requested_at = 0.0
-            self._scene_broadcast_error = ""
-            self._scene_broadcast_status = (
-                "等待画面变化" if enabled else "动态画面播报已关闭"
-            )
-
-    def scene_broadcast_enabled(self) -> bool:
-        with self._lock:
-            return self._scene_broadcast_enabled
-
-    def submit_scene_broadcast(
-        self, frame: bytes, cooldown_seconds: float
-    ) -> bool:
-        with self._lock:
-            now = time.monotonic()
-            busy = (
-                self._pending_scene_broadcast is not None
-                or self._processing_scene_broadcast_id is not None
-            )
-            cooling_down = (
-                now - self._scene_broadcast_last_requested_at < cooldown_seconds
-            )
-            if not self._scene_broadcast_enabled or busy or cooling_down:
-                return False
-            self._scene_broadcast_request_id += 1
-            request_id = self._scene_broadcast_request_id
-            self._pending_scene_broadcast = (request_id, frame)
-            self._scene_broadcast_last_requested_at = now
-            self._scene_broadcast_error = ""
-            self._scene_broadcast_status = "已捕获变化画面，等待分析"
-            return True
-
-    def consume_scene_broadcast(self) -> tuple[int, bytes] | None:
-        with self._lock:
-            if not self._scene_broadcast_enabled:
-                self._pending_scene_broadcast = None
-                return None
-            pending = self._pending_scene_broadcast
-            if pending is None:
-                return None
-            self._pending_scene_broadcast = None
-            self._processing_scene_broadcast_id = pending[0]
-            self._scene_broadcast_status = "正在分析变化画面"
-            return pending
-
-    def finish_scene_broadcast(
-        self, request_id: int, frame: bytes, description: str
-    ) -> bool:
-        with self._lock:
-            if (
-                not self._scene_broadcast_enabled
-                or self._processing_scene_broadcast_id != request_id
-            ):
-                return False
-            self._processing_scene_broadcast_id = None
-            self._scene_broadcast_event_id = request_id
-            self._scene_broadcast_event_time = datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-            self._scene_broadcast_snapshot = frame
-            self._last_scene_description = description
-            self._scene_broadcast_error = ""
-            self._scene_broadcast_status = "画面内容已播报"
-            return True
-
-    def fail_scene_broadcast(self, request_id: int, error: str) -> None:
-        with self._lock:
-            if (
-                not self._scene_broadcast_enabled
-                or self._processing_scene_broadcast_id != request_id
-            ):
-                return
-            self._processing_scene_broadcast_id = None
-            self._scene_broadcast_error = error
-            self._scene_broadcast_status = "画面播报暂时不可用"
-
-    def scene_broadcast_snapshot(self) -> tuple[int, bytes | None]:
-        with self._lock:
-            return self._scene_broadcast_event_id, self._scene_broadcast_snapshot
-
     def set_assistant_status(self, status: str, answer: str | None = None) -> None:
         with self._lock:
             self._assistant_status = status
@@ -400,24 +223,6 @@ class CameraFrameStore:
                 "frame_age_seconds": round(age, 1) if age is not None else None,
                 "snapshot_request_id": self._snapshot_request_id,
                 "analysis_snapshot_id": self._analysis_snapshot_id,
-                "presence_enabled": self._presence_enabled,
-                "presence_initialized": self._presence_initialized,
-                "person_present": self._person_present,
-                "presence_checking": self._presence_checking,
-                "presence_status": self._presence_status,
-                "presence_error": self._presence_error,
-                "presence_event_id": self._presence_event_id,
-                "presence_event_time": self._presence_event_time,
-                "scene_broadcast_enabled": self._scene_broadcast_enabled,
-                "scene_broadcast_busy": (
-                    self._pending_scene_broadcast is not None
-                    or self._processing_scene_broadcast_id is not None
-                ),
-                "scene_broadcast_status": self._scene_broadcast_status,
-                "scene_broadcast_error": self._scene_broadcast_error,
-                "scene_broadcast_event_id": self._scene_broadcast_event_id,
-                "scene_broadcast_event_time": self._scene_broadcast_event_time,
-                "last_scene_description": self._last_scene_description,
                 "assistant_status": self._assistant_status,
                 "last_answer": self._last_answer,
                 "tray_active": self._tray_active,
@@ -437,4 +242,3 @@ class CameraFrameStore:
             self.restart_event.set()
             self.shutdown_event.set()
             self._snapshot_ready.notify_all()
-

@@ -262,27 +262,6 @@ class ASRHandler(BaseHTTPRequestHandler):
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
             return
-        if path == "/remote-vision":
-            try:
-                payload = self._read_json_body()
-                name = str(payload.get("name", "")).strip()
-                if not name:
-                    raise ValueError("缺少用户名")
-                frame = _REMOTE_CAMERAS.latest_frame(name)
-                user_name = frame.get("user_name", name)
-                question = (
-                    f"请描述{user_name}的摄像头当前画面内容，包括可见的人、物体、动作和环境。"
-                    "只描述确实能看到的内容，不要猜测。"
-                )
-                answer = _ollama_vision(question, frame["image_bytes"])
-                print(f"[远端视觉] {name} -> {answer[:60]}")
-                self._respond({"text": answer, "user_name": user_name})
-            except Exception as error:
-                self._respond(
-                    {"text": "", "error": str(error)},
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
-            return
         if path == "/tts":
             try:
                 payload = self._read_json_body()

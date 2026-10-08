@@ -29,21 +29,6 @@ class SystemTray:
         menu = pystray.Menu(
             pystray.MenuItem("打开老叶视觉助手", self.open_dashboard, default=True),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem(
-                "无人值守监控",
-                self.toggle_native_camera,
-                checked=lambda _: self.dashboard.native_camera.enabled,
-            ),
-            pystray.MenuItem(
-                "动态人物监测",
-                self.toggle_person_monitor,
-                checked=lambda _: self.dashboard.presence_monitor.enabled,
-            ),
-            pystray.MenuItem(
-                "动态画面播报",
-                self.toggle_scene_broadcast,
-                checked=lambda _: self.dashboard.store.scene_broadcast_enabled(),
-            ),
             pystray.MenuItem("测试通知", self.test_notification),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出老叶", self.exit_application),
@@ -55,7 +40,6 @@ class SystemTray:
             dashboard.url,
             fallback=self._notify_via_tray,
         )
-        self.dashboard.native_camera.add_event_listener(self.notify_motion)
 
     def start(self) -> None:
         self.icon.run_detached()
@@ -70,49 +54,8 @@ class SystemTray:
     def open_dashboard(self, *_: Any) -> None:
         webbrowser.open(self.dashboard.url)
 
-    def _refresh(self, message: str) -> None:
-        self.icon.update_menu()
-        if self.notifications_enabled:
-            self.notifier.show("老叶视觉助手", message)
-
     def _notify_via_tray(self, title: str, message: str) -> None:
         self.icon.notify(message, title)
-
-    def toggle_native_camera(self, *_: Any) -> None:
-        enabled = not self.dashboard.native_camera.enabled
-        self.dashboard.native_camera.set_enabled(enabled)
-        self._refresh("无人值守监控已开启" if enabled else "无人值守监控已关闭")
-
-    def toggle_person_monitor(self, *_: Any) -> None:
-        enabled = not self.dashboard.presence_monitor.enabled
-        self.dashboard.presence_monitor.set_enabled(enabled)
-        if enabled:
-            self.dashboard.native_camera.ensure_enabled()
-        self._refresh("动态人物监测已开启" if enabled else "动态人物监测已关闭")
-
-    def toggle_scene_broadcast(self, *_: Any) -> None:
-        enabled = not self.dashboard.store.scene_broadcast_enabled()
-        self.dashboard.store.set_scene_broadcast_enabled(enabled)
-        if enabled:
-            self.dashboard.native_camera.ensure_enabled()
-            frame = self.dashboard.store.latest_frame(
-                self.dashboard.config.camera_frame_max_age_seconds
-            )
-            if frame is not None:
-                self.dashboard.store.submit_scene_broadcast(
-                    frame, self.dashboard.config.scene_broadcast_cooldown_seconds
-                )
-        self._refresh("动态画面播报已开启" if enabled else "动态画面播报已关闭")
-
-    def notify_motion(self, event: dict) -> None:
-        if not self.notifications_enabled:
-            return
-        score = float(event.get("motion_score", 0.0))
-        camera_name = str(event.get("camera_name", "USB 摄像头"))
-        self.notifier.show(
-            "老叶视觉助手",
-            f"{camera_name} 检测到持续画面变化，变化面积 {score:.2f}%",
-        )
 
     def test_notification(self, *_: Any) -> None:
         if not self.notifications_enabled:
