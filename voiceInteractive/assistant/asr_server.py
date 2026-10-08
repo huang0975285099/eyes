@@ -202,7 +202,6 @@ class ASRHandler(BaseHTTPRequestHandler):
                 if not isinstance(messages, list) or not messages:
                     raise ValueError("消息列表为空")
                 answer = _OLLAMA.chat(messages)
-                print(f"AI：{answer}")
                 self._respond({"text": answer})
             except Exception as error:
                 self._respond(
@@ -227,7 +226,7 @@ class ASRHandler(BaseHTTPRequestHandler):
                 source = str(payload.get("source", "")).strip()
                 answer = _OLLAMA.vision(question, image_bytes, source=source)
                 _save_vision_text(ts, question, answer)  # 存问题+AI描述
-                print(f"[视觉] {question} -> {answer}")
+                print(f"[视觉] {question}")
                 self._respond({"text": answer})
             except Exception as error:
                 self._respond(
@@ -241,6 +240,7 @@ class ASRHandler(BaseHTTPRequestHandler):
                 text = str(payload.get("text", "")).strip()
                 if not text:
                     raise ValueError("文本为空")
+                print(f"AI：{text}")  # 统一在此打印 AI 回答（覆盖对话/视觉/语音指令/告别/唤醒确认所有播报内容）
                 mp3 = _tts_bytes(text)
                 self._respond_binary(mp3, "audio/mpeg")
             except Exception as error:
@@ -280,20 +280,26 @@ class ASRHandler(BaseHTTPRequestHandler):
 
     def _respond(self, payload: dict, status: int = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except ConnectionError:
+            pass  # 客户端已断开（浏览器取消请求），写失败即放弃，不打 traceback
 
     def _respond_binary(self, body: bytes, content_type: str) -> None:
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except ConnectionError:
+            pass  # 客户端已断开，同上
 
 
 def main() -> None:

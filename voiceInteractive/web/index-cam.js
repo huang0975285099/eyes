@@ -97,10 +97,12 @@ async function openAllCameras(){
     if(!slot.win.classList.contains('open')) placeCamWindow(slot.win);
     startCamStream(slot);
   });
+  activeCamSlot=camSlots[0]||null; // 记录1号，供“你看到了什么”复用上下文
 }
 function closeCamWindow(deviceId){
   const slot=camSlots.find(s=>s.deviceId===deviceId);
   if(!slot)return;
+  if(slot===activeCamSlot)activeCamSlot=null; // 关闭的是活动摄像头则清空上下文
   slot.win.classList.remove('open');
   setTimeout(()=>{ // 延迟释放摄像头与移除窗口，让退出动画跑完
     if(slot.win.classList.contains('open'))return; // 期间被重新打开，取消关闭清理
@@ -197,14 +199,17 @@ function openRemoteCameras(items){
     const fb=slot.win.querySelector('.cam-fallback');fb.hidden=false;fb.textContent='没找到这个名字的摄像头';
     return;
   }
+  let firstSlot=null;
   items.forEach(it=>{
     const key='remote:'+(it.stream_name||Math.random());
     const label=(it.user_name||it.account||it.stream_name||'远端')+'（远端）';
     const slot=ensureCamWindow(key,label);
     slot.userName=it.user_name||it.account||''; // 供 findRemoteSlot 按人名查找
+    if(!firstSlot)firstSlot=slot;
     if(!slot.win.classList.contains('open'))placeCamWindow(slot.win);
     startWebRtcPlayback(slot,it.srs_host,it.stream_name);
   });
+  activeCamSlot=firstSlot; // 记录第一个远端窗口，供“你看到了什么”复用上下文
 }
 // 点击任意卫星标签：同时弹出所有摄像头窗口
 orbitLabels.forEach(label=>label.addEventListener('click',openAllCameras));

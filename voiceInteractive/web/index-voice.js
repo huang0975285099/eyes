@@ -1,4 +1,4 @@
-// fetch 超时封装：后端卡住时不会让 UI 永久停在“正在思考/聆听”
+// fetch 超时封装：后端卡住时不会让 UI 永久停在"正在思考/聆听"
 function fetchWithTimeout(url, opts, ms=30000){
   const ctrl=new AbortController();
   const id=setTimeout(()=>ctrl.abort(),ms);
@@ -50,7 +50,8 @@ function startNewRecorder(){
       if(chunks.length>0){
         const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
         const rms=await segRMS(audioContext,blob);
-        if(rms>=SEG_RMS_MIN){asrQueue.push(blob);processASRQueue();} // 段能量过低（远场/噪声）丢弃
+        if(rms>=SEG_RMS_MIN){asrQueue.push(blob);processASRQueue();}
+        else if(chatState==='listening')voiceStatus.textContent='✦ 声音太轻，没听清，请靠近再说'; // 段能量过低丢弃：如实反馈，避免"球跳了却没字"的误导
       }
       if(listening&&chatState==='listening')startNewRecorder();
     };
@@ -72,16 +73,19 @@ async function processASRQueue(){
       replyText.textContent+=data.text; // 追加到现有文字，光标跟随
       asrContext+=data.text;
       fitReplyFont();
-      if(isGoodbye(data.text))goodbye=true; // “再见”照常上屏，稍后走告别流程（发送→AI告别→结束）
+      if(isGoodbye(data.text))goodbye=true; // "再见"照常上屏，稍后走告别流程（发送→AI告别→结束）
       else { const c=isVoiceCommand(replyText.textContent); if(c)pendingCommand=c; } // 语音指令：先上屏，停顿后随 autoSendChat 一起执行（与正常提问时序一致）
     }
-    if(data.error&&chatState==='listening')voiceStatus.textContent='✦ 识别失败：'+data.error;
-    else if(chatState==='listening')voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
+    if(chatState==='listening'){
+      if(data.error)voiceStatus.textContent='✦ 识别失败：'+data.error;
+      else if(data.text)voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
+      else voiceStatus.textContent='✦ 没听清，请再说一遍'; // ASR 返回空：如实反馈，避免"球跳了却没字"的误导
+    }
   }catch(error){
     if(chatState==='listening')voiceStatus.textContent='✦ 识别失败：'+(error.name==='AbortError'?'识别超时，请重说':error.message);
   }
   asrBusy=false; // 识别完成不重置发送计时：lastVoiceAt 只由说话声音更新，文字出现后很快自动发送
-  if(goodbye){sendGoodbye();return;} // “再见”走告别流程：发送音效+动画 → AI 告别 → 结束会话
+  if(goodbye){sendGoodbye();return;} // "再见"走告别流程：发送音效+动画 → AI 告别 → 结束会话
   if(asrQueue.length>0)processASRQueue();
 }
 // VAD 流水线（抗远场人声串扰）：触发门槛 + 连续确认才算真语音；
@@ -150,7 +154,7 @@ async function preloadSendCue(){
     sendCueBuffer=await audioContext.decodeAudioData(await resp.arrayBuffer());
   }catch(_){sendCueBuffer=null;}
 }
-// 唤醒确认语“我在。”：页面加载时预取音频字节，唤醒时用主音频上下文即时解码播放
+// 唤醒确认语"我在。"：页面加载时预取音频字节，唤醒时用主音频上下文即时解码播放
 let ackArrayBuffer=null; // null=未取，false=取失败，ArrayBuffer=就绪
 async function preloadAck(){
   if(ackArrayBuffer!==null)return;
@@ -193,24 +197,46 @@ function blobToBase64(blob){
     r.readAsDataURL(blob);
   });
 }
-// 视觉问句判定：含“摄像头”+描述意图，并提取编号（阿拉伯/中文数字）；未指定编号时回退1号
+let activeCamSlot=null; // 最近打开/操作的摄像头窗口，供"你看到了什么"等无指明视觉问句复用上下文
+// 视觉问句判定：含描述意图；有"摄像头"按编号/人名，无则用 activeCamSlot 上下文
 function isVisionQuestion(text){
   const s=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
-  if(!/摄像头/.test(s))return null;
-  if(!/(是什么|有什么|是啥|里有啥|里是啥|看到了什么|看到什么|看见什么|看见了什么|画面是什么|画面里|拍到了什么|拍到什么|描述一下|描述|里面有啥|里面有什么)/.test(s))return null;
-  const cn={'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9};
-  let idx=null,m=s.match(/([一二三四五六七八九]|\d+)\s*号摄像头/);
-  if(!m)m=s.match(/摄像头\s*([一二三四五六七八九]|\d+)/);
-  if(m){const raw=m[1];idx=cn[raw]!==undefined?cn[raw]:(/^\d+$/.test(raw)?parseInt(raw,10):null);}
-  if(idx&&idx>=1)return {index:idx,fallback:false};
-  // 远端：XXX的摄像头（提取人名，前端截远端窗口帧 → 本地视觉模型）
-  const rm=s.match(/(.+?)的摄像头/);
-  if(rm&&rm[1]&&!/^(本地|这个|那个|这些|那些|所有|全部)$/.test(rm[1])){
-    return {remote:true,name:rm[1]};
+  if(!/(是什么|有什么|是啥|里有啥|里是啥|看到了什么|看到什么|看见什么|看见了什么|画面是什么|画面里|拍到了什么|拍到什么|描述一下|描述|里面有啥|里面有什么|看到了啥|看到啥)/.test(s))return null;
+  if(/摄像头/.test(s)){
+    const cn={'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9};
+    let idx=null,m=s.match(/([一二三四五六七八九]|\d+)\s*号摄像头/);
+    if(!m)m=s.match(/摄像头\s*([一二三四五六七八九]|\d+)/);
+    if(m){const raw=m[1];idx=cn[raw]!==undefined?cn[raw]:(/^\d+$/.test(raw)?parseInt(raw,10):null);}
+    if(idx&&idx>=1)return {index:idx,fallback:false};
+    const rm=s.match(/(.+?)的摄像头/);
+    if(rm&&rm[1]&&!/^(本地|这个|那个|这些|那些|所有|全部)$/.test(rm[1])){
+      return {remote:true,name:rm[1]};
+    }
+    return {index:1,fallback:true};
   }
-  return {index:1,fallback:true};
+  // 无"摄像头"但有描述意图 + 有活动摄像头上下文 → 描述刚打开的那个
+  if(activeCamSlot)return {active:true};
+  return null;
+}
+// 从"1号"/"张三"等指明文本定位已打开的摄像头窗口
+function resolveCameraSlot(text){
+  const s=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
+  const cn={'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9};
+  const m=s.match(/([一二三四五六七八九]|\d+)\s*号/);
+  if(m){
+    const raw=m[1];
+    const idx=cn[raw]!==undefined?cn[raw]:(/^\d+$/.test(raw)?parseInt(raw,10):null);
+    if(idx>=1&&idx<=camSlots.length){
+      const sl=camSlots[idx-1];
+      if(sl&&sl.win.classList.contains('open'))return sl;
+    }
+  }
+  const rs=findRemoteSlot(s);
+  if(rs&&rs.win.classList.contains('open'))return rs;
+  return null;
 }
 let clarifyCam=false; // "打开摄像头"未指明本地/人名时，置位等下一句澄清
+let clarifyVision=false,pendingVision=false; // 多摄像头追问"要看哪个"→指明后描述
 function resetToListen(){
   recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];asrContext='';
   chatState='listening';voiceStatus.textContent='✦ 聆听中 · 停顿后自动提问';
@@ -222,13 +248,20 @@ async function autoSendChat(){
   const question=replyText.textContent.trim();
   if(!question){chatState='listening';return;}
   if(mediaRecorder){const r=mediaRecorder;mediaRecorder=null;r.onstop=null;try{r.stop();}catch(_){}} // 暂停录音，防止播报被录入
-  // 澄清态：上次“打开摄像头”未指明本地/人名，等这句回答
+  // 澄清态：上次"打开摄像头"未指明本地/人名，等这句回答
   if(clarifyCam){
     clarifyCam=false;
     const cs=String(question).replace(/[\s，,。.！!？?、~～]/g,'');
     if(/本地/.test(cs)){pendingCommand={type:'open_cam'};}
     else if(/(关闭|关掉|关了|不用|算了|不要)/.test(cs)){pendingCommand={type:'close_cam'};}
     else{const nm=String(question).replace(/[\s，,。.！!？?、~～]/g,'').replace(/^(?:本地|那个|这个|所有|全部)/,'');pendingCommand=nm?{type:'open_remote_cam',name:nm}:{type:'open_cam_ambiguous'};}
+  }
+  // 视觉澄清态：上次多摄像头追问"要看哪个"，等这句指明
+  if(clarifyVision){
+    clarifyVision=false;
+    const slot=resolveCameraSlot(question);
+    if(slot){activeCamSlot=slot;pendingVision=true;}
+    else{await speakAnswer('没找到这个摄像头，请重新说要看哪个。',true);if(!listening){chatState='idle';return;}resetToListen();return;}
   }
   // 语音指令（打开/关闭摄像头）：说完停顿后随发送流程一起执行，共享发送音效+冲击波，跳过 Ollama
   if(pendingCommand){
@@ -269,7 +302,33 @@ async function autoSendChat(){
       if(!listening){chatState='idle';return;}resetToListen();return;
     }
   }
-  // 视觉问句：“X号摄像头里是什么” → 截取该窗口当前帧送后端视觉模型描述
+  // 视觉澄清后执行：用指明的活动摄像头描述
+  if(pendingVision){
+    pendingVision=false;
+    if(!activeCamSlot){await speakAnswer('当前没有打开的摄像头。',true);if(!listening){chatState='idle';return;}resetToListen();return;}
+    const pblob=await captureCamFrame(activeCamSlot);
+    if(!pblob){await speakAnswer('摄像头画面还没准备好，稍等一下再问。',true);if(!listening){chatState='idle';return;}resetToListen();return;}
+    const psrc=activeCamSlot.deviceId&&activeCamSlot.deviceId.startsWith('remote:')?'desktop':'camera';
+    voiceStatus.textContent='✦ 正在分析摄像头画面…';
+    try{
+      const b64=await blobToBase64(pblob);
+      const resp=await fetchWithTimeout('http://localhost:8770/vision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:question,image:b64,source:psrc})},60000);
+      const data=await resp.json();
+      if(chatState!=='thinking')return;
+      if(!data.text||data.error)throw new Error(data.error||'视觉模型没有返回描述');
+      const ans=data.text.length>2000?data.text.slice(0,2000)+'…':data.text;
+      conversationHistory.push({role:'user',content:question});
+      conversationHistory.push({role:'assistant',content:ans});
+      if(conversationHistory.length>12)conversationHistory.splice(0,conversationHistory.length-12);
+      await speakAnswer(data.text);
+    }catch(error){
+      if(chatState==='idle')return;
+      voiceStatus.textContent='✦ 画面分析失败：'+(error.name==='AbortError'?'视觉模型响应超时':error.message);
+      chatState='listening';turnActive=false;asrContext='';startNewRecorder();
+    }
+    return;
+  }
+  // 视觉问句："X号摄像头里是什么" → 截取该窗口当前帧送后端视觉模型描述
   const vq=isVisionQuestion(question);
   if(vq){
     if(vq.remote){
@@ -303,9 +362,45 @@ async function autoSendChat(){
       }
       return;
     }
+    if(vq.active){
+      // 无指明的视觉问句（"你看到了什么"）：复用刚打开的活动摄像头
+      const opens=camSlots.filter(s=>s.win.classList.contains('open'));
+      if(opens.length===0){await speakAnswer('当前没有打开的摄像头。',true);if(!listening){chatState='idle';return;}resetToListen();return;}
+      if(opens.length>1){
+        clarifyVision=true;
+        const labels=opens.map(s=>{
+          if(s.deviceId&&s.deviceId.startsWith('remote:'))return s.userName||'远端';
+          return (camSlots.indexOf(s)+1)+'号';
+        }).join('还是');
+        await speakAnswer(`要看哪个？${labels}？`,true);
+        if(!listening){chatState='idle';return;}resetToListen();return;
+      }
+      activeCamSlot=opens[0];
+      const ablob=await captureCamFrame(activeCamSlot);
+      if(!ablob){await speakAnswer('摄像头画面还没准备好，稍等一下再问。',true);if(!listening){chatState='idle';return;}resetToListen();return;}
+      const asrc=activeCamSlot.deviceId&&activeCamSlot.deviceId.startsWith('remote:')?'desktop':'camera';
+      voiceStatus.textContent='✦ 正在分析摄像头画面…';
+      try{
+        const b64=await blobToBase64(ablob);
+        const resp=await fetchWithTimeout('http://localhost:8770/vision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:question,image:b64,source:asrc})},60000);
+        const data=await resp.json();
+        if(chatState!=='thinking')return;
+        if(!data.text||data.error)throw new Error(data.error||'视觉模型没有返回描述');
+        const ans=data.text.length>2000?data.text.slice(0,2000)+'…':data.text;
+        conversationHistory.push({role:'user',content:question});
+        conversationHistory.push({role:'assistant',content:ans});
+        if(conversationHistory.length>12)conversationHistory.splice(0,conversationHistory.length-12);
+        await speakAnswer(data.text);
+      }catch(error){
+        if(chatState==='idle')return;
+        voiceStatus.textContent='✦ 画面分析失败：'+(error.name==='AbortError'?'视觉模型响应超时':error.message);
+        chatState='listening';turnActive=false;asrContext='';startNewRecorder();
+      }
+      return;
+    }
     const slot=camSlots[vq.index-1];
     if(!slot||!slot.stream){
-      const msg=vq.fallback?'当前没有打开的摄像头，请先说“打开摄像头”。':`没有找到${vq.index}号摄像头，请先打开它。`;
+      const msg=vq.fallback?'当前没有打开的摄像头，请先说"打开摄像头"。':`没有找到${vq.index}号摄像头，请先打开它。`;
       await speakAnswer(msg,true);
       if(!listening){chatState='idle';return;}
       recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
@@ -390,7 +485,7 @@ async function speakAnswer(text, endAfter){
       }catch(_){ /* TTS 播放出错：文字已由打字机显示，按纯文字完成，不阻断对话 */ }
       ttsSource=null;ttsAnalyser=null;ttsLive=false;
     }else{
-      ttsLive=true; // 纯文字模式：打字开始即视为“回答中”，停止思考动画
+      ttsLive=true; // 纯文字模式：打字开始即视为"回答中"，停止思考动画
       await new Promise(res=>setTimeout(res,duration*1000));
       ttsLive=false;
     }
@@ -404,7 +499,7 @@ async function speakAnswer(text, endAfter){
   voiceStatus.textContent='✦ 回答完毕 · 继续聆听';
   chatState='listening';startNewRecorder();
 }
-// 唤醒确认语：唤醒后先回一句（如“我在。”），球体随声起伏，播完进入聆听
+// 唤醒确认语：唤醒后先回一句（如"我在。"），球体随声起伏，播完进入聆听
 async function speakWakeAck(text){
   chatState='speaking';voiceStatus.textContent='✦  我在';
   replyText.textContent='';aiText.textContent=text;fitReplyFont();
@@ -431,7 +526,7 @@ async function speakWakeAck(text){
     ttsLive=true;await new Promise(res=>setTimeout(res,800));ttsLive=false; // 无音频：短暂停顿后继续
   }
   if(!listening){chatState='idle';return;} // 期间点了结束会话
-  // 进入聆听：重置会话状态，保留“我在。”文字直到用户开口（首条 ASR 结果会清空它）
+  // 进入聆听：重置会话状态，保留"我在。"文字直到用户开口（首条 ASR 结果会清空它）
   recordedChunks=[];segSilenceStart=0;hasVoiceInSeg=false;segVoiceStart=0;asrQueue=[];
   conversationHistory=[];turnActive=false;asrContext='';
   chatState='listening';voiceStatus.textContent='✦  请说';
@@ -453,7 +548,7 @@ async function stopRecognition(){
   });
 }
 
-// ===== 唤醒词“叮咚叮咚”：idle 态持续监听麦克风，命中后自动进入会话 =====
+// ===== 唤醒词"叮咚叮咚"：idle 态持续监听麦克风，命中后自动进入会话 =====
 let wakeStream=null,wakeCtx=null,wakeAnalyser=null,wakeData=null,wakeDest=null;
 let wakeRecorder=null,wakeChunks=[],wakeAsrBusy=false,wakeQueue=[];
 let wakeListening=false,wakeCandStart=0,wakeSilence=0,wakeVoice=false,wakeVoiceStart=0;
@@ -462,7 +557,7 @@ function isWakeWord(text){
   const clean=String(text).replace(/[\s，,。.！!？?、~～]/g,'');
   return (clean.match(/叮咚|丁冬|丁东/g)||[]).length>=2;
 }
-// 退出词“再见”判定：清理标点空白后包含“再见”即命中（兼容“再见”/“好的再见”/“再见啦”等）
+// 退出词"再见"判定：清理标点空白后包含"再见"即命中（兼容"再见"/"好的再见"/"再见啦"等）
 function isGoodbye(text){
   return /再见/.test(String(text).replace(/[\s，,。.！!？?、~～]/g,''));
 }
@@ -479,11 +574,11 @@ async function startWakeWord(){
     wakeDest=wakeCtx.createMediaStreamDestination();hp.connect(wakeDest); // 录音流也走高通，识别音频享到降噪
     wakeData=new Uint8Array(wakeAnalyser.fftSize);
     wakeListening=true;
-    if(chatState==='idle'){voiceStatus.textContent='✦  说出“叮咚叮咚”唤醒我';micCaption.textContent='等待唤醒';}
+    if(chatState==='idle'){voiceStatus.textContent='✦  说出"叮咚叮咚"唤醒我';micCaption.textContent='等待唤醒';}
     startWakeRecorder();
   }catch(_){
     wakeListening=false;
-    voiceStatus.textContent='✦  唤醒需要麦克风权限，也可点击“开始会话”';
+    voiceStatus.textContent='✦  唤醒需要麦克风权限，也可点击"开始会话"';
   }
 }
 function startWakeRecorder(){
@@ -518,7 +613,7 @@ async function processWakeASR(){
     if(data.text&&isWakeWord(data.text)){
       wakeListening=false; // 立即停掉监听，防止重复触发
       voiceStatus.textContent='✦  唤醒成功 · 进入会话';
-      startMicrophone('我在。'); // 内部会 await stopWakeWord，并先回“我在。”再进入聆听
+      startMicrophone('我在。'); // 内部会 await stopWakeWord，并先回"我在。"再进入聆听
     }
   }catch(_){}
   wakeAsrBusy=false;
@@ -566,7 +661,7 @@ async function startMicrophone(ack) {
     audioData=new Uint8Array(analyser.fftSize);listening=true;
     micCaption.textContent='麦克风监听中';micButton.setAttribute('aria-label','麦克风输入中');
     if(ack){
-      await speakWakeAck(ack); // 唤醒确认：先回一句“我在。”再进入聆听
+      await speakWakeAck(ack); // 唤醒确认：先回一句"我在。"再进入聆听
     }else{
       voiceStatus.textContent='✦  正在聆听 · 说出的话将实时呈现';
       startRecognition();
@@ -601,7 +696,7 @@ function resetUI(){
 }
 
 micButton.addEventListener('click',()=>startWakeWord()); // 点"开始会话"进入唤醒监听，说"叮咚叮咚"后自动进入会话
-// 语音“再见”告别流程：发送音效+冲击波 → 思考动画 → AI 回答固定告别语 → 结束会话
+// 语音"再见"告别流程：发送音效+冲击波 → 思考动画 → AI 回答固定告别语 → 结束会话
 async function sendGoodbye(){
   chatState='thinking';turnActive=false;
   playSendCue();spawnShockwave(); // 与正常提问一致的发送音效与冲击波动画
@@ -612,13 +707,13 @@ async function sendGoodbye(){
   }catch(_){}
   await endByVoice(); // AI 告别播完后结束会话、恢复界面、回到唤醒监听
 }
-// 语音“再见”结束会话：等同点“结束会话”按钮（停录音识别→恢复界面→回唤醒监听）
+// 语音"再见"结束会话：等同点"结束会话"按钮（停录音识别→恢复界面→回唤醒监听）
 async function endByVoice(){
   if(!listening)return;
   voiceStatus.textContent='✦  再见 · 结束会话中…';
   await stopMicrophone();
   resetUI();
-  startWakeWord(); // 结束后回到唤醒词监听，可再次“叮咚叮咚”唤醒
+  startWakeWord(); // 结束后回到唤醒词监听，可再次"叮咚叮咚"唤醒
 }
 
 document.getElementById('end-button').addEventListener('click',async()=>{
@@ -626,7 +721,7 @@ document.getElementById('end-button').addEventListener('click',async()=>{
   voiceStatus.textContent='✦ 正在结束并识别…';
   await stopMicrophone();
   resetUI();
-  startWakeWord(); // 结束会话后回到唤醒词监听，可再次“叮咚叮咚”唤醒
+  startWakeWord(); // 结束会话后回到唤醒词监听，可再次"叮咚叮咚"唤醒
 });
 
 // 开场欢迎语音：页面加载即播放 test_chinese.wav，球体随语音起伏；
@@ -660,7 +755,7 @@ async function playGreeting(){
     if(resp.ok){greetBuffer=await greetCtx.decodeAudioData(await resp.arrayBuffer());await playGreeting();}
   }catch(_){greetCtx=null;greetBuffer=null;}
 })();
-preloadAck(); // 预取唤醒确认语“我在。”音频字节，唤醒时即时解码播放
+preloadAck(); // 预取唤醒确认语"我在。"音频字节，唤醒时即时解码播放
 // 首次交互：恢复欢迎语（如被自动播放拦截）→ 启动唤醒词监听
 document.addEventListener('pointerdown',async(e)=>{
   if(e.target.closest('#mic-button')||e.target.closest('#end-button'))return; // 按钮各自处理
