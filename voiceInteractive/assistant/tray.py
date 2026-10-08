@@ -27,14 +27,14 @@ class SystemTray:
         draw.ellipse((26, 25, 39, 39), fill=green)
 
         menu = pystray.Menu(
-            pystray.MenuItem("打开老叶视觉助手", self.open_dashboard, default=True),
+            pystray.MenuItem("打开叮咚AI", self.open_dashboard, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("测试通知", self.test_notification),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("退出老叶", self.exit_application),
+            pystray.MenuItem("退出叮咚AI", self.exit_application),
         )
         self.icon = pystray.Icon(
-            "LaoYeVoiceAssistant", image, "老叶视觉语音助手", menu
+            "LaoYeVoiceAssistant", image, "叮咚AI", menu
         )
         self.notifier = WindowsNotificationService(
             dashboard.url,
@@ -60,7 +60,7 @@ class SystemTray:
     def test_notification(self, *_: Any) -> None:
         if not self.notifications_enabled:
             return
-        self.notifier.show("老叶视觉助手", "Windows 原生后台通知工作正常")
+        self.notifier.show("叮咚AI", "Windows 原生后台通知工作正常")
 
     def exit_application(self, *_: Any) -> None:
         self.icon.stop()

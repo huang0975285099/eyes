@@ -66,7 +66,7 @@ class WindowsNotificationService:
         try:
             from windows_toasts import Toast, WindowsToaster
 
-            toaster = WindowsToaster("老叶视觉助手")
+            toaster = WindowsToaster("叮咚AI")
         except Exception:
             toaster = None
             Toast = None

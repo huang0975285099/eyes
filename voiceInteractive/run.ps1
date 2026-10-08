@@ -1,7 +1,6 @@
 # 语音助手启动脚本
 # 用法：
 #   ./run.ps1                  启动语音助手（前台，Ctrl+C 退出）
-#   ./run.ps1 --list-devices   列出音频设备
 #   ./run.ps1 --list-cameras   探测摄像头
 #   ./run.ps1 --no-tray        不显示托盘
 # 其余参数透传给 run.py（见 run.py / assistant.main.build_parser）
