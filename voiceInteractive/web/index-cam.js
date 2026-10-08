@@ -144,7 +144,7 @@ function captureCamFrame(slot){
   if(!slot)return null;
   const video=slot.win.querySelector('video');
   if(!video||video.readyState<2||!video.videoWidth)return null;
-  const max=1024; // 限制最长边，控制上传体积
+  const max=768; // 限制最长边，控制上传体积与推理 token
   let w=video.videoWidth,h=video.videoHeight;
   if(Math.max(w,h)>max){const s=max/Math.max(w,h);w=Math.round(w*s);h=Math.round(h*s);}
   const c=document.createElement('canvas');
