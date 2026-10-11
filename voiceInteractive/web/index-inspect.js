@@ -1,6 +1,6 @@
 // ===== 摄像头巡检模块（多路并行）：定时截帧 → /vision 结构化分析 → 口罩/人数异常 → 巡检窗锁定顶部+层级最高 + 独立告警详情窗 + 语音播报 =====
-// 策略：截帧 10s / 告警纯 120s 冷却 / 只存告警帧 / 页面隐藏即暂停 / 支持多摄像头同时巡检
-//   （按启动顺序顶部排列，每路独立状态机与告警窗，语音先后播报不重叠，/vision 串行排队）
+// 策略：每 60s 截帧 / 无告警冷却（每轮检测到违规都弹窗+播报）/ 只存告警帧 / 页面隐藏即暂停 / 支持多路同时巡检
+//   （按启动顺序顶部排列，每路独立状态机与告警窗，多路并行推理，语音先后播报不重叠）
 // 依赖（全局，由先加载的脚本提供）：
 //   audioContext,ttsLive(index-ui.js)；fetchWithTimeout,blobToBase64(voice-utils.js)；
 //   camSlots,captureCamFrame,attachCamDrag(index-cam.js)；resolveCameraSlot,speakAnswer(index-voice.js)
@@ -15,7 +15,7 @@ const INSPECT_PROMPT =
   'summary=必须明确说明有几人未戴口罩；' +
   '一致性：no_mask 必须与 summary 描述一致——summary 提到有人未戴口罩时 no_mask 必须>0，summary 说所有人都戴了时 no_mask=0。';
 
-let inspectStates = new Map(); // deviceId -> {slot,label,deviceId,order,timer,inFlight,alerting,lastAlertTs,alertWin,lastUrl,wasHidden,countdownEl,secsLeft,alertAutoHide}
+let inspectStates = new Map(); // deviceId -> {slot,label,deviceId,order,timer,inFlight,alertWin,lastUrl,wasHidden,countdownEl,secsLeft,alertAutoHide}
 let inspectSeq = 0;             // 位置顺序递增（停不复用，避免窗口重叠）
 let inspectHistory=[];          // 全部巡检路的告警历史 {label,url,person_count,no_mask,summary,time}
 let _historyBtn=null;
@@ -125,6 +125,17 @@ function hideAlertWin(e){
   setTimeout(()=>{if(w.parentNode)w.remove();},320);
 }
 
+// 巡检按钮（index-cam.js 标题栏）与巡检状态同步：巡检中显示"停止"，否则显示"巡检"
+function syncInspectBtn(slot){
+  if(!slot||!slot.win)return;
+  const btn=slot.win.querySelector('.cam-inspect-btn');
+  if(!btn)return;
+  const on=inspectStates.has(slot.deviceId);
+  btn.textContent=on?'停止':'巡检';
+  btn.title=on?'停止巡检':'开始巡检';
+  btn.classList.toggle('on',on);
+}
+
 // 巡检窗锁定/解锁（顶部定位 + 禁关禁拖 + 金色强调 + 层级最高）
 function setInspectingClass(slot, on, order){
   if(!slot||!slot.win) return;
@@ -135,7 +146,10 @@ function setInspectingClass(slot, on, order){
     if(!slot.win.querySelector('.cam-countdown')){
       const cd=document.createElement('span');
       cd.className='cam-countdown';
-      slot.win.querySelector('.cam-head').appendChild(cd);
+      // 倒计时插到操作区最前（巡检按钮/关闭按钮左侧）
+      const actions=slot.win.querySelector('.cam-actions');
+      if(actions)actions.insertBefore(cd,actions.firstChild);
+      else slot.win.querySelector('.cam-head').appendChild(cd);
     }
   }else{
     slot.win.classList.remove('inspecting','alerting');
@@ -157,7 +171,7 @@ async function inspectOnce(e){
     const t0=Date.now();
     const resp=await fetchWithTimeout('http://localhost:8770/vision',
       {method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({text:INSPECT_PROMPT, image:b64, source:'camera', save:false})},60000);
+        body:JSON.stringify({text:INSPECT_PROMPT, image:b64, source:'camera', save:false})},120000); // 120s 兜底冷启动（后端 ollama 超时同为 120s）
     const data=await resp.json();
     serverLog('[巡检]',e.label,'视觉耗时:'+(Date.now()-t0)+'ms');
     if(!data.text||data.error){ serverLog('[巡检]',e.label,'视觉返回错误:',data.error||'(空)'); return; }
@@ -191,12 +205,12 @@ async function inspectOnce(e){
     serverLog('[巡检]',e.label,'异常:',err&&err.message?err.message:err);
   }finally{
     e.inFlight=false;
-    // 仍在巡检态且未隐藏 → 30s 后调度下一帧（递归 setTimeout，与倒计时同步）
+    // 仍在巡检态且未隐藏 → 60s 后调度下一帧（递归 setTimeout，与倒计时同步）
     if(inspectStates.has(e.deviceId) && !e.wasHidden) _scheduleNext(e);
   }
 }
 
-// 调度下一帧（递归 setTimeout：上一帧完成后才起 30s 倒计时，到 0 触发下一帧，与倒计时同步）
+// 调度下一帧（递归 setTimeout：上一帧完成后才起 60s 倒计时，到 0 触发下一帧，与倒计时同步）
 function _scheduleNext(e){
   e.secsLeft=Math.round(INSPECT_INTERVAL/1000);
   e.timer=setTimeout(()=>inspectOnce(e),INSPECT_INTERVAL);
@@ -254,12 +268,15 @@ function _startOne(slot){
   if(inspectStates.has(slot.deviceId)) return false;
   const label=(camSlots.indexOf(slot)+1)+'号摄像头';
   const order=inspectSeq++;
-  const e={slot,label,deviceId:slot.deviceId,order,timer:null,inFlight:false,alerting:false,lastAlertTs:0,alertWin:null,lastUrl:null,wasHidden:false,countdownEl:null,secsLeft:Math.round(INSPECT_INTERVAL/1000),alertAutoHide:null};
+  const e={slot,label,deviceId:slot.deviceId,order,timer:null,inFlight:false,alertWin:null,lastUrl:null,wasHidden:false,countdownEl:null,secsLeft:Math.round(INSPECT_INTERVAL/1000),alertAutoHide:null};
   inspectStates.set(slot.deviceId,e);
   setInspectingClass(slot,true,order);
+  syncInspectBtn(slot);
   e.countdownEl=slot.win.querySelector('.cam-countdown');
   _ensureCountdownTimer();
-  _scheduleNext(e); // 30s 后跑第一帧（完成后递归调度下一帧）
+  _scheduleNext(e); // 60s 后跑第一帧（完成后递归调度下一帧）
+  // 异步推流到 SRS 并切同源画面；不 await，不阻塞语音播报。推流失败其内部会自动 stopInspect 回退
+  if(typeof beginSrsInspect==='function') beginSrsInspect(slot);
   return true;
 }
 
@@ -304,9 +321,15 @@ async function stopInspect(slot, silent){
 }
 function _stopOne(e){
   if(e.timer){clearTimeout(e.timer);e.timer=null;}
-  if(e.slot&&e.slot.win)e.slot.win.classList.remove('inspecting','alerting');
+  if(e.slot&&e.slot.win){
+    e.slot.win.classList.remove('inspecting','alerting');
+    const cd=e.slot.win.querySelector('.cam-countdown'); if(cd)cd.remove(); // 原仅靠 CSS 隐藏，顺手清除残留节点
+    syncInspectBtn(e.slot);
+  }
   if(e.alertWin){const w=e.alertWin;w.classList.remove('open');setTimeout(()=>{if(w.parentNode)w.remove();},320);}
   if(e.lastUrl)URL.revokeObjectURL(e.lastUrl);
+  // 停 SRS 推流、移除视角按钮、窗口恢复本地零延迟画面（幂等）
+  if(typeof endSrsInspect==='function') endSrsInspect(e.slot);
 }
 
 // 页面可见性：隐藏即全部暂停，可见恢复（仅仍在巡检态的路）

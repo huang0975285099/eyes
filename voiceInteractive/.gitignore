@@ -4,6 +4,7 @@ models/
 logs/
 __pycache__/
 *.pyc
+third_party/
 data/faces/
 data/events/
 data/conversations.json

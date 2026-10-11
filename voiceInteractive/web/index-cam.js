@@ -15,7 +15,7 @@ function attachCamDrag(win){
   const head=win.querySelector('.cam-head');
   let dragging=false, sx=0, sy=0, ox=0, oy=0;
   head.addEventListener('pointerdown',(e)=>{
-    if(e.target.closest('.cam-close'))return; // 点关闭按钮不触发拖动
+    if(e.target.closest('.cam-close,.cam-inspect-btn,.cam-srs-btn'))return; // 点按钮不触发拖动
     if(win.classList.contains('inspecting'))return; // 巡检锁定，禁止拖动
     dragging=true; sx=e.clientX; sy=e.clientY;
     const rect=win.getBoundingClientRect(); ox=rect.left; oy=rect.top;
@@ -37,10 +37,20 @@ function ensureCamWindow(deviceId, label){
   if(slot){ slot.win.querySelector('.cam-title').innerHTML='<span class="live-dot"></span>'+label; return slot; }
   const win=document.createElement('div');
   win.className='cam-window';
-  win.innerHTML='<div class="cam-head"><span class="cam-title"><span class="live-dot"></span>'+label+'</span><span class="cam-close" title="关闭">✕</span></div><div class="cam-stage"><video autoplay playsinline muted></video><div class="cam-grid"></div><div class="cam-scan"></div><i class="cam-corner tl"></i><i class="cam-corner tr"></i><i class="cam-corner bl"></i><i class="cam-corner br"></i><div class="cam-fallback" hidden>摄像头不可用<br>请检查设备与浏览器权限</div></div>';
+  win.innerHTML='<div class="cam-head"><span class="cam-title"><span class="live-dot"></span>'+label+'</span><span class="cam-actions"><button type="button" class="cam-inspect-btn" title="开始巡检">巡检</button><span class="cam-close" title="关闭">✕</span></span></div><div class="cam-stage"><video autoplay playsinline muted></video><div class="cam-grid"></div><div class="cam-scan"></div><i class="cam-corner tl"></i><i class="cam-corner tr"></i><i class="cam-corner bl"></i><i class="cam-corner br"></i><div class="cam-fallback" hidden>摄像头不可用<br>请检查设备与浏览器权限</div></div>';
   document.body.appendChild(win);
   attachCamDrag(win);
   win.querySelector('.cam-close').addEventListener('click',()=>closeCamWindow(deviceId));
+  // 仅本地 USB 摄像头支持巡检：远端流(remote:)与无设备占位窗(__none__)隐藏按钮
+  const inspectBtn=win.querySelector('.cam-inspect-btn');
+  if(deviceId.startsWith('remote:')||deviceId==='__none__'){ inspectBtn.hidden=true; }
+  else{
+    inspectBtn.addEventListener('click',()=>{
+      // 复用语音巡检同一套状态机：巡检中→静默停止；未巡检→直接启动该路（手动点击不语音播报）
+      if(typeof inspectStates!=='undefined'&&inspectStates.has(deviceId)){ stopInspect(slot,true); }
+      else{ _startOne(slot); serverLog('[巡检]',label,'手动点击开始巡检'); }
+    });
+  }
   slot={deviceId, win, stream:null};
   camSlots.push(slot);
   return slot;
@@ -110,6 +120,7 @@ function closeCamWindow(deviceId){
     if(slot.win.classList.contains('open'))return; // 期间被重新打开，取消关闭清理
     if(slot.stream){slot.stream.getTracks().forEach(t=>t.stop());slot.stream=null;}
     if(slot.pc){try{slot.pc.close();}catch(_){}slot.pc=null;} // 释放远端 WebRTC 连接
+    if(slot.pubPc){try{slot.pubPc.close();}catch(_){}slot.pubPc=null;} // 释放 SRS 推流连接
     const v=slot.win.querySelector('video'); if(v)v.srcObject=null;
     slot.win.remove();
     camSlots=camSlots.filter(s=>s!==slot);

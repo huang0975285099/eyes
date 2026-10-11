@@ -13,6 +13,8 @@ import os
 import socket
 import sys
 import threading
+import urllib.error
+import urllib.request
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +22,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .config import Config
 from .lifecycle import AppLifecycle
 from .paths import APP_DIR
+
+# SRS 信令同源反向代理目标：
+# 浏览器页面在 localhost（local 级）直连 10.0.20.x（private 级）会被 Chrome PNA 策略拦截，
+# 由本机 8765 服务把 /srs/* 转发到 SRS 的 1985，浏览器侧即为同源请求。
+# WebRTC 媒体面（UDP 8000）不经过此代理，浏览器仍直连 SRS。
+SRS_PROXY_TARGET = "http://10.0.20.219:1985"
+SRS_PROXY_PREFIX = "/srs/"
+_SRS_PROXY_ALLOWED_METHODS = {"GET", "POST", "OPTIONS"}
+_SRS_PROXY_TIMEOUT = 10
+_SRS_PROXY_MAX_BODY = 512 * 1024
 
 
 class DashboardHTTPServer(ThreadingHTTPServer):
@@ -43,6 +55,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         request_path = self.path.partition("?")[0]
+        if request_path.startswith(SRS_PROXY_PREFIX):
+            self._proxy_to_srs()
+            return
         if request_path in {"/", "/index.html"}:
             body = (APP_DIR / "web" / "index.html").read_bytes()
             self.send_response(HTTPStatus.OK)
@@ -74,6 +89,62 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_POST(self) -> None:
+        if self.path.partition("?")[0].startswith(SRS_PROXY_PREFIX):
+            self._proxy_to_srs()
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_OPTIONS(self) -> None:
+        if self.path.partition("?")[0].startswith(SRS_PROXY_PREFIX):
+            self._proxy_to_srs()
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _proxy_to_srs(self) -> None:
+        """把 /srs/<path> 原样转发到 SRS 1985（仅信令，小包短连接；同源后浏览器不再发 CORS 预检）。"""
+        if self.command not in _SRS_PROXY_ALLOWED_METHODS:
+            self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
+            return
+        rest = self.path[len(SRS_PROXY_PREFIX):]
+        target = f"{SRS_PROXY_TARGET}/{rest}"
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length > _SRS_PROXY_MAX_BODY:
+            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+        body = self.rfile.read(length) if length > 0 else None
+        req = urllib.request.Request(target, data=body, method=self.command)
+        content_type = self.headers.get("Content-Type")
+        if content_type:
+            req.add_header("Content-Type", content_type)
+        try:
+            with urllib.request.urlopen(req, timeout=_SRS_PROXY_TIMEOUT) as resp:
+                payload = resp.read()
+                self.send_response(resp.status)
+                self.send_header(
+                    "Content-Type", resp.headers.get("Content-Type", "application/json")
+                )
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(payload)
+        except urllib.error.HTTPError as error:
+            payload = error.read()
+            self.send_response(error.code)
+            self.send_header(
+                "Content-Type", error.headers.get("Content-Type", "application/json")
+            )
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (OSError, urllib.error.URLError) as error:
+            msg = f'{{"code":-1,"error":"SRS proxy unreachable: {error}"}}'.encode("utf-8")
+            self.send_response(HTTPStatus.BAD_GATEWAY)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
 
 
 class CameraDashboard:

@@ -1,0 +1,18 @@
+# 飞桨 8771 独立环境依赖（Python 3.10，与 torch 主环境物理隔离）
+# 安装顺序见 deploy/PPHUMAN-SRS-实施方案.md 阶段三
+paddlepaddle==2.6.2
+numpy<2
+tqdm
+typeguard
+opencv-python==4.6.0.66
+PyYAML
+shapely
+scipy
+terminaltables
+lapx
+motmetrics
+pyclipper
+scikit-learn
+imgaug
+numba
+requests

@@ -347,6 +347,16 @@ class ASRHandler(BaseHTTPRequestHandler):
             pass  # 客户端已断开，同上
 
 
+def _warm_up_ollama() -> None:
+    """后台预热对话/视觉共用的本地模型，避免首轮巡检冷启动超过前端超时。"""
+    try:
+        print(f"[ollama] 后台预热模型 {_CONFIG.ollama_model} ...", flush=True)
+        _OLLAMA.warm_up()
+        print("[ollama] 模型预热完成", flush=True)
+    except Exception as error:  # noqa: BLE001
+        print(f"[ollama] 预热失败（不影响使用，首轮推理会较慢）：{error}", flush=True)
+
+
 def main() -> None:
     _check_ollama()
     _check_vision_api()
@@ -354,6 +364,8 @@ def main() -> None:
     print(f"ASR 转写服务已启动：http://127.0.0.1:{_ASR_PORT}/  （模型后台加载中）")
     # 后台线程加载模型，不阻塞 HTTP 服务；加载完成前 /transcribe 会阻塞等待，/ready 返回 false
     threading.Thread(target=_get_model, name="asr-model-load", daemon=True).start()
+    # 后台预热 Ollama（对话/视觉共用），消除首轮巡检的冷启动超时
+    threading.Thread(target=_warm_up_ollama, name="ollama-warmup", daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

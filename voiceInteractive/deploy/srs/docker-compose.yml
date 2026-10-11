@@ -1,0 +1,23 @@
+# SRS 6 流媒体服务：浏览器 USB 摄像头 WHIP 推流入口
+# 推流链路：前端 getUserMedia --WHIP--> SRS --RTMP/FLV--> 飞桨 PP-Human
+# 部署：由同目录 deploy.sh 启动（先渲染 srs.runtime.conf），Windows 端用 ../deploy-srs.ps1 一键上传部署
+name: srs-eyes
+
+services:
+  srs:
+    image: ossrs/srs:6
+    container_name: srs-eyes
+    restart: always
+    ports:
+      - "1935:1935"     # TCP  RTMP：飞桨 PP-Human / ffmpeg 拉流
+      - "1985:1985"     # TCP  HTTP API + WHIP 信令（浏览器 POST SDP）
+      - "8080:8080"     # TCP  HTTP-FLV / HLS（备选拉流）
+      - "8000:8000/udp" # UDP  WebRTC 媒体面（必须 /udp，漏映射则黑屏）
+    volumes:
+      # 注意：挂载的是 deploy.sh 渲染后的 srs.runtime.conf（candidate 已替换为宿主机 IP）
+      - ./srs.runtime.conf:/usr/local/srs/conf/docker.conf:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo >/dev/tcp/127.0.0.1/1985"]
+      interval: 10s
+      timeout: 3s
+      retries: 10

@@ -70,6 +70,34 @@ svg { display:block; }
   box-shadow: 0 0 8px #4cff8a; margin-right: 8px; display: inline-block;
   animation: camLiveBlink 1.4s ease-in-out infinite;
 }
+.cam-actions { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.cam-inspect-btn {
+  height: 22px; padding: 0 10px;
+  border: 1px solid rgba(94,200,255,.35); border-radius: 6px;
+  background: rgba(20,40,70,.55); color: #8fd6ff; cursor: pointer;
+  font: 10px/1 ui-monospace, Consolas, monospace; letter-spacing: .14em;
+  transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
+}
+.cam-inspect-btn:hover { background: rgba(40,80,130,.7); color: #fff; border-color: rgba(94,200,255,.75); }
+.cam-inspect-btn[hidden] { display: none; }
+/* 巡检中 SRS/本地视角切换按钮 */
+.cam-srs-btn {
+  height: 22px; padding: 0 10px;
+  border: 1px solid rgba(110,230,190,.4); border-radius: 6px;
+  background: rgba(15,50,45,.55); color: #8ff0d0; cursor: pointer;
+  font: 10px/1 ui-monospace, Consolas, monospace; letter-spacing: .1em;
+  transition: background .2s, color .2s, border-color .2s;
+}
+.cam-srs-btn:hover { background: rgba(30,90,80,.7); color: #fff; border-color: rgba(110,230,190,.8); }
+.cam-srs-btn:disabled { opacity: .5; cursor: default; }
+/* 巡检中：金色"停止"按钮 */
+.cam-window.inspecting .cam-inspect-btn {
+  color: #ffd27a; border-color: rgba(255,196,80,.55);
+  background: rgba(70,50,10,.45);
+}
+.cam-window.inspecting .cam-inspect-btn:hover { background: rgba(130,90,15,.65); color: #fff; box-shadow: 0 0 10px rgba(255,196,80,.35); }
+/* 告警态：按钮转红 */
+.cam-window.inspecting.alerting .cam-inspect-btn { color: #ff9b9b; border-color: rgba(255,80,80,.6); }
 .cam-close {
   width: 22px; height: 22px; display: grid; place-items: center;
   border: 1px solid rgba(94,200,255,.25); border-radius: 6px;
@@ -118,7 +146,7 @@ svg { display:block; }
 .cam-window.inspecting .cam-title { color: #ffd27a; }
 .cam-countdown { display: none; }
 .cam-window.inspecting .cam-countdown {
-  display: inline-block; margin-left: auto; padding: 2px 7px;
+  display: inline-block; padding: 2px 7px;
   border: 1px solid rgba(255,196,80,.4); border-radius: 6px;
   color: #ffd27a; font: 10px/1 ui-monospace, Consolas, monospace; letter-spacing: .08em;
 }
