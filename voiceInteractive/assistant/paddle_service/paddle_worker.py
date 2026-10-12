@@ -118,6 +118,9 @@ def _apply_patches():
             "-s", f"{width}x{height}",
             "-use_wallclock_as_timestamps", "1", "-i", "-",
             "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+            # 必须 baseline：标注流经 SRS rtmp_to_rtc 转封装给浏览器 WebRTC 接收端，
+            # High profile 会被判不兼容 -> 播放端黑屏（原始流 usbN 也是 Baseline）
+            "-profile:v", "baseline", "-bf", "0",
             "-pix_fmt", "yuv420p", "-g", "4",
             "-fps_mode", "passthrough",  # 可变帧率透传墙钟时间戳，不补帧
             "-f", "flv", _push_url,
@@ -212,6 +215,7 @@ class PaddleAnalyzer:
     MASK_DEBOUNCE = 3      # 连续 N 个采样周期都检出未戴口罩才告警（防转脸误报）
     MASK_COOLDOWN = 30.0   # 口罩告警冷却（秒）
     INTRUSION_DRAW_TTL = 2.0  # 入侵目标高亮框保留时长（秒）
+    MOT_LOG_INTERVAL = 60.0   # 检出人数诊断日志间隔（秒），排查"有画面无框"用
 
     def __init__(self, stream_name: str, stop_flag: threading.Event,
                  modules: set[str] | None = None):
@@ -243,6 +247,7 @@ class PaddleAnalyzer:
             print(f"[worker] {stream_name} 未在 conf/regions.json 配置禁区，"
                   f"区域入侵未启用", flush=True)
         self._last_intrusion: dict[tuple, float] = {}
+        self._last_mot_log = 0.0
 
     def emit(self, event: dict) -> None:
         """事件以 EVENT 行写 stdout（父进程逐行解析）；加锁防与管线 print 交织。"""
@@ -312,11 +317,30 @@ class PaddleAnalyzer:
                 if now - ts > 600:
                     self._last_intrusion.pop(key, None)
 
+    def _log_mot(self, res, now: float) -> None:
+        """低频打印 MOT 检出人数。
+
+        "画面有人物却没有框/骨骼/属性"时，这条日志能直接区分两种原因：
+        一直打 0 人 = 模型没检出人（拉流分辨率/模型加载问题）；
+        打出 N 人 = 管线画了框，问题在推流或前端画面切换。
+        """
+        if now - self._last_mot_log < self.MOT_LOG_INTERVAL:
+            return
+        self._last_mot_log = now
+        boxes = res.get("boxes") if hasattr(res, "get") else None
+        count = 0 if boxes is None else len(boxes)
+        if count:
+            print(f"[worker] {self.stream_name} MOT 检出 {count} 人", flush=True)
+        else:
+            print(f"[worker] {self.stream_name} MOT 近 {int(self.MOT_LOG_INTERVAL)}s 未检出人员"
+                  f"（画面有人却无框时，先查拉流分辨率与模型加载）", flush=True)
+
     def _check_events(self, name: str, res) -> None:
         now = time.time()
         try:
             if name == "mot" and res:
                 self._check_intrusion(res, now)
+                self._log_mot(res, now)
             elif name == "skeleton_action" and res:
                 # res: [(mot_id, {'class': ndarray, 'score': ndarray}), ...]，class 0 = 摔倒
                 for mot_id, action_res in res:
@@ -433,6 +457,7 @@ class PaddleAnalyzer:
         self.emit({"type": "status", "running": True,
                    "modules": sorted(self.modules),
                    "stream": self.stream_name, "timestamp": time.time()})
+        print(f"[worker] {self.stream_name} 拉流 {self.pull_url} -> 推流 {_push_url}", flush=True)
         while not self.stop_flag.is_set():
             predictor.run(self.pull_url)  # 阻塞；流结束/断开时返回
             self.close_pushstream()        # 本轮 ffmpeg 随 run 结束而废弃

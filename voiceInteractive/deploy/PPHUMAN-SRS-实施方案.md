@@ -338,7 +338,7 @@ predictor.run("http://10.0.20.219:8080/live/usb1.flv")                  # 视频
 
 | 被 patch 的点 | 原因 / 做法 |
 |---|---|
-| `PushStream.initcmd` | 官方写死 `-f rtsp` 且要求 ffmpeg 在 PATH。改为本地 ffmpeg 绝对路径 + **libx264 → FLV/RTMP**；输入侧**不能声明 `-r`**，用 `-use_wallclock_as_timestamps 1 -i -` + `-fps_mode passthrough`（低帧率下声明 `-r` 会把墙钟 PTS 压回去、SRS 时间戳不前进）；GOP=4 |
+| `PushStream.initcmd` | 官方写死 `-f rtsp` 且要求 ffmpeg 在 PATH。改为本地 ffmpeg 绝对路径 + **libx264 → FLV/RTMP**；输入侧**不能声明 `-r`**，用 `-use_wallclock_as_timestamps 1 -i -` + `-fps_mode passthrough`（低帧率下声明 `-r` 会把墙钟 PTS 压回去、SRS 时间戳不前进）；GOP=4；**必须 `-profile:v baseline -bf 0`**（见下方"标注流黑屏"） |
 | `Result.update` | 拦截逐帧结果字典，抽 `mot` / `skeleton_action` / `video_action` 事件（见 §4.6） |
 | `PipePredictor.capturevideo` | 官方实现无法中断。加 `_eyes_stop` 轮询以支持运行中停止，并逐帧回调 `analyzer.on_frame()` 做口罩检测（`cv2.VideoCapture` 必须主线程，故推理与检测线程分工明确） |
 
@@ -357,6 +357,38 @@ predictor.run("http://10.0.20.219:8080/live/usb1.flv")                  # 视频
 ```
 
 推流失败不影响告警：SSE 事件与标注流相互独立。
+
+#### 4.5.1 标注流黑屏（已定位并修复，2026-10-11）
+
+**现象**：巡检画面切到 `usbN_labeled` 后全黑；workspace 日志显示 worker 一切正常
+（`MOT 检出 N 人`、口罩/禁区事件都在报、ffmpeg `frame=N fps=7.3` 持续输出），
+SRS 上 `usbN_labeled` 的 `publish.active` 也是 true。
+
+**根因**：`usbN`（原始流）与 `usbN_labeled`（标注流）走的是**同一条播放路径**——
+SRS `rtmp_to_rtc` 转封装后交给浏览器 WebRTC 接收端。但两条流的 H.264 profile 不同：
+
+```bash
+# SRS API 可直接看出差异
+curl -s http://10.0.20.219:1985/api/v1/streams/ | grep -o '"name":"usb1[^}]*profile":"[^"]*"'
+#   usb1          -> profile: Baseline   （能正常播放）
+#   usb1_labeled  -> profile: High       （黑屏）
+```
+
+libx264 默认输出 High profile，而 Chrome 的 WebRTC H.264 接收端不接受 High
+（SRS 转封装不做转码，profile 原样透传）。早期伪代码里本来写了 `-profile:v baseline`，
+改写 `initcmd` 时漏掉了，于是出现"能拉流、能动告警、就是黑屏"。
+
+**修复**：`initcmd` 增加 `-profile:v baseline -bf 0`，产物经 ffmpeg 复核为
+`profile Constrained Baseline, level 3.1`，与 `usbN` 一致。
+
+**排查口径**（顺序照做即可分层定位）：
+
+| 观察 | 结论 |
+|---|---|
+| 控制台无 `[SRS] 巡检画面已切到飞桨标注流` | 标注流没切成功（worker 未就绪 / 标注流没注册），画面一直是原始流，自然没有框 |
+| 控制台有 `MOT 近 60s 未检出人员` | 拉流分辨率或模型问题，管线没检出人 → 没有框和骨骼 |
+| 有 `MOT 检出 N 人` + ffmpeg 有帧，但画面无框 | 看 `profile`：High = 播放端黑屏/不渲染，改 baseline |
+| `probe_labeled_frame.py` 拉 labeled 能存出带框图 | 推流侧完全正常，问题只在前端播放 |
 
 ### 4.6 事件提取与 SSE（`paddle_server.py`，ThreadingHTTPServer，端口 8771）
 
