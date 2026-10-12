@@ -89,6 +89,7 @@ class _FrameSink:
 
     def write(self, buf):
         try:
+            self._analyzer.note_push_frame()  # 帧率统计（失败不影响推流）
             if len(buf) == self._size:
                 buf = self._analyzer.render_frame(buf)
         except Exception:  # noqa: BLE001
@@ -133,7 +134,14 @@ def _apply_patches():
             # 必须 baseline：标注流经 SRS rtmp_to_rtc 转封装给浏览器 WebRTC 接收端，
             # High profile 会被判不兼容 -> 播放端黑屏（原始流 usbN 也是 Baseline）
             "-profile:v", "baseline", "-bf", "0",
-            "-pix_fmt", "yuv420p", "-g", "4",
+            # 码率上限（VBV）：人物静止时残差近乎为零、帧很小，一动起来残差暴涨会冲出
+            # 几 Mbps 的尖峰；SRS rtmp_to_rtc 只转封装不转码，尖峰会灌满接收端抖动
+            # 缓冲 —— 表现就是"越看越延迟、还周期性追帧跳一下"。画质仍由 CRF 23 定，
+            # maxrate/bufsize 只负责削峰（bufsize 取 2 倍 = 约 2s 缓冲窗口）。
+            "-maxrate", "2000k", "-bufsize", "4000k",
+            # GOP 原为 4：IDR 体积是 P 帧的数倍，每 4 帧一个等于每 0.7s 顶一次脉冲。
+            # 放宽到 12 既削掉脉冲，又不至于让新观看者等太久（低帧率下约 2s 一个 IDR）。
+            "-pix_fmt", "yuv420p", "-g", "12",
             "-fps_mode", "passthrough",  # 可变帧率透传墙钟时间戳，不补帧
             "-f", "flv", _push_url,
         ]
@@ -228,6 +236,7 @@ class PaddleAnalyzer:
     MASK_COOLDOWN = 30.0   # 口罩告警冷却（秒）
     INTRUSION_DRAW_TTL = 2.0  # 入侵目标高亮框保留时长（秒）
     MOT_LOG_INTERVAL = 60.0   # 检出人数诊断日志间隔（秒），排查"有画面无框"用
+    STATS_INTERVAL = 3.0      # 推流帧率统计周期（秒）：EVENT stats -> 8771 /stats -> 前端显示
 
     def __init__(self, stream_name: str, stop_flag: threading.Event,
                  modules: set[str] | None = None):
@@ -261,6 +270,10 @@ class PaddleAnalyzer:
                   f"区域入侵未启用", flush=True)
         self._last_intrusion: dict[tuple, float] = {}
         self._last_mot_log = 0.0
+        # 推流帧率统计：_FrameSink 每往 ffmpeg 写一帧就 +1，周期结算后上报
+        self._push_frames = 0
+        self._push_t0 = time.time()
+        self._stats_started = False
 
     def emit(self, event: dict) -> None:
         """事件以 EVENT 行写 stdout（父进程逐行解析）；加锁防与管线 print 交织。"""
@@ -285,6 +298,35 @@ class PaddleAnalyzer:
             self._frame_h, self._frame_w, 3).copy()
         draw_overlays(frame, self._regions, mask["faces"] if mask else (), intrusions)
         return frame.tobytes()
+
+    def note_push_frame(self) -> None:
+        """推流帧计数（_FrameSink 写 ffmpeg 前调用；纯自增，不加锁）。"""
+        self._push_frames += 1
+
+    def _stats_loop(self) -> None:
+        """周期上报实际推流帧率（EVENT stats -> 8771 /stats -> 前端显示）。
+
+        标注流帧率 = 推理帧率（管线 framequeue 只 10 帧且不跳帧），这个数正是排查
+        "画面卡顿"的第一手依据：PP-Human 五段模型跑在 2060 上是个位数属正常，
+        持续低于 3 说明 GPU 被抢（ASR 同卡）或模型配置有问题。
+        """
+        while not self.stop_flag.wait(self.STATS_INTERVAL):
+            try:
+                now = time.time()
+                frames, t0 = self._push_frames, self._push_t0
+                self._push_frames, self._push_t0 = 0, now
+                elapsed = now - t0
+                if elapsed <= 0:
+                    continue
+                self.emit({
+                    "type": "stats",
+                    "stream": self.stream_name,
+                    "fps": round(frames / elapsed, 2),
+                    "push": self._pushstream is not None,
+                    "timestamp": now,
+                })
+            except Exception as error:  # noqa: BLE001
+                print(f"[worker] {self.stream_name} 帧率统计异常: {error}", flush=True)
 
     def _mark_intrusion(self, key: tuple, region_name: str, box, now: float) -> None:
         with self._draw_lock:
@@ -488,6 +530,10 @@ class PaddleAnalyzer:
         self.emit({"type": "status", "running": True,
                    "modules": sorted(self.modules),
                    "stream": self.stream_name, "timestamp": time.time()})
+        if not self._stats_started:  # FLV 断线重连不重建线程
+            self._stats_started = True
+            threading.Thread(target=self._stats_loop, name="worker-stats",
+                             daemon=True).start()
         print(f"[worker] {self.stream_name} 拉流 {self.pull_url} -> 推流 {_push_url}", flush=True)
         while not self.stop_flag.is_set():
             predictor.run(self.pull_url)  # 阻塞；流结束/断开时返回

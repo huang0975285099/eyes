@@ -24,5 +24,5 @@
   "vision_api_enabled": false,
   "vision_api_base": "http://10.0.6.226:11435/v1",
   "vision_api_model": "qwen3-vl-8b",
-  "mask_engine": "paddlehub"
+  "mask_engine": "off"
 }

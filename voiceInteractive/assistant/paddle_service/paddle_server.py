@@ -179,6 +179,21 @@ class PaddleHandler(BaseHTTPRequestHandler):
                 ]
             self._respond({"streams": streams})
             return
+        if path == "/stats":
+            # 帧率/推流状态快照（worker 每 3s 上报一次 EVENT stats，见 paddle_worker）
+            # 排查"画面卡顿"用：标注流帧率 = 推理帧率，个位数是这套模型的正常水平
+            wanted = parse_qs(parsed.query).get("stream", [None])[0]
+            with _runners_lock:
+                runners = [r for r in _runners.values()
+                           if wanted is None or r.stream_name == wanted]
+            self._respond({"streams": [
+                {"stream": r.stream_name, "running": r.running,
+                 "modules": list(r.modules), "error": r.error,
+                 "fps": (r.stats or {}).get("fps"),
+                 "push": (r.stats or {}).get("push"),
+                 "updated": (r.stats or {}).get("timestamp")}
+                for r in runners]})
+            return
         if path == "/events":
             stream = parse_qs(parsed.query).get("stream", ["usb1"])[0]
             self._handle_sse(stream)

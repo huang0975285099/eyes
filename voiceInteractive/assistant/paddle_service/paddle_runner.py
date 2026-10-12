@@ -39,6 +39,8 @@ class PaddleRunner:
         self.requested_modules = list(self.modules)
         # worker 上报的实际生效模块（None = 还没收到，模型仍在加载）
         self.ready_modules: list[str] | None = None
+        # worker 最近一次帧率快照（EVENT stats），供 8771 /stats 查询；不进 SSE
+        self.stats: dict | None = None
         self._proc: sp.Popen | None = None
         self._reader: threading.Thread | None = None
         self._subscribers: list[queue.Queue] = []
@@ -220,6 +222,10 @@ class PaddleRunner:
                             # worker 实际生效模块（口罩模型加载失败时会被降级）
                             self.modules = list(event["modules"])
                             self.ready_modules = list(event["modules"])
+                        elif event.get("type") == "stats":
+                            # 只更新服务端快照：前端是轮询 /stats 取的，没必要每 3s 广播一次
+                            self.stats = event
+                            continue
                         self._emit(event)
                         continue
                     except json.JSONDecodeError:

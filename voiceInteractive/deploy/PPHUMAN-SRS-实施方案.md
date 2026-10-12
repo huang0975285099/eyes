@@ -242,7 +242,8 @@ Chrome 仍要求预检响应带 `Access-Control-Allow-Private-Network: true`，S
   RTMP/FLV + 本地 ffmpeg 绝对路径（见 [probe_stream.py](file:///d:/project/eyes/voiceInteractive/assistant/paddle_service/probe_stream.py)）。
 - **低帧率推流必须修时间戳**：分析帧率(CPU~1fps) ≠ 源帧率(30)，输入侧不能声明 `-r`
   （会把墙钟 PTS 压回去，SRS 时间戳不前进、播放卡死），用
-  `-use_wallclock_as_timestamps 1 -i -` + `-fps_mode passthrough`，speed 恢复 1.0x；GOP 设 4 帧。
+  `-use_wallclock_as_timestamps 1 -i -` + `-fps_mode passthrough`，speed 恢复 1.0x；
+  GOP 与码率上限见 §4.5.2（原为 `-g 4`，已改为 12 并加 `-maxrate/-bufsize`）。
 - ~~OpenCV `VideoCapture` 读 HTTP-FLV 在本机 0 帧，runner 拉流用 **RTMP**~~ →
   **已更正（2026-10-11）**：早期 0 帧是探针写法问题；现在 `paddle_worker.py` 与
   `probe_stream.py` 统一用 **HTTP-FLV 拉流**（`http://10.0.20.219:8080/live/usbN.flv`），
@@ -313,7 +314,10 @@ git clone -b release/2.8 --depth 1 https://github.com/PaddlePaddle/PaddleDetecti
 
 ```yaml
 visual: True        # 关键：visualize_video 输出的帧已画好 框/骨骼/属性/行为，且已 RGB->BGR
-MOT:        { enable: True }    # 跟踪框 + track id（其他模型都挂在它的 id 上）
+MOT:        { enable: True, skip_frame_num: 2 }   # 跟踪框 + track id（其他模型都挂在它的 id 上）
+                                                  # skip_frame_num=2：隔帧复用检测结果（官方推荐，
+                                                  # 上限 3），显著提升标注流帧率，见 §4.5.2；
+                                                  # 改回 -1 即恢复逐帧全量检测
 KPT:        { enable: True }    # 17 点骨骼（STGCN 依赖，必须开）
 ATTR:       { enable: True }    # 属性行（实测 26 标签无口罩，口罩见 4.8 独立模块）
 SKELETON_ACTION: { enable: True, display_frames: 80 }   # 摔倒 fall
@@ -347,7 +351,9 @@ predictor.run("http://10.0.20.219:8080/live/usb1.flv")                  # 视频
 
 | 被 patch 的点 | 原因 / 做法 |
 |---|---|
-| `PushStream.initcmd` | 官方写死 `-f rtsp` 且要求 ffmpeg 在 PATH。改为本地 ffmpeg 绝对路径 + **libx264 → FLV/RTMP**；输入侧**不能声明 `-r`**，用 `-use_wallclock_as_timestamps 1 -i -` + `-fps_mode passthrough`（低帧率下声明 `-r` 会把墙钟 PTS 压回去、SRS 时间戳不前进）；GOP=4；**必须 `-profile:v baseline -bf 0`**（见下方"标注流黑屏"） |
+| `PushStream.initcmd` | 官方写死 `-f rtsp` 且要求 ffmpeg 在 PATH。改为本地 ffmpeg 绝对路径 + **libx264 → FLV/RTMP**；输入侧**不能声明 `-r`**，用 `-use_wallclock_as_timestamps 1 -i -` + `-fps_mode passthrough`（低帧率下声明 `-r` 会把墙钟 PTS 压回去、SRS 时间戳不前进）；
+`-maxrate 2000k -bufsize 4000k` 削码率尖峰、GOP=12（原 4，见 §4.5.2）；
+**必须 `-profile:v baseline -bf 0`**（见下方"标注流黑屏"） |
 | `Result.update` | 拦截逐帧结果字典，抽 `mot` / `skeleton_action` / `video_action` 事件（见 §4.6） |
 | `PipePredictor.capturevideo` | 官方实现无法中断。加 `_eyes_stop` 轮询以支持运行中停止，并逐帧回调 `analyzer.on_frame()` 做口罩检测（`cv2.VideoCapture` 必须主线程，故推理与检测线程分工明确） |
 
@@ -399,12 +405,44 @@ libx264 默认输出 High profile，而 Chrome 的 WebRTC H.264 接收端不接�
 | 有 `MOT 检出 N 人` + ffmpeg 有帧，但画面无框 | 看 `profile`：High = 播放端黑屏/不渲染，改 baseline |
 | `probe_labeled_frame.py` 拉 labeled 能存出带框图 | 推流侧完全正常，问题只在前端播放 |
 
+#### 4.5.2 画面卡顿 / 帧率低（2026-10-11 定位并修复）
+
+**现象**：人物静止时看着正常，一动就"一跳一跳"、且越看越延迟。截图里管线自绘 OSD
+（`plot_tracking_dict` 的 `frame: N fps: X.XX num: M`，红色，画在帧左上角）实测只有 ~5.5fps。
+
+**一层：标注流帧率 = 推理帧率。** 管线 `framequeue = queue.Queue(10)` 且 MOT 不跳帧
+（`skip_frame_num: -1`），主循环逐帧全量跑 MOT→KPT→ATTR→行为模型，标注流永远拿不到源 30fps，
+只能拿到推理跑得出来的帧率（2060 上五段模型约 5~10fps，还要与 ASR 同卡争 GPU）。
+**静止时帧间几乎无差异，看不出低帧率；人物一动立刻暴露成幻灯片**——所以是"低帧率被运动
+暴露"，不是"运动导致掉帧"。
+（打架 ppTSM 每 `frame_len × sample_freq` = 56 帧才推理一次，不是逐帧开销，关掉它没收益。）
+
+已做：`MOT.skip_frame_num: 2`（隔帧复用检测结果，官方推荐加速项，建议不超过 3）。
+
+**二层：运动时的码率尖峰。** libx264 走 CRF 23 且**没有码率上限**：人静止时残差近乎为零、
+帧很小，一动残差暴涨冲出几 Mbps 尖峰；`SRS rtmp_to_rtc` 只转封装不转码，尖峰会灌满接收端
+WebRTC 抖动缓冲 → 越看越延迟、并周期性"追帧"跳一下。旧 `-g 4` 又是每 4 帧一个 IDR
+（IDR 体积是 P 帧数倍），等于每 0.7s 顶一次脉冲。
+
+已做：`-maxrate 2000k -bufsize 4000k`（VBV 削峰，画质仍由 CRF 23 定）+ GOP `-g 4 → 12`。
+
+**三层（表现像"画面坏了"，实为显示 bug）：标注流被 CSS 镜像。** `index.css` 的
+`.cam-stage video { transform: scaleX(-1) }` 本意是给本地自拍预览，但 SRS 回拉画面用的是
+同一个 `<video>`，标注流因此整体左右翻转——OSD 英文全反、**禁区左右颠倒**（巡检看位置会
+读错方向）。已做：SRS 视角加 `.no-mirror` 取消镜像；告警证据图与历史缩略图来自 canvas 抓帧
+（本就不经过 CSS 变换），同步去掉镜像以与真实画面一致。
+
+**排查口径**：巡检窗倒计时位置现在直接显示实测帧率（如 `口罩关 · 7.5fps`），数据来自
+8771 `GET /stats?stream=usbN`（worker 每 3s 上报 `EVENT stats`）。个位数是这套模型的正常
+水平；持续低于 3 说明 GPU 被抢或模型配置有问题。
+
 ### 4.6 事件提取与 SSE（`paddle_server.py`，ThreadingHTTPServer，端口 8771）
 
 | 方法/路径 | 作用 |
 |---|---|
 | `GET /ready` | 8771 进程存活（worker 模型加载状态由 SSE 的 `status` 事件表达） |
 | `GET /status` | `{"streams":[{"stream","running","error","modules"}]}` |
+| `GET /stats?stream=usbN` | 帧率快照：`{"streams":[{"stream","running","modules","error","fps","push","updated"}]}`；`fps` 由 worker 每 3s 上报，前端显示在巡检窗倒计时处（§4.5.2） |
 | `POST /analyze/start` | body `{"stream":"usb1","modules":["fall","fight","intrusion","mask"]}`；同名+同模块幂等复用，**模块集合变更则重建 worker** |
 | `POST /analyze/stop` | body `{"stream":"usb1"}`，立即返回，后台 join 回收；回收期间该路登记为"在停" |
 | `POST /shutdown` | 需请求头 `X-Local-Shutdown: 1`（防页面 CSRF）；停全部 worker 后关服务，供 main.py 退出调用 |
@@ -419,7 +457,11 @@ libx264 默认输出 High profile，而 Chrome 的 WebRTC H.264 接收端不接�
 {"type":"intrusion","stream":"usb1","region":"柜台禁区","track_id":3,"point":[800,400],"timestamp":1760000000.0}
 {"type":"mask","stream":"usb1","faces":2,"no_mask":1,"boxes":[{"label":"no_mask","confidence":0.93,"box":[..]}],"timestamp":1760000000.0}
 {"type":"status","running":true,"stream":"usb1","modules":["fall","fight","intrusion","mask"],"timestamp":1760000000.0}
+{"type":"stats","stream":"usb1","fps":7.5,"push":true,"timestamp":1760000000.0}
 ```
+
+`stats` 仅由 runner 存成服务端快照（**不广播进 SSE**，避免每 3s 刷一次长连接），前端靠轮询
+`GET /stats` 取。
 
 事件来源与去重（**全部在 worker 内按 track / 区域维度去重**，前端再做一层播报节流）：
 
@@ -701,8 +743,8 @@ KeyboardInterrupt
 | # | 事项 | 依据 | 说明 |
 |---|---|---|---|
 | 1 | **多路巡检显存实测** | §6 | 每路一个 worker + 一整套 predictor，显存线性增长；RTX 2060 6GB 两路大概率爆。上线双路前用 `nvidia-smi` 记录 1 路/2 路峰值，必要时启用 §6 的降级优先级 |
-| 2 | **8771 挂掉后的口罩兜底** | §4.6/§4.8 | qwen 60s 轮询链路已删除，现在 8771 不可用 = 无口罩检测。产品上是否接受需拍板；不接受则恢复一条降级链路（或把"口罩不可用"在巡检窗口明确提示） |
-| 3 | **降级策略落地** | §6/§7 | 均为文档设计、代码未实现：远距离/低置信目标跳过 KPT、抽帧推流（`MOT.skip_frame_num` 现为 -1）、关 VIDEO_ACTION、输入宽降 640 |
+| 2 | **8771 挂掉后的口罩兜底** | §4.6/§4.8 | qwen 60s 轮询链路已删除，现在 8771 不可用 = 无口罩检测。产品上是否接受需拍板；不接受则恢复一条降级链路（或把"口罩不可用"在巡检窗口明确提示）。**当前 `config.json` 已置 `mask_engine: off`，口罩检测整体关闭**（代码与模型保留，改回 `paddlehub` 即恢复） |
+| 3 | **降级策略落地** | §6/§7 | 抽帧已落地：`MOT.skip_frame_num` 由 -1 改为 2（§4.5.2）。其余仍为设计：远距离/低置信目标跳过 KPT、输入宽降 640。~~关 VIDEO_ACTION~~ 经核算收益极小（ppTSM 每 `frame_len×sample_freq`=56 帧才推理一次，非逐帧开销），已从降级项移除 |
 | 4 | **口罩真人探针证据** | §4.8 步骤 2 | `probe_frames/` 目前只有 `lab.jpg`、`gpu_lab.jpg`（静态图）与 `overlay_probe.jpg`（叠加渲染自测）。缺真人戴/未戴/侧脸各若干张的准确率记录 |
 | 5 | **区域入侵坐标标定** | §4.9 | `conf/regions.json` 的 `usb1` 是 1280×720 示例矩形，需按现场机位实画；多路需补 `usb2`… 或 `"*"` |
 | 6 | DVR 录像 | §1/§6 | `srs.conf` 无 `dvr` 段，可选未开 |

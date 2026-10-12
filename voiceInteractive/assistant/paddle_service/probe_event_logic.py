@@ -77,3 +77,20 @@ sink.write(raw)
 short = b"\x00" * 12
 sink.write(short)
 print("sink 收字节 =", len(sink._real.getvalue()), "=", len(raw) + len(short))
+print("note_push_frame 计数 =", a._push_frames, "(期望 2：每写一次 +1，短帧也计)")
+
+# ---- 6) 帧率统计 _stats_loop：注入 30 帧 / 3s，应产出 fps≈10 的 stats 事件 ----
+flag = threading.Event()
+sa = W.PaddleAnalyzer("usb9", flag, set())
+sa.STATS_INTERVAL = 0.05          # 探针里不等真实 3s
+sa.emit = lambda ev: events.append(ev)
+sa._push_frames = 30
+sa._push_t0 = time.time() - 3.0
+t = threading.Thread(target=sa._stats_loop, daemon=True)
+t.start()
+time.sleep(0.3)
+flag.set()                         # 让循环体收尾退出
+t.join(timeout=2)
+stats = [e for e in events if e["type"] == "stats"]
+print("stats 事件 =", len(stats) > 0, " 首条 fps =", stats[0]["fps"] if stats else None,
+      "(期望 ≈10，供 8771 /stats 与前端显示)")

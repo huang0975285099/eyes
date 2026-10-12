@@ -98,6 +98,8 @@ function stopSrsPublish(slot){
 async function startSrsPlayback(slot, name){
   const video = slot.win.querySelector('video');
   const fb = slot.win.querySelector('.cam-fallback');
+  // SRS 画面按真实方向显示（见 index.css 的 .no-mirror）：镜像只给本地自拍预览用
+  if(video) video.classList.add('no-mirror');
   if(slot.pc){ try{ slot.pc.close(); }catch(_){} slot.pc = null; }
   const conn = new RTCPeerConnection();
   slot.pc = conn;
@@ -178,6 +180,7 @@ function switchCamToLocalView(slot){
   if(slot.pc){ try{ slot.pc.close(); }catch(_){} slot.pc = null; }
   const video = slot.win && slot.win.querySelector('video');
   const fb = slot.win && slot.win.querySelector('.cam-fallback');
+  if(video) video.classList.remove('no-mirror');  // 回到本地自拍预览，恢复镜像
   if(video && slot.stream){
     video.srcObject = slot.stream;
     video.hidden = false;

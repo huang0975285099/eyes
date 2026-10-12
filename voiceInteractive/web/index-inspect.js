@@ -145,19 +145,46 @@ function setInspectingClass(slot, on, order){
   }
 }
 
-// 倒计时位置显示口罩引擎状态：开=口罩实时 / off=口罩关（全局 1s 定时器，巡检全停时清除）
+// 倒计时位置显示口罩引擎状态 + 标注流实测帧率（全局 2s 定时器，巡检全停时清除）。
+// 帧率取自 8771 /stats（worker 每 3s 上报一次实际推流帧率）：标注流帧率 = 推理帧率，
+// 这是排查"画面卡顿"的第一手依据 —— 个位数是这套五段模型的正常水平。
 let _inspectCountdownTimer=null;
+let _inspectFps={};          // {流名: fps}
+let _statsFetching=false;
+function _paintCountdown(){
+  const off=(typeof MASK_ENGINE!=='undefined'&&MASK_ENGINE==='off');
+  inspectStates.forEach(e=>{
+    if(!e.countdownEl)return;
+    const name=e.slot&&e.slot.srsName;
+    const fps=(name&&typeof _inspectFps[name]==='number')?_inspectFps[name]:null;
+    e.countdownEl.textContent=(off?'口罩关':'口罩实时')+(fps!=null?(' · '+fps.toFixed(1)+'fps'):'');
+  });
+}
+function _pollInspectFps(){
+  if(_statsFetching)return;
+  const names=[];
+  inspectStates.forEach(e=>{const n=e.slot&&e.slot.srsName; if(n&&names.indexOf(n)<0)names.push(n);});
+  if(!names.length)return;
+  const base=(typeof PADDLE_API!=='undefined')?PADDLE_API:'http://localhost:8771';
+  _statsFetching=true;
+  Promise.all(names.map(n=>fetch(base+'/stats?stream='+encodeURIComponent(n),{cache:'no-store'})
+      .then(r=>r.ok?r.json():null).catch(()=>null)))
+    .then(list=>{
+      const next={};
+      (list||[]).forEach(d=>{((d&&d.streams)||[]).forEach(s=>{
+        if(s&&s.stream&&typeof s.fps==='number'&&s.fps>0)next[s.stream]=s.fps;});});
+      _inspectFps=next;
+      _paintCountdown();
+    })
+    .catch(()=>{})
+    .then(()=>{_statsFetching=false;});
+}
 function _ensureCountdownTimer(){
   if(_inspectCountdownTimer)return;
-  _inspectCountdownTimer=setInterval(()=>{
-    const off=(typeof MASK_ENGINE!=='undefined'&&MASK_ENGINE==='off');
-    inspectStates.forEach(e=>{
-      if(e.countdownEl)e.countdownEl.textContent=off?'口罩关':'口罩实时';
-    });
-  },1000);
+  _inspectCountdownTimer=setInterval(()=>{ _paintCountdown(); _pollInspectFps(); },2000);
 }
 function _maybeStopCountdownTimer(){
-  if(inspectStates.size===0&&_inspectCountdownTimer){clearInterval(_inspectCountdownTimer);_inspectCountdownTimer=null;}
+  if(inspectStates.size===0&&_inspectCountdownTimer){clearInterval(_inspectCountdownTimer);_inspectCountdownTimer=null;_inspectFps={};}
 }
 
 // 告警历史：右下角按钮 + 面板（点击查看历史截图与描述）
@@ -204,6 +231,7 @@ function _startOne(slot){
   syncInspectBtn(slot);
   e.countdownEl=slot.win.querySelector('.cam-countdown');
   _ensureCountdownTimer();
+  _paintCountdown();   // 立刻上文字，不等第一个 tick
   // 异步推流到 SRS 并切同源画面；不 await，不阻塞语音播报。推流失败其内部会自动 stopInspect 回退
   if(typeof beginSrsInspect==='function') beginSrsInspect(slot);
   return true;

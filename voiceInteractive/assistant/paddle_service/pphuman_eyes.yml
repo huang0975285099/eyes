@@ -16,7 +16,10 @@ MOT:
   model_dir: https://bj.bcebos.com/v1/paddledet/models/pipeline/mot_ppyoloe_l_36e_pipeline.zip
   tracker_config: deploy/pipeline/config/tracker_config.yml
   batch_size: 1
-  skip_frame_num: -1
+  # 隔帧复用检测结果（官方推荐的视频加速项，建议不超过 3）：
+  # 奇数帧跳过 PP-YOLOE 前向、只跑跟踪器，标注流帧率可显著提升，
+  # 框的位置由跟踪器外推，不会变成"一卡一卡"。改回 -1 即恢复逐帧检测。
+  skip_frame_num: 2
   enable: True
 
 KPT:

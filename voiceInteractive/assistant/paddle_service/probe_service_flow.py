@@ -136,6 +136,26 @@ def main() -> int:
     streams = {s["stream"]: s for s in st["streams"]}
     _check("usb1 在运行", streams.get("usb1", {}).get("running") is True, str(streams))
 
+    print("\n4b) /stats 回传实测帧率（前端卡顿排查用）")
+    runner = S._runners.get("usb1")
+
+    class _FakeProc:
+        """让 _read_output 有东西可读：验证 EVENT stats -> runner.stats -> /stats 全链路。"""
+        def __init__(self, lines):
+            self.stdout = lines; self.returncode = 0; self.stdin = None
+        def poll(self): return 0
+        def wait(self, timeout=None): return 0
+
+    if runner is not None:
+        runner._proc = _FakeProc(["EVENT " + json.dumps(
+            {"type": "stats", "stream": "usb1", "fps": 7.5, "push": True,
+             "timestamp": time.time()})])
+        runner._read_output()
+        st2 = _get(port, "/stats?stream=usb1")
+        s2 = (st2.get("streams") or [{}])[0]
+        _check("/stats 返回 fps", s2.get("fps") == 7.5, str(s2))
+        _check("/stats 标记在推流", s2.get("push") is True)
+
     print("\n5) 关停：所有 runner 被清空")
     S._stop_all_runners()
     with S._runners_lock:

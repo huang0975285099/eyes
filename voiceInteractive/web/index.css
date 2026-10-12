@@ -107,6 +107,10 @@ svg { display:block; }
 .cam-close:hover { background: rgba(40,70,110,.6); color: #fff; }
 .cam-stage { position: relative; width: 100%; aspect-ratio: 4 / 3; background: #05080f; overflow: hidden; }
 .cam-stage video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: block; }
+/* SRS 回拉画面（原始流 usbN / 飞桨标注流 usbN_labeled）不镜像：scaleX(-1) 只是给
+   本地自拍预览看的，标注流里的 OSD 文字和禁区坐标都是按真实方向画的，
+   镜像会让文字全反、左右颠倒（巡检看位置会读错方向）。切视角时加/删 .no-mirror。 */
+.cam-stage video.no-mirror { transform: none; }
 .cam-stage video[hidden] { display: none; }
 .cam-grid {
   position: absolute; inset: 0; pointer-events: none; opacity: .5;
@@ -169,7 +173,8 @@ svg { display:block; }
   animation: camLiveBlink 1s ease-in-out infinite;
 }
 .cam-window.inspect-alert .cam-stage { aspect-ratio: 4 / 3; }
-.cam-window.inspect-alert .alert-img { width: 100%; height: 100%; object-fit: cover; display: block; transform: scaleX(-1); }
+/* 证据图/历史缩略图来自 canvas 抓帧（不经过 CSS 变换），按真实方向显示 */
+.cam-window.inspect-alert .alert-img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .cam-window.inspect-alert .alert-body { padding: 10px 14px; font: 12px/1.6 ui-monospace, Consolas, monospace; color: #cfe6ff; }
 .cam-window.inspect-alert .alert-row { display: flex; justify-content: space-between; margin: 4px 0; }
 .cam-window.inspect-alert .alert-row b { color: #8fd6ff; font-weight: 400; letter-spacing: .1em; }
@@ -201,7 +206,7 @@ svg { display:block; }
 .ihp-close:hover { background: rgba(40,70,110,.6); color:#fff; }
 .ihp-body { overflow-y:auto; padding:10px; }
 .ihp-item { display:flex; gap:10px; padding:10px; margin-bottom:8px; border:1px solid rgba(94,200,255,.12); border-radius:10px; background:rgba(14,22,42,.5); }
-.ihp-img { width:96px; height:72px; object-fit:cover; border-radius:6px; transform:scaleX(-1); flex-shrink:0; }
+.ihp-img { width:96px; height:72px; object-fit:cover; border-radius:6px; flex-shrink:0; }
 .ihp-meta { flex:1; min-width:0; font:11px/1.5 ui-monospace,Consolas,monospace; color:#cfe6ff; }
 .ihp-meta b { color:#ffd27a; }
 .ihp-time { display:block; color:#6f8fb0; font-size:10px; margin:2px 0; }
