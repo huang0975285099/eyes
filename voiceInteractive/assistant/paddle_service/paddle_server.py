@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 import time
 import threading
 from http import HTTPStatus
@@ -62,6 +63,13 @@ class PaddleHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args) -> None:
         return
+
+    def handle_error(self, request, client_address) -> None:
+        # 浏览器/curl 主动断开 SSE 长连接属正常行为，不打 traceback
+        if isinstance(sys.exc_info()[1], (ConnectionError, ConnectionResetError,
+                                          ConnectionAbortedError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
 
     def do_OPTIONS(self) -> None:
         body = b""

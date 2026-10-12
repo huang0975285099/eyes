@@ -214,12 +214,22 @@ class PaddleAnalyzer:
         with open(VOICE_DIR / "assistant" / "paddle_service" / "pphuman_eyes.yml",
                   encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
+        # predictor 只构建一次（模型常驻 GPU）；FLV 断线后复用 predictor 重入 run()，
+        # 重连成本仅 VideoCapture 打开（1~3s），避免重新加载模型（~25s）
         predictor = P.PipePredictor(_make_args(), cfg, is_video=True)
         predictor.set_file_name(None)
         predictor._eyes_stop = self.stop_flag
         self.emit({"type": "status", "running": True,
                    "stream": self.stream_name, "timestamp": time.time()})
-        predictor.run(self.pull_url)  # 阻塞至流结束或收到 stop
+        while not self.stop_flag.is_set():
+            predictor.run(self.pull_url)  # 阻塞；流结束/断开时返回
+            self.close_pushstream()        # 本轮 ffmpeg 随 run 结束而废弃
+            if self.stop_flag.is_set():
+                break
+            print("[worker] 拉流中断，2s 后重连 " + self.pull_url, flush=True)
+            self.stop_flag.wait(2.0)
+            # 重连前重置 PushStream 引用槽位，下轮 initcmd 会挂上新 ffmpeg
+            self._pushstream = None
 
     def close_pushstream(self) -> None:
         """ffmpeg 推流子进程：关 stdin（触发其 EOF 退出）并兜底 terminate。"""
@@ -279,7 +289,12 @@ def main() -> int:
                        "stream": args.stream, "error": error,
                        "timestamp": time.time()})
         print(f"[worker] {args.stream} 已退出", flush=True)
-    return 0 if error is None else 1
+        # paddle/CUDA 在 Windows 的 atexit 析构可能长时间挂起（进程已无实际工作），
+        # stdout 事件已发完，直接以退出码强退，GPU 资源由驱动随进程回收
+        sys.stdout.flush()
+        sys.stderr.flush()
+        exit_code = 0 if error is None else 1
+        os._exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -153,7 +153,13 @@ class PaddleRunner:
         except Exception as error:  # noqa: BLE001
             print(f"[runner] 读取 {self.stream_name} worker 输出异常: {error}", flush=True)
         finally:
-            code = proc.wait() if proc.poll() is None else proc.returncode
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=10)  # 正常情况 worker 以 os._exit 秒退
+                except sp.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            code = proc.returncode
             self._running = False
             if code not in (0, None) and not self._error:
                 self._error = f"worker exited with code {code}"
