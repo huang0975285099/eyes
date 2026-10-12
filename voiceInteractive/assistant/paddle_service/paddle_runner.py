@@ -30,7 +30,7 @@ _TERMINATE_GRACE_SECONDS = 5
 class PaddleRunner:
     def __init__(self, stream_name: str, modules: list[str] | None = None):
         self.stream_name = stream_name
-        self.modules = list(modules or ["fall", "fight"])
+        self.modules = list(modules or ["fall", "fight", "intrusion"])
         self._proc: sp.Popen | None = None
         self._reader: threading.Thread | None = None
         self._subscribers: list[queue.Queue] = []

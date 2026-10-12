@@ -186,7 +186,7 @@ function removeSrsViewBtn(slot){
   if(btn) btn.remove();
 }
 
-// ---- 飞桨 8771 事件订阅（SSE）：摔倒/打架/口罩/状态事件交给 index-inspect.js 统一告警 ----
+// ---- 飞桨 8771 事件订阅（SSE）：摔倒/打架/口罩/区域入侵/状态事件交给 index-inspect.js 统一告警 ----
 // 同时在 slot._paddleReady 上产出 Promise：worker 模型全部加载完（running:true 带 modules）
 // 时 resolve；模型加载前异常退出则 reject（前端据此决定是否回退原始流）。
 function openPaddleEvents(slot, name){
@@ -205,7 +205,9 @@ function openPaddleEvents(slot, name){
     let ev = null;
     try{ ev = JSON.parse(msg.data); }catch(_){ return; }
     if(ev && ev.type==='status'){
-      if(ev.running===true && slot._paddleReadyResolve){
+      // 只认 worker 就绪事件（带 modules）：8771 建连即发的合成 status 无 modules，
+      // 用它 resolve 会让 PADDLE_READY_TIMEOUT 与"崩溃前 reject"双双失效
+      if(ev.running===true && Array.isArray(ev.modules) && slot._paddleReadyResolve){
         const fn = slot._paddleReadyResolve;
         slot._paddleReadyResolve = null; slot._paddleReadyReject = null;
         fn(ev);
@@ -232,7 +234,7 @@ async function paddleAnalyzeStart(name, modules){
   try{
     const resp = await fetchWithTimeout(PADDLE_API + '/analyze/start',
       {method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({stream:name, modules:modules||['fall','fight']})}, 10000);
+        body:JSON.stringify({stream:name, modules:modules||['fall','fight','intrusion']})}, 10000);
     const data = await resp.json();
     return !!(data && data.ok);
   }catch(err){
@@ -284,7 +286,8 @@ async function beginSrsInspect(slot){
   }
   slot.srsName = name;
   slot.srsLabeledName = name + '_labeled';
-  const modules = ['fall','fight'];
+  // intrusion 由 worker 按 conf/regions.json 判定：该路没配禁区时会自动降级剔除
+  const modules = ['fall','fight','intrusion'];
   if(MASK_ENGINE === 'paddlehub') modules.push('mask');
   const paddleOk = await paddleAnalyzeStart(name, modules);
   // 无论飞桨是否可用，先切 SRS 同源原始流（推流已成功）

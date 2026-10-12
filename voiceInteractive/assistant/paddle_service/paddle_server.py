@@ -22,7 +22,9 @@ from .paddle_runner import PaddleRunner
 _PORT = 8771
 _runners: dict[str, PaddleRunner] = {}
 _runners_lock = threading.Lock()
-_ALLOWED_MODULES = {"fall", "fight", "mask"}
+_ALLOWED_MODULES = {"fall", "fight", "mask", "intrusion"}
+# 口罩需 mask_engine=paddlehub 才加入；区域入侵需 conf/regions.json 配了该路禁区才真正生效
+_DEFAULT_MODULES = ["fall", "fight", "intrusion"]
 
 
 def _get_runner(stream: str, modules: list[str] | None = None) -> PaddleRunner:
@@ -57,6 +59,23 @@ def _stop_runner(stream: str) -> dict:
         return {"ok": True, "stream": stream, "not_running": True}
     runner.request_stop()  # 立即返回，后台线程 join
     return {"ok": True, "stream": stream}
+
+
+def _stop_all_and_shutdown(server) -> None:
+    """顺序停掉所有 runner（各自含 25s 优雅宽限），再让 serve_forever 返回。
+
+    必须在独立线程调用：server.shutdown() 不能在请求处理线程内执行，否则自锁。
+    """
+    with _runners_lock:
+        runners = list(_runners.values())
+        _runners.clear()
+    for runner in runners:
+        try:
+            runner.stop()
+        except Exception as error:  # noqa: BLE001
+            print(f"[shutdown] 停止 {runner.stream_name} 失败: {error}", flush=True)
+    print("[shutdown] 所有分析流已停止，正在关闭 8771", flush=True)
+    server.shutdown()
 
 
 class PaddleHandler(BaseHTTPRequestHandler):
@@ -112,22 +131,42 @@ class PaddleHandler(BaseHTTPRequestHandler):
             stream, _modules = self._read_body()
             self._respond(_stop_runner(stream))
             return
+        if path == "/shutdown":
+            self._shutdown()
+            return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _shutdown(self) -> None:
+        """停掉所有 worker 后关闭服务（main.py 退出前调用）。
+
+        必须走 HTTP 正常退出路径：父进程 terminate() 在 Windows 是硬杀，
+        paddle_worker 与其 ffmpeg 会变孤儿，继续占显存并往 SRS 推 RTMP。
+        自定义头 X-Local-Shutdown 是防页面 CSRF：跨域请求需先预检，
+        而 OPTIONS 未放行该头，浏览器会拦下（本地脚本/curl 不受影响）。
+        """
+        if self.headers.get("X-Local-Shutdown") != "1":
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        self._respond({"ok": True, "shutting_down": True})
+        threading.Thread(
+            target=_stop_all_and_shutdown, args=(self.server,),
+            name="paddle-shutdown", daemon=True,
+        ).start()
 
     def _read_body(self) -> tuple[str, list[str]]:
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > 65536:
-                return "usb1", ["fall", "fight"]
+                return "usb1", list(_DEFAULT_MODULES)
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             stream = str(payload.get("stream", "usb1")).strip() or "usb1"
-            raw_modules = payload.get("modules", ["fall", "fight"])
+            raw_modules = payload.get("modules", _DEFAULT_MODULES)
             if not isinstance(raw_modules, list):
-                raw_modules = ["fall", "fight"]
+                raw_modules = list(_DEFAULT_MODULES)
             modules = [m for m in raw_modules if isinstance(m, str) and m in _ALLOWED_MODULES]
-            return stream, modules or ["fall", "fight"]
+            return stream, modules or list(_DEFAULT_MODULES)
         except Exception:
-            return "usb1", ["fall", "fight"]
+            return "usb1", list(_DEFAULT_MODULES)
 
     def _respond(self, payload: dict, status: int = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

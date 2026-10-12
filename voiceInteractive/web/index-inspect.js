@@ -56,12 +56,15 @@ function ensureAlertWin(e){
   e.alertWin=win;
   return win;
 }
-// 告警类型元信息：口罩 / 摔倒 / 打架（均飞桨 8771 SSE 事件）
+// 告警类型元信息：口罩 / 摔倒 / 打架 / 区域入侵（均飞桨 8771 SSE 事件）
 const ALERT_META={
   mask:{title:'巡检告警', bad:'未戴口罩'},
   fall:{title:'摔倒告警', bad:'人员摔倒'},
-  fight:{title:'打架告警', bad:'打架斗殴'}
+  fight:{title:'打架告警', bad:'打架斗殴'},
+  intrusion:{title:'区域入侵告警', bad:'区域入侵'}
 };
+// 告警窗/红脉冲保留时长（ms）：口罩与入侵的后端冷却为 30s，留到下次刷新再消失
+const ALERT_TTL={mask:30000, fall:20000, fight:20000, intrusion:30000};
 function showAlertWin(e, blobUrl, result){
   const win=ensureAlertWin(e);
   const kind=result.kind||'mask';
@@ -74,6 +77,10 @@ function showAlertWin(e, blobUrl, result){
   if(kind==='mask'){
     rows='<div class="alert-row"><b>画面人数</b><span>'+result.person_count+'</span></div>'+
       '<div class="alert-row alert-bad"><b>未戴口罩</b><span>'+result.no_mask+'</span></div>';
+  }else if(kind==='intrusion'){
+    rows='<div class="alert-row alert-bad"><b>事件</b><span>人员进入禁区</span></div>'+
+      '<div class="alert-row"><b>禁区</b><span>'+(result.region||'-')+'</span></div>'+
+      (result.track_id!=null?'<div class="alert-row"><b>目标ID</b><span>'+result.track_id+'</span></div>':'');
   }else if(kind==='fall'){
     rows='<div class="alert-row alert-bad"><b>事件</b><span>人员摔倒</span></div>'+
       (result.track_id!=null?'<div class="alert-row"><b>目标ID</b><span>'+result.track_id+'</span></div>':'')+
@@ -92,7 +99,7 @@ function showAlertWin(e, blobUrl, result){
     win.classList.add('open');
   }
   if(e.alertAutoHide)clearTimeout(e.alertAutoHide);
-  e.alertAutoHide=setTimeout(()=>hideAlertWin(e),20000); // 20s 后自动消失
+  e.alertAutoHide=setTimeout(()=>hideAlertWin(e), ALERT_TTL[kind]||20000);
 }
 function hideAlertWin(e){
   if(!e||!e.alertWin) return;
@@ -172,7 +179,7 @@ function _showHistoryPanel(){
       const kind=h.kind||'mask';
       const nums=kind==='mask'
         ? ('人数 '+h.person_count+' · 未戴 '+h.no_mask)
-        : (ALERT_META[kind]?ALERT_META[kind].bad:'事件');
+        : ((ALERT_META[kind]?ALERT_META[kind].bad:'事件')+(h.region?' · '+h.region:''));
       return '<div class="ihp-item"><img class="ihp-img" src="'+h.url+'">'+
         '<div class="ihp-meta"><b>'+h.label+'</b><span class="ihp-time">'+new Date(h.time).toLocaleString('zh-CN')+'</span>'+
         '<div class="ihp-nums">'+nums+'</div>'+
@@ -203,8 +210,8 @@ function _startOne(slot){
 // 启动巡检：text 为空（"本地摄像头开始巡检"）→ 启动所有本地窗口；指明"N号" → 启动指定路
 function _inspectSpeakSuffix(){
   const eng=(typeof MASK_ENGINE!=='undefined')?MASK_ENGINE:'paddlehub';
-  if(eng==='off') return '，摔倒打架实时告警。';
-  return '，飞桨实时检测口罩、摔倒和打架。';
+  return eng==='off' ? '，摔倒、打架和区域入侵实时告警。'
+    : '，飞桨实时检测口罩、摔倒、打架和区域入侵。';
 }
 
 async function startInspect(text){
@@ -273,6 +280,10 @@ async function handlePaddleEvent(slot, ev){
       && !ev.modules.includes('mask')){
       // mask 模型加载失败被 worker 降级：口罩检测不可用（无 qwen 兜底，仅提示）
       serverLog('[飞桨]',e.label,'口罩模块未生效，实际模块:',ev.modules.join(','));
+    }else if(ev.running===true && Array.isArray(ev.modules)
+      && !ev.modules.includes('intrusion')){
+      // conf/regions.json 未给该路配禁区（或坐标无效），区域入侵自动关闭
+      serverLog('[飞桨]',e.label,'未配置禁区，区域入侵未启用。实际模块:',ev.modules.join(','));
     }
     return;
   }
@@ -299,7 +310,7 @@ async function handlePaddleEvent(slot, ev){
     e._alertClsTimer=setTimeout(()=>{
       e._alertClsTimer=null;
       if(e._lastAlertKind==='mask'&&e.slot&&e.slot.win)e.slot.win.classList.remove('alerting');
-    },20000);
+    },ALERT_TTL.mask);
     // 每 3s 来一次违规事件：告警窗画面/人数持续刷新；语音/历史/存盘 20s 冷却一次
     let blob=null;
     try{ blob=await captureCamFrame(e.slot); }catch(_){ /* 截帧失败仍弹窗 */ }
@@ -324,31 +335,44 @@ async function handlePaddleEvent(slot, ev){
     return;
   }
 
-  if(ev.type!=='fall'&&ev.type!=='fight') return;
+  if(ev.type!=='fall'&&ev.type!=='fight'&&ev.type!=='intrusion') return;
   const kind=ev.type;
   e._lastAlertKind=kind;
   const result=kind==='fall'
     ? {kind, track_id:ev.track_id, score:ev.score, summary:'检测到人员摔倒，请立即现场确认。'}
-    : {kind, score:ev.score, summary:'检测到打架斗殴行为，请立即现场确认。'};
+    : kind==='fight'
+    ? {kind, score:ev.score, summary:'检测到打架斗殴行为，请立即现场确认。'}
+    : {kind, track_id:ev.track_id, region:ev.region,
+       summary:'检测到人员进入禁区「'+(ev.region||'未知区域')+'」，请立即现场确认。'};
   serverLog('[飞桨告警]',e.label,kind,JSON.stringify(ev));
   e.slot.win.classList.add('alerting');
-  // 飞桨事件无"恢复正常"信号：20s 后自动解除红脉冲（与告警窗自动消失同步）
+  // 飞桨事件无"恢复正常"信号：到时后自动解除红脉冲（与告警窗自动消失同步）
   if(e._alertClsTimer)clearTimeout(e._alertClsTimer);
-  e._alertClsTimer=setTimeout(()=>{ e._alertClsTimer=null; if(e.slot&&e.slot.win)e.slot.win.classList.remove('alerting'); },20000);
+  e._alertClsTimer=setTimeout(()=>{ e._alertClsTimer=null; if(e.slot&&e.slot.win)e.slot.win.classList.remove('alerting'); },ALERT_TTL[kind]||20000);
   let blob=null;
   try{ blob=await captureCamFrame(e.slot); }catch(_){ /* 截帧失败仍弹窗（无图） */ }
   if(e.lastUrl)URL.revokeObjectURL(e.lastUrl);
   e.lastUrl=blob?URL.createObjectURL(blob):null;
   showAlertWin(e,e.lastUrl,result);
-  inspectSpeak(e.label+(kind==='fall'?'巡检告警：检测到人员摔倒。':'巡检告警：检测到打架斗殴行为。'));
+  // 同类事件 10s 内只播报一次：多路/多目标并发时避免 TTS 排队堆叠
+  const now=Date.now();
+  if(!e._kindTs) e._kindTs={};
+  const canSpeak = now-(e._kindTs[kind]||0) > 10000;
+  if(!canSpeak) return;
+  e._kindTs[kind]=now;
+  const spoken = kind==='fall' ? '巡检告警：检测到人员摔倒。'
+    : kind==='fight' ? '巡检告警：检测到打架斗殴行为。'
+    : '巡检告警：检测到人员进入禁区'+(ev.region||'')+'。';
+  inspectSpeak(e.label+spoken);
   if(blob){
     // 历史（独立 URL）+ 存盘取证（复用 8770 轻量存盘端点）
     inspectHistory.push({kind, label:e.label, url:URL.createObjectURL(blob),
-      person_count:null, no_mask:0, summary:result.summary, time:new Date()});
+      person_count:null, no_mask:0, region:ev.region||'', summary:result.summary, time:new Date()});
     if(inspectHistory.length>30){const old=inspectHistory.shift(); URL.revokeObjectURL(old.url);}
     _showHistoryBtn();
+    const saveText = kind==='fall' ? '飞桨摔倒事件' : kind==='fight' ? '飞桨打架事件' : '飞桨区域入侵事件';
     blobToBase64(blob).then(b64=>fetchWithTimeout('http://localhost:8770/vision_save',
       {method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({image:b64, text:'飞桨'+(kind==='fall'?'摔倒':'打架')+'事件', answer:result.summary})},30000)).catch(()=>{});
+        body:JSON.stringify({image:b64, text:saveText, answer:result.summary})},30000)).catch(()=>{});
   }
 }

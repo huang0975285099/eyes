@@ -6,6 +6,7 @@ import argparse
 import socket
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 from .config import DEFAULT_CONFIG, load_config
@@ -18,11 +19,45 @@ from .tray import SystemTray
 
 # 飞桨服务使用独立 venv（paddle 与 torch DLL 冲突，必须物理隔离）
 _PADDLE_PYTHON = APP_DIR / ".venv-paddle" / "Scripts" / "python.exe"
+_PADDLE_PORT = 8771
+_PADDLE_STOP_GRACE_SECONDS = 40.0
 
 
 def _port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _stop_paddle_service(process: subprocess.Popen) -> None:
+    """先让 8771 自行停掉所有 worker，再兜底 terminate。
+
+    直接 terminate() 在 Windows 是 TerminateProcess，paddle_server 的 finally
+    不会执行，它拉起的 paddle_worker 与 ffmpeg 会变孤儿：继续占显存并推 RTMP
+    标注流。故先走 HTTP /shutdown 触发其正常退出路径。
+    """
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{_PADDLE_PORT}/shutdown",
+            data=b"{}",
+            headers={
+                "Content-Type": "application/json",
+                "X-Local-Shutdown": "1",
+            },
+            method="POST",
+        )
+        # 显式禁用代理：环境里的 HTTP_PROXY 会把本机请求也转发出去
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=5):
+            pass
+        process.wait(timeout=_PADDLE_STOP_GRACE_SECONDS)
+        return
+    except Exception as error:
+        print(f"飞桨分析服务优雅退出失败，转为强制结束：{error}", file=sys.stderr)
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,7 +108,7 @@ def main() -> int:
                 print("ASR 服务（8770）后台启动中……")
             except Exception as error:
                 print(f"ASR 服务启动失败：{error}", file=sys.stderr)
-        if _PADDLE_PYTHON.exists() and not _port_in_use(8771):
+        if _PADDLE_PYTHON.exists() and not _port_in_use(_PADDLE_PORT):
             try:
                 paddle_process = subprocess.Popen(
                     [
@@ -93,7 +128,15 @@ def main() -> int:
                 print(f"系统托盘启动失败，语音助手仍可继续运行：{error}", file=sys.stderr)
     try:
         if dashboard:
-            print("语音助手已启动（dashboard + ASR 服务模式，浏览器访问 http://localhost:8765/）")
+            services = ["dashboard"]
+            if asr_process is not None:
+                services.append(f"ASR {8770}")
+            if paddle_process is not None:
+                services.append(f"飞桨 {_PADDLE_PORT}")
+            print(
+                "语音助手已启动（" + " + ".join(services)
+                + " 模式，浏览器访问 http://localhost:8765/）"
+            )
             # Windows 上无超时的 Event.wait() 无法被 Ctrl+C 中断，用短超时循环让信号能被处理
             while not dashboard.store.shutdown_event.is_set():
                 dashboard.store.shutdown_event.wait(timeout=0.5)
@@ -109,11 +152,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 asr_process.kill()
         if paddle_process is not None:
-            paddle_process.terminate()
-            try:
-                paddle_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                paddle_process.kill()
+            _stop_paddle_service(paddle_process)
         if tray:
             tray.stop()
         if dashboard:
