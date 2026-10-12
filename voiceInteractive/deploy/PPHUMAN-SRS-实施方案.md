@@ -450,6 +450,33 @@ libx264 默认输出 High profile，而 Chrome 的 WebRTC H.264 接收端不接�
 - 本机有 `HTTP_PROXY` 时，`urllib` 访问 127.0.0.1 会被转发（曾出现 502）：本机请求一律用
   `ProxyHandler({})` 显式绕过，不依赖 `no_proxy`。
 
+#### 4.7.1 Ctrl+C 会打到子进程（已处理，2026-10-11）
+
+**现象**：退出时 8771 抛栈
+
+```
+File "...\paddle_server.py", line 229, in main
+    runner.stop()
+File "...\paddle_runner.py", line 120, in stop
+    proc.wait(timeout=_STOP_GRACE_SECONDS)
+KeyboardInterrupt
+```
+
+**根因**：Windows 控制台的 Ctrl+C 发给**共享该控制台的所有进程**，不是只给前台进程。
+主进程与 8771、8770 都会收到；8771 的 `serve_forever()` 捕获第一次后，`finally` 里
+`runner.stop()` 等待 worker 期间若再命中信号，就直接抛栈退出——**worker 与 ffmpeg 漏回收**。
+
+**处理**（回归探针 `probe_shutdown.py`）：
+
+| 位置 | 处理 |
+|---|---|
+| `paddle_runner.stop()` | `proc.wait()` 容忍 `KeyboardInterrupt`，视为"需要兜底"，继续 terminate → kill；并发调用改为等 `_stopped` 事件后再返回，避免提前返回导致 worker 变孤儿 |
+| `paddle_server.main()` | 清理前 `signal.signal(SIGINT, SIG_IGN)`；`/shutdown` 已在跑时先等它完成（40s 上限），否则进程一退、daemon 线程被杀 |
+| `main.py` | 8770/8771 的回收同时兜住 `KeyboardInterrupt`（它不是 `Exception` 的子类，`except Exception` 抓不到） |
+
+> 未隔离信号（`CREATE_NEW_PROCESS_GROUP`）是**有意为之**：Ctrl+C 直达子进程本身就是
+> 一道兜底（主进程被强杀时子进程还能自清理），因此只让清理过程免疫中断，不切断传播。`。
+
 - [x] 阶段三验收：前端推 `usb1` → `POST /analyze/start {"stream":"usb1"}` →
   ffmpeg 拉 `rtmp://10.0.20.219:1935/live/usb1_labeled` 有带框/骨骼/属性画面；`GET /events` 收到事件流。
 

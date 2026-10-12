@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import queue
+import signal
 import sys
 import time
 import threading
@@ -61,11 +62,14 @@ def _stop_runner(stream: str) -> dict:
     return {"ok": True, "stream": stream}
 
 
-def _stop_all_and_shutdown(server) -> None:
-    """顺序停掉所有 runner（各自含 25s 优雅宽限），再让 serve_forever 返回。
+_shutdown_started = threading.Event()
+_shutdown_done = threading.Event()
+# 等 /shutdown 线程回收完 worker 的上限：优雅宽限 25s + terminate 5s + kill 5s + 余量
+_SHUTDOWN_WAIT_SECONDS = 40
 
-    必须在独立线程调用：server.shutdown() 不能在请求处理线程内执行，否则自锁。
-    """
+
+def _stop_all_runners() -> None:
+    """停掉并回收全部 runner（幂等：已清空则为空操作）。"""
     with _runners_lock:
         runners = list(_runners.values())
         _runners.clear()
@@ -74,8 +78,22 @@ def _stop_all_and_shutdown(server) -> None:
             runner.stop()
         except Exception as error:  # noqa: BLE001
             print(f"[shutdown] 停止 {runner.stream_name} 失败: {error}", flush=True)
-    print("[shutdown] 所有分析流已停止，正在关闭 8771", flush=True)
-    server.shutdown()
+
+
+def _stop_all_and_shutdown(server) -> None:
+    """顺序停掉所有 runner（各自含 25s 优雅宽限），再让 serve_forever 返回。
+
+    必须在独立线程调用：server.shutdown() 不能在请求处理线程内执行，否则自锁。
+    """
+    if _shutdown_started.is_set():
+        return
+    _shutdown_started.set()
+    try:
+        _stop_all_runners()
+        print("[shutdown] 所有分析流已停止，正在关闭 8771", flush=True)
+        server.shutdown()
+    finally:
+        _shutdown_done.set()
 
 
 class PaddleHandler(BaseHTTPRequestHandler):
@@ -214,6 +232,25 @@ class PaddleHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+def _cleanup(server) -> None:
+    """serve_forever 返回后的清理：忽略后续 Ctrl+C，保证 worker 一定被回收。
+
+    Windows 控制台的 Ctrl+C 会发给共享控制台的**所有**进程。8771 收到后
+    serve_forever 抛 KeyboardInterrupt，若在 finally 的 runner.stop() 等待期间
+    再次命中，就会抛栈退出并漏掉 worker 回收（曾出现 traceback + worker/ffmpeg
+    残留）。这里先屏蔽信号，再走与 /shutdown 相同的回收流程。
+    """
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except Exception:  # noqa: BLE001  非主线程等场景下设置失败不影响清理
+        pass
+    try:
+        _stop_all_runners()
+        server.server_close()
+    except Exception as error:  # noqa: BLE001
+        print(f"[shutdown] 清理异常: {error}", flush=True)
+
+
 def main() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", _PORT), PaddleHandler)
     print(f"PP-Human 分析服务已启动：http://127.0.0.1:{_PORT}/  （飞桨 GPU 环境）", flush=True)
@@ -222,12 +259,11 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nPP-Human 分析服务正在停止……", flush=True)
     finally:
-        with _runners_lock:
-            runners = list(_runners.values())
-            _runners.clear()
-        for runner in runners:
-            runner.stop()
-        server.server_close()
+        # /shutdown 已在跑（主进程优雅停止路径）：它持有 runner 引用并在回收 worker，
+        # 必须等它做完，否则进程一退 daemon 线程被杀 -> worker 变孤儿
+        if _shutdown_started.is_set():
+            _shutdown_done.wait(timeout=_SHUTDOWN_WAIT_SECONDS)
+        _cleanup(server)
 
 
 if __name__ == "__main__":

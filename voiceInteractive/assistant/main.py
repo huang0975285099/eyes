@@ -51,13 +51,18 @@ def _stop_paddle_service(process: subprocess.Popen) -> None:
             pass
         process.wait(timeout=_PADDLE_STOP_GRACE_SECONDS)
         return
-    except Exception as error:
+    # KeyboardInterrupt 不是 Exception 的子类：连按 Ctrl+C 时必须显式兜住，
+    # 否则 8771 不会被 terminate，worker 与 ffmpeg 变孤儿
+    except (Exception, KeyboardInterrupt) as error:
         print(f"飞桨分析服务优雅退出失败，转为强制结束：{error}", file=sys.stderr)
-    process.terminate()
     try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            process.kill()
+    except OSError:
+        pass  # 已退出
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -146,11 +151,15 @@ def main() -> int:
         print("\n正在退出语音助手……")
     finally:
         if asr_process is not None:
-            asr_process.terminate()
             try:
-                asr_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                asr_process.kill()
+                asr_process.terminate()
+                # KeyboardInterrupt：用户连按 Ctrl+C 时不能让 ASR 变孤儿进程
+                try:
+                    asr_process.wait(timeout=5)
+                except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                    asr_process.kill()
+            except OSError:
+                pass  # 已退出
         if paddle_process is not None:
             _stop_paddle_service(paddle_process)
         if tray:

@@ -38,6 +38,7 @@ class PaddleRunner:
         self._running = False
         self._error: str | None = None
         self._stopping = False
+        self._stopped = threading.Event()
 
     @property
     def running(self) -> bool:
@@ -90,6 +91,7 @@ class PaddleRunner:
         )
         self._running = True
         self._stopping = False
+        self._stopped.clear()   # 允许同一 runner 实例停后重启
         self._error = None
         self._reader = threading.Thread(
             target=self._read_output, name=f"worker-reader-{self.stream_name}",
@@ -102,34 +104,58 @@ class PaddleRunner:
         """请求停止（立即返回，回收在后台线程做，避免 HTTP 请求长时间挂起）。"""
         threading.Thread(target=self.stop, daemon=True).start()
 
+    @staticmethod
+    def _reap(proc: sp.Popen, timeout: float) -> bool:
+        """等待子进程退出，返回是否已回收。
+
+        额外容忍 KeyboardInterrupt：Windows 控制台的 Ctrl+C 会发给共享控制台的
+        所有进程，8771 在等待 worker 退出时被打断会直接漏掉回收（曾出现
+        traceback + worker/ffmpeg 残留）。这里把中断当作"超时"处理，继续走兜底。
+        """
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except (sp.TimeoutExpired, KeyboardInterrupt):
+            return False
+
     def stop(self) -> None:
-        """同步停止：stdin 通知优雅退出 → 等待 → terminate → kill 兜底。"""
+        """同步停止：stdin 通知优雅退出 → 等待 → terminate → kill 兜底（幂等）。"""
         proc = self._proc
-        if proc is None or self._stopping:
+        if proc is None:
             self._running = False
             return
+        if self._stopping:
+            # 并发调用（/shutdown 线程 与 Ctrl+C 的 finally）：等回收完成再返回，
+            # 避免提前返回后进程退出、worker 变孤儿
+            self._stopped.wait(timeout=_STOP_GRACE_SECONDS + _TERMINATE_GRACE_SECONDS * 2)
+            return
         self._stopping = True
-        # 1) 优雅停止：worker 的 capturevideo 轮询 stop_flag，排空帧队列后自行退出
         try:
-            if proc.stdin and not proc.stdin.closed:
-                proc.stdin.write("stop\n")
-                proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
-        try:
-            proc.wait(timeout=_STOP_GRACE_SECONDS)
-        except sp.TimeoutExpired:
-            # 2) terminate（worker 内 ffmpeg 随其 stdin 管道关闭而 EOF 退出）
-            proc.terminate()
+            # 1) 优雅停止：worker 的 capturevideo 轮询 stop_flag，排空帧队列后自行退出
             try:
-                proc.wait(timeout=_TERMINATE_GRACE_SECONDS)
-            except sp.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=_TERMINATE_GRACE_SECONDS)
-        if self._reader is not None:
-            self._reader.join(timeout=3)
-        self._proc = None
-        self._running = False
+                if proc.stdin and not proc.stdin.closed:
+                    proc.stdin.write("stop\n")
+                    proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            if not self._reap(proc, _STOP_GRACE_SECONDS):
+                # 2) terminate（worker 内 ffmpeg 随其 stdin 管道关闭而 EOF 退出）
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+                if not self._reap(proc, _TERMINATE_GRACE_SECONDS):
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    self._reap(proc, _TERMINATE_GRACE_SECONDS)
+            if self._reader is not None:
+                self._reader.join(timeout=3)
+            self._proc = None
+            self._running = False
+        finally:
+            self._stopped.set()
 
     def _read_output(self) -> None:
         """逐行读 worker stdout：EVENT 行解析广播，其余透传控制台；EOF 表示进程退出。"""
