@@ -99,13 +99,34 @@ function ensureAlertWin(e){
   e.alertWin=win;
   return win;
 }
+// 告警类型元信息：口罩（qwen 60s 巡检）/ 摔倒 / 打架（飞桨 8771 SSE 事件）
+const ALERT_META={
+  mask:{title:'巡检告警', bad:'未戴口罩'},
+  fall:{title:'摔倒告警', bad:'人员摔倒'},
+  fight:{title:'打架告警', bad:'打架斗殴'}
+};
 function showAlertWin(e, blobUrl, result){
   const win=ensureAlertWin(e);
-  win.querySelector('.cam-title').innerHTML='<span class="alert-dot"></span>⚠ '+e.label+' 巡检告警';
-  win.querySelector('.alert-img').src=blobUrl;
+  const kind=result.kind||'mask';
+  const meta=ALERT_META[kind]||ALERT_META.mask;
+  win.querySelector('.cam-title').innerHTML='<span class="alert-dot"></span>⚠ '+e.label+' '+meta.title;
+  const img=win.querySelector('.alert-img');
+  if(blobUrl){ img.src=blobUrl; img.hidden=false; }
+  else { img.removeAttribute('src'); img.hidden=true; }
+  let rows='';
+  if(kind==='mask'){
+    rows='<div class="alert-row"><b>画面人数</b><span>'+result.person_count+'</span></div>'+
+      '<div class="alert-row alert-bad"><b>未戴口罩</b><span>'+result.no_mask+'</span></div>';
+  }else if(kind==='fall'){
+    rows='<div class="alert-row alert-bad"><b>事件</b><span>人员摔倒</span></div>'+
+      (result.track_id!=null?'<div class="alert-row"><b>目标ID</b><span>'+result.track_id+'</span></div>':'')+
+      '<div class="alert-row"><b>置信度</b><span>'+Math.round((result.score||0)*100)+'%</span></div>';
+  }else{
+    rows='<div class="alert-row alert-bad"><b>事件</b><span>打架斗殴</span></div>'+
+      '<div class="alert-row"><b>置信度</b><span>'+Math.round((result.score||0)*100)+'%</span></div>';
+  }
   win.querySelector('.alert-body').innerHTML=
-    '<div class="alert-row"><b>画面人数</b><span>'+result.person_count+'</span></div>'+
-    '<div class="alert-row alert-bad"><b>未戴口罩</b><span>'+result.no_mask+'</span></div>'+
+    rows+
     (result.summary?'<div class="alert-summary">'+result.summary+'</div>':'')+
     '<div class="alert-time">'+new Date().toLocaleTimeString('zh-CN')+'</div>';
   if(!win.classList.contains('open')){
@@ -191,7 +212,7 @@ async function inspectOnce(e){
         {method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({image:b64, text:INSPECT_PROMPT, answer:data.text})},30000).catch(()=>{});
       // 记入历史（独立 URL，不随告警窗关闭 revoke）
-      inspectHistory.push({label:e.label, url:URL.createObjectURL(blob), person_count:result.person_count, no_mask:result.no_mask, summary:result.summary, time:new Date()});
+      inspectHistory.push({kind:'mask', label:e.label, url:URL.createObjectURL(blob), person_count:result.person_count, no_mask:result.no_mask, summary:result.summary, time:new Date()});
       if(inspectHistory.length>30){const old=inspectHistory.shift(); URL.revokeObjectURL(old.url);}
       _showHistoryBtn();
       serverLog('[巡检]',e.label,'已触发告警+播报+存盘');
@@ -252,12 +273,16 @@ function _showHistoryPanel(){
   panel.className='inspect-history-panel';
   const items=inspectHistory.slice().reverse();
   panel.innerHTML='<div class="ihp-head"><span>巡检告警历史（'+inspectHistory.length+'条）</span><span class="ihp-close">✕</span></div>'+
-    '<div class="ihp-body">'+(items.length?items.map(h=>
-      '<div class="ihp-item"><img class="ihp-img" src="'+h.url+'">'+
-      '<div class="ihp-meta"><b>'+h.label+'</b><span class="ihp-time">'+new Date(h.time).toLocaleString('zh-CN')+'</span>'+
-      '<div class="ihp-nums">人数 '+h.person_count+' · 未戴 '+h.no_mask+'</div>'+
-      '<div class="ihp-sum">'+(h.summary||'')+'</div></div></div>'
-    ).join(''):'<div class="ihp-empty">暂无告警记录</div>')+'</div>';
+    '<div class="ihp-body">'+(items.length?items.map(h=>{
+      const kind=h.kind||'mask';
+      const nums=kind==='mask'
+        ? ('人数 '+h.person_count+' · 未戴 '+h.no_mask)
+        : (ALERT_META[kind]?ALERT_META[kind].bad:'事件');
+      return '<div class="ihp-item"><img class="ihp-img" src="'+h.url+'">'+
+        '<div class="ihp-meta"><b>'+h.label+'</b><span class="ihp-time">'+new Date(h.time).toLocaleString('zh-CN')+'</span>'+
+        '<div class="ihp-nums">'+nums+'</div>'+
+        '<div class="ihp-sum">'+(h.summary||'')+'</div></div></div>';
+    }).join(''):'<div class="ihp-empty">暂无告警记录</div>')+'</div>';
   document.body.appendChild(panel);
   panel.querySelector('.ihp-close').addEventListener('click',()=>panel.remove());
   requestAnimationFrame(()=>panel.classList.add('show'));
@@ -330,6 +355,44 @@ function _stopOne(e){
   if(e.lastUrl)URL.revokeObjectURL(e.lastUrl);
   // 停 SRS 推流、移除视角按钮、窗口恢复本地零延迟画面（幂等）
   if(typeof endSrsInspect==='function') endSrsInspect(e.slot);
+}
+
+// 飞桨 8771 SSE 事件入口（由 voice-srs.js 的 EventSource 回调）：
+// fall/fight 复用现有告警链路（红脉冲 + 告警窗 + 播报 + 历史 + 存盘）
+async function handlePaddleEvent(slot, ev){
+  if(!slot||!ev) return;
+  const e=inspectStates.get(slot.deviceId);
+  if(!e) return; // 已停止巡检的路忽略迟到事件
+  if(ev.type==='status'){
+    if(ev.running===false && ev.error) serverLog('[飞桨]',e.label,'分析异常停止:',ev.error);
+    return;
+  }
+  if(ev.type!=='fall'&&ev.type!=='fight') return;
+  const kind=ev.type;
+  const result=kind==='fall'
+    ? {kind, track_id:ev.track_id, score:ev.score, summary:'检测到人员摔倒，请立即现场确认。'}
+    : {kind, score:ev.score, summary:'检测到打架斗殴行为，请立即现场确认。'};
+  serverLog('[飞桨告警]',e.label,kind,JSON.stringify(ev));
+  e.slot.win.classList.add('alerting');
+  // 飞桨事件无"恢复正常"信号：20s 后自动解除红脉冲（与告警窗自动消失同步）
+  if(e._alertClsTimer)clearTimeout(e._alertClsTimer);
+  e._alertClsTimer=setTimeout(()=>{ e._alertClsTimer=null; if(e.slot&&e.slot.win)e.slot.win.classList.remove('alerting'); },20000);
+  let blob=null;
+  try{ blob=await captureCamFrame(e.slot); }catch(_){ /* 截帧失败仍弹窗（无图） */ }
+  if(e.lastUrl)URL.revokeObjectURL(e.lastUrl);
+  e.lastUrl=blob?URL.createObjectURL(blob):null;
+  showAlertWin(e,e.lastUrl,result);
+  inspectSpeak(e.label+(kind==='fall'?'巡检告警：检测到人员摔倒。':'巡检告警：检测到打架斗殴行为。'));
+  if(blob){
+    // 历史（独立 URL）+ 存盘取证（复用 8770 轻量存盘端点）
+    inspectHistory.push({kind, label:e.label, url:URL.createObjectURL(blob),
+      person_count:null, no_mask:0, summary:result.summary, time:new Date()});
+    if(inspectHistory.length>30){const old=inspectHistory.shift(); URL.revokeObjectURL(old.url);}
+    _showHistoryBtn();
+    blobToBase64(blob).then(b64=>fetchWithTimeout('http://localhost:8770/vision_save',
+      {method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({image:b64, text:'飞桨'+(kind==='fall'?'摔倒':'打架')+'事件', answer:result.summary})},30000)).catch(()=>{});
+  }
 }
 
 // 页面可见性：隐藏即全部暂停，可见恢复（仅仍在巡检态的路）

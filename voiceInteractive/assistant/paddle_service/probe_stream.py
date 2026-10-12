@@ -19,7 +19,9 @@ import paddle
 
 VOICE_DIR = Path(__file__).resolve().parents[2]
 ROOT = VOICE_DIR / "third_party" / "PaddleDetection"
-FFMPEG = str(VOICE_DIR / "ffmpeg.exe")
+# ffmpeg 候选位置：third_party（现行）→ 项目根（旧布局）→ PATH
+FFMPEG = str(next((p for p in (VOICE_DIR / "third_party" / "ffmpeg.exe",
+                               VOICE_DIR / "ffmpeg.exe") if p.exists()), "ffmpeg"))
 sys.path.insert(0, str(ROOT / "deploy" / "pipeline"))
 sys.path.insert(0, str(ROOT / "deploy"))
 os.chdir(ROOT)

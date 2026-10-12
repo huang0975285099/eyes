@@ -1,10 +1,13 @@
-// ===== SRS 流媒体接入：巡检态把 USB 摄像头 WHIP 推到 219 SRS，并从 SRS 回拉同源画面 =====
+// ===== SRS 流媒体接入：巡检态把 USB 摄像头 WHIP 推到 219 SRS，并从 SRS 回拉画面 =====
 // 设计：平时摄像头窗口看本地 getUserMedia 流（零延迟）；开始巡检后才推流，
-//   窗口切到 SRS 回拉的 usbN 流（与飞桨分析同源）；停止巡检停推并恢复本地画面。
+//   通知 8771 飞桨服务启动分析，窗口切到 SRS 回拉的 usbN_labeled 标注流
+//   （8771 不可用时回退 usbN 原始流）；停止巡检停推、停分析并恢复本地画面。
 // 依赖（先加载的脚本提供）：camSlots, waitForIceGathering（index-cam.js）；
 //   inspectStates, stopInspect, serverLog（index-inspect.js / voice-utils.js）
 
 const SRS_HOST = '10.0.20.219';
+// 飞桨 PP-Human 分析服务（本机独立进程，8771）：拉 usbN 原始流分析，推 usbN_labeled 标注流
+const PADDLE_API = 'http://localhost:8771';
 // 信令走 8765 同源反向代理（/srs/* → 219:1985），规避 Chrome localhost→私网的 PNA 拦截；
 // WebRTC 媒体面仍直连 SRS（UDP 8000，candidate 由 SRS 配置提供）。
 const SRS_SIGNAL = (location.origin || `http://${location.host}`) + '/srs/rtc/v1';
@@ -128,7 +131,8 @@ function switchCamToLocalView(slot){
 }
 
 // ---- 巡检视角切换按钮：SRS 画面（默认巡检态）<-> 本地零延迟画面 ----
-function addSrsViewBtn(slot){
+// labeled=true 时 SRS 侧为飞桨标注流（usbN_labeled），否则为原始流（usbN）
+function addSrsViewBtn(slot, labeled){
   const actions = slot.win.querySelector('.cam-actions');
   if(!actions || slot.win.querySelector('.cam-srs-btn')) return;
   const btn = document.createElement('button');
@@ -143,9 +147,9 @@ function addSrsViewBtn(slot){
       if(onSrs){
         switchCamToLocalView(slot);
         btn.textContent = 'SRS画面';
-        btn.title = '切回 SRS 同源画面（与飞桨分析一致）';
+        btn.title = labeled ? '切回飞桨标注画面' : '切回 SRS 同源画面';
       }else{
-        await switchCamToSrsView(slot, slot.srsName);
+        await switchCamToSrsView(slot, labeled ? slot.srsLabeledName : slot.srsName);
         btn.textContent = '本地画面';
         btn.title = '巡检中：切回本地零延迟画面（SRS 推流与分析不受影响）';
       }
@@ -166,8 +170,56 @@ function removeSrsViewBtn(slot){
   if(btn) btn.remove();
 }
 
+// ---- 飞桨 8771 事件订阅（SSE）：摔倒/打架/状态事件交给 index-inspect.js 统一告警 ----
+function openPaddleEvents(slot, name){
+  closePaddleEvents(slot);
+  let es;
+  try{
+    es = new EventSource(PADDLE_API + '/events?stream=' + encodeURIComponent(name));
+  }catch(err){
+    serverLog('[飞桨] SSE 订阅失败:', err && err.message ? err.message : err);
+    return;
+  }
+  slot.paddleES = es;
+  es.onmessage = (msg) => {
+    let ev = null;
+    try{ ev = JSON.parse(msg.data); }catch(_){ return; }
+    if(typeof handlePaddleEvent === 'function') handlePaddleEvent(slot, ev);
+  };
+  // 断开时 EventSource 自动重连，无需手动处理；服务重启后会重新收到 status 事件
+}
+function closePaddleEvents(slot){
+  if(slot && slot.paddleES){
+    try{ slot.paddleES.close(); }catch(_){}
+    slot.paddleES = null;
+  }
+}
+
+// 通知 8771 启动/停止分析；start 失败返回 false（调用方回退原始流，不阻断巡检）
+async function paddleAnalyzeStart(name){
+  try{
+    const resp = await fetchWithTimeout(PADDLE_API + '/analyze/start',
+      {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({stream:name})}, 10000);
+    const data = await resp.json();
+    return !!(data && data.ok);
+  }catch(err){
+    serverLog('[飞桨] 分析服务不可用，回退原始流:', err && err.message ? err.message : err);
+    return false;
+  }
+}
+function paddleAnalyzeStop(name){
+  // best effort：不 await、不阻塞 UI 恢复；服务端异步停止 runner
+  try{
+    fetch(PADDLE_API + '/analyze/stop',
+      {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({stream:name})}).catch(()=>{});
+  }catch(_){}
+}
+
 // ---- 巡检生命周期对接（由 index-inspect.js 的 _startOne / _stopOne 调用）----
-// 开始：推流 -> 切 SRS 同源画面 -> 加视角按钮。推流失败则自动停止该路巡检并恢复本地画面。
+// 开始：推流 -> 启动飞桨分析 -> 回拉标注流（8771 不可用/失败则回退原始流）-> SSE 订阅。
+// 推流失败则自动停止该路巡检并恢复本地画面。
 async function beginSrsInspect(slot){
   let name;
   try{
@@ -184,20 +236,46 @@ async function beginSrsInspect(slot){
     stopSrsPublish(slot);
     return;
   }
+  slot.srsName = name;
+  slot.srsLabeledName = name + '_labeled';
+  // 启动飞桨分析（best effort）；标注流刚启动可能需要 1~2 秒才在 SRS 可拉
+  const labeled = await paddleAnalyzeStart(name);
   try{
-    await switchCamToSrsView(slot, name);
-    addSrsViewBtn(slot);
-    serverLog('[SRS] 推流成功，巡检画面已切到', name);
+    if(labeled){
+      // 标注流就绪有延迟：失败重试 2 次（每次间隔 2s），仍失败则回退原始流
+      let ok = false, lastErr = null;
+      for(let i = 0; i < 3 && inspectStates.has(slot.deviceId); i++){
+        try{ await switchCamToSrsView(slot, slot.srsLabeledName); ok = true; break; }
+        catch(err){ lastErr = err; await new Promise(r=>setTimeout(r,2000)); }
+      }
+      if(!ok) throw lastErr || new Error('标注流回拉失败');
+      openPaddleEvents(slot, name);
+      addSrsViewBtn(slot, true);
+      serverLog('[SRS] 推流+飞桨分析成功，巡检画面已切到', slot.srsLabeledName);
+    }else{
+      await switchCamToSrsView(slot, name);
+      addSrsViewBtn(slot, false);
+      serverLog('[SRS] 推流成功（无飞桨标注），巡检画面为原始流', name);
+    }
   }catch(err){
-    serverLog('[SRS] 回拉失败，停止该路巡检:', err && err.message ? err.message : err);
-    endSrsInspect(slot);
-    if(inspectStates.has(slot.deviceId)) stopInspect(slot, true);
+    serverLog('[SRS] 标注流回拉失败，尝试回退原始流:', err && err.message ? err.message : err);
+    try{
+      await switchCamToSrsView(slot, name);
+      addSrsViewBtn(slot, false);
+      serverLog('[SRS] 已回退原始流', name);
+    }catch(err2){
+      serverLog('[SRS] 原始流回拉也失败，停止该路巡检:', err2 && err2.message ? err2.message : err2);
+      endSrsInspect(slot);
+      if(inspectStates.has(slot.deviceId)) stopInspect(slot, true);
+    }
   }
 }
 
-// 结束：停推 -> 移除按钮 -> 恢复本地画面（幂等，供 _stopOne / closeCamWindow 兜底调用）
+// 结束：关 SSE -> 通知飞桨停分析 -> 停推 -> 移除按钮 -> 恢复本地画面（幂等）
 function endSrsInspect(slot){
   if(!slot) return;
+  closePaddleEvents(slot);
+  if(slot.srsName) paddleAnalyzeStop(slot.srsName);
   stopSrsPublish(slot);
   removeSrsViewBtn(slot);
   switchCamToLocalView(slot);

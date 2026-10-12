@@ -12,8 +12,12 @@ from .config import DEFAULT_CONFIG, load_config
 from .dashboard import CameraDashboard
 from .llm import OllamaClient
 from .native_camera import list_native_cameras
+from .paths import APP_DIR
 from .platform_utils import configure_windows_console
 from .tray import SystemTray
+
+# 飞桨服务使用独立 venv（paddle 与 torch DLL 冲突，必须物理隔离）
+_PADDLE_PYTHON = APP_DIR / ".venv-paddle" / "Scripts" / "python.exe"
 
 
 def _port_in_use(port: int) -> bool:
@@ -58,6 +62,7 @@ def main() -> int:
     dashboard = CameraDashboard(config) if config.web_enabled else None
     tray = None
     asr_process = None
+    paddle_process = None
     if dashboard:
         dashboard.start()
         if not _port_in_use(8770):
@@ -68,6 +73,17 @@ def main() -> int:
                 print("ASR 服务（8770）后台启动中……")
             except Exception as error:
                 print(f"ASR 服务启动失败：{error}", file=sys.stderr)
+        if _PADDLE_PYTHON.exists() and not _port_in_use(8771):
+            try:
+                paddle_process = subprocess.Popen(
+                    [
+                        str(_PADDLE_PYTHON), "-u", "-m",
+                        "assistant.paddle_service.paddle_server",
+                    ],
+                )
+                print("飞桨分析服务（8771）后台启动中……")
+            except Exception as error:
+                print(f"飞桨分析服务启动失败：{error}", file=sys.stderr)
         if config.tray_enabled and not args.no_tray:
             try:
                 tray = SystemTray(dashboard, config.tray_notifications_enabled)
@@ -92,6 +108,12 @@ def main() -> int:
                 asr_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 asr_process.kill()
+        if paddle_process is not None:
+            paddle_process.terminate()
+            try:
+                paddle_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                paddle_process.kill()
         if tray:
             tray.stop()
         if dashboard:
