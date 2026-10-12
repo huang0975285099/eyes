@@ -18,6 +18,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import subprocess as sp
 from pathlib import Path
 
@@ -28,9 +29,16 @@ _TERMINATE_GRACE_SECONDS = 5
 
 
 class PaddleRunner:
-    def __init__(self, stream_name: str, modules: list[str] | None = None):
+    def __init__(self, stream_name: str, modules: list[str] | None = None,
+                 srs_host: str = ""):
         self.stream_name = stream_name
         self.modules = list(modules or ["fall", "fight", "intrusion"])
+        self.srs_host = (srs_host or "").strip()
+        # 本次请求要跑的模块：与 modules 分开保存，因为 modules 会被 worker 上报的
+        # "实际生效模块"覆盖（口罩加载失败/无禁区时会被剔除），拿它比较会反复重建 worker
+        self.requested_modules = list(self.modules)
+        # worker 上报的实际生效模块（None = 还没收到，模型仍在加载）
+        self.ready_modules: list[str] | None = None
         self._proc: sp.Popen | None = None
         self._reader: threading.Thread | None = None
         self._subscribers: list[queue.Queue] = []
@@ -39,6 +47,7 @@ class PaddleRunner:
         self._error: str | None = None
         self._stopping = False
         self._stopped = threading.Event()
+        self._lifecycle = threading.Lock()  # 保证 stop() 只有第一个调用者执行回收
 
     @property
     def running(self) -> bool:
@@ -78,6 +87,7 @@ class PaddleRunner:
                 "assistant.paddle_service.paddle_worker",
                 "--stream", self.stream_name,
                 "--modules", ",".join(self.modules),
+                "--srs-host", self.srs_host,
             ],
             cwd=str(VOICE_DIR),
             stdin=sp.PIPE,
@@ -89,6 +99,7 @@ class PaddleRunner:
             bufsize=1,
             env=env,
         )
+        self.requested_modules = list(self.modules)
         self._running = True
         self._stopping = False
         self._stopped.clear()   # 允许同一 runner 实例停后重启
@@ -104,32 +115,55 @@ class PaddleRunner:
         """请求停止（立即返回，回收在后台线程做，避免 HTTP 请求长时间挂起）。"""
         threading.Thread(target=self.stop, daemon=True).start()
 
+    def wait_stopped(self, timeout: float | None = None) -> bool:
+        """等待回收完成（供"停止后立刻重启同一路"的场景串行化）。"""
+        return self._stopped.wait(timeout=timeout)
+
     @staticmethod
     def _reap(proc: sp.Popen, timeout: float) -> bool:
         """等待子进程退出，返回是否已回收。
 
-        额外容忍 KeyboardInterrupt：Windows 控制台的 Ctrl+C 会发给共享控制台的
-        所有进程，8771 在等待 worker 退出时被打断会直接漏掉回收（曾出现
-        traceback + worker/ffmpeg 残留）。这里把中断当作"超时"处理，继续走兜底。
+        刻意不用 `Popen.wait(timeout)`：Windows 下它内部的 WaitForSingleObject
+        不可被 Ctrl+C 打断，挂起的中断会延迟到 wait 返回后才抛出，而实测中这会把
+        一次 3s 的等待拖到 60s 以上（中断落在异常构造路径上导致计时失效）。
+        改为轮询非阻塞的 `poll()`，超时由本函数自己掌握。
+
+        同时容忍 KeyboardInterrupt：控制台 Ctrl+C 会发给共享控制台的所有进程，
+        8771 在等待 worker 退出时被打断若直接抛栈，就会漏掉回收（曾出现
+        traceback + worker/ffmpeg 残留）。中断只消耗当前轮询周期，不算失败。
         """
-        try:
-            proc.wait(timeout=timeout)
-            return True
-        except (sp.TimeoutExpired, KeyboardInterrupt):
-            return False
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if proc.poll() is not None:
+                    return True
+            except KeyboardInterrupt:
+                pass
+            except Exception:  # noqa: BLE001  句柄失效等情况一律视为已结束
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            try:
+                time.sleep(0.05)
+            except KeyboardInterrupt:
+                pass
 
     def stop(self) -> None:
         """同步停止：stdin 通知优雅退出 → 等待 → terminate → kill 兜底（幂等）。"""
-        proc = self._proc
-        if proc is None:
-            self._running = False
-            return
-        if self._stopping:
+        # 判定"谁是回收者"必须与置位原子完成：分两步会让两个并发调用者同时进主体
+        with self._lifecycle:
+            first = not self._stopping
+            self._stopping = True
+            proc = self._proc
+        if not first:
             # 并发调用（/shutdown 线程 与 Ctrl+C 的 finally）：等回收完成再返回，
             # 避免提前返回后进程退出、worker 变孤儿
             self._stopped.wait(timeout=_STOP_GRACE_SECONDS + _TERMINATE_GRACE_SECONDS * 2)
             return
-        self._stopping = True
+        if proc is None:
+            self._running = False
+            self._stopped.set()
+            return
         try:
             # 1) 优雅停止：worker 的 capturevideo 轮询 stop_flag，排空帧队列后自行退出
             try:
@@ -155,6 +189,15 @@ class PaddleRunner:
             self._proc = None
             self._running = False
         finally:
+            # 兜底：Windows 下 WaitForSingleObject 不可被 Ctrl+C 打断，中断会延迟到
+            # wait 返回后才抛出，个别情况下会让某一步超时比预期长。这里保证 stop()
+            # 返回时子进程一定已经不存在，绝不留孤儿 worker / ffmpeg
+            try:
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
             self._stopped.set()
 
     def _read_output(self) -> None:
@@ -176,6 +219,7 @@ class PaddleRunner:
                         elif event.get("type") == "status" and event.get("modules"):
                             # worker 实际生效模块（口罩模型加载失败时会被降级）
                             self.modules = list(event["modules"])
+                            self.ready_modules = list(event["modules"])
                         self._emit(event)
                         continue
                     except json.JSONDecodeError:

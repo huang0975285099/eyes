@@ -75,7 +75,9 @@ function showAlertWin(e, blobUrl, result){
   else { img.removeAttribute('src'); img.hidden=true; }
   let rows='';
   if(kind==='mask'){
-    rows='<div class="alert-row"><b>画面人数</b><span>'+result.person_count+'</span></div>'+
+    // person_count 实为"检出人脸数"：侧脸/远景小脸检不出人脸，它不等于画面人数，
+    // 按人数显示会让人误以为"画面就这些人"
+    rows='<div class="alert-row"><b>检出人脸</b><span>'+result.person_count+'</span></div>'+
       '<div class="alert-row alert-bad"><b>未戴口罩</b><span>'+result.no_mask+'</span></div>';
   }else if(kind==='intrusion'){
     rows='<div class="alert-row alert-bad"><b>事件</b><span>人员进入禁区</span></div>'+
@@ -178,7 +180,7 @@ function _showHistoryPanel(){
     '<div class="ihp-body">'+(items.length?items.map(h=>{
       const kind=h.kind||'mask';
       const nums=kind==='mask'
-        ? ('人数 '+h.person_count+' · 未戴 '+h.no_mask)
+        ? ('人脸 '+h.person_count+' · 未戴 '+h.no_mask)
         : ((ALERT_META[kind]?ALERT_META[kind].bad:'事件')+(h.region?' · '+h.region:''));
       return '<div class="ihp-item"><img class="ihp-img" src="'+h.url+'">'+
         '<div class="ihp-meta"><b>'+h.label+'</b><span class="ihp-time">'+new Date(h.time).toLocaleString('zh-CN')+'</span>'+
@@ -259,8 +261,16 @@ function _stopOne(e){
     const cd=e.slot.win.querySelector('.cam-countdown'); if(cd)cd.remove(); // 原仅靠 CSS 隐藏，顺手清除残留节点
     syncInspectBtn(e.slot);
   }
-  if(e.alertWin){const w=e.alertWin;w.classList.remove('open');setTimeout(()=>{if(w.parentNode)w.remove();},320);}
-  if(e.lastUrl)URL.revokeObjectURL(e.lastUrl);
+  // 清掉告警相关悬挂定时器：否则巡检停止后仍会触发，对已释放的 blob URL 二次 revoke
+  if(e.alertAutoHide){clearTimeout(e.alertAutoHide);e.alertAutoHide=null;}
+  if(e._alertClsTimer){clearTimeout(e._alertClsTimer);e._alertClsTimer=null;}
+  if(e.alertWin){
+    const w=e.alertWin; e.alertWin=null;
+    w.classList.remove('open');
+    setTimeout(()=>{if(w.parentNode)w.remove();},320);
+  }
+  if(e.lastUrl){URL.revokeObjectURL(e.lastUrl);e.lastUrl=null;}
+  e._lastAlertKind=null;
   // 停 SRS 推流、移除视角按钮、窗口恢复本地零延迟画面（幂等）
   if(typeof endSrsInspect==='function') endSrsInspect(e.slot);
 }
@@ -304,7 +314,7 @@ async function handlePaddleEvent(slot, ev){
     }
     e._lastAlertKind='mask';
     const result={kind:'mask',person_count:faces,no_mask:noMask,
-      summary:'飞桨实时检测：画面中'+faces+'人，其中'+noMask+'人未戴口罩。'};
+      summary:'飞桨实时检测：检出'+faces+'张人脸，其中'+noMask+'人未戴口罩。'};
     e.slot.win.classList.add('alerting');
     if(e._alertClsTimer)clearTimeout(e._alertClsTimer);
     e._alertClsTimer=setTimeout(()=>{
@@ -321,7 +331,7 @@ async function handlePaddleEvent(slot, ev){
     const speakCd = now-e._lastMaskAlertTs>20000;
     if(speakCd){
       e._lastMaskAlertTs=now;
-      inspectSpeak(e.label+'巡检告警：画面中'+faces+'人，其中'+noMask+'人未戴口罩。');
+      inspectSpeak(e.label+'巡检告警：检出'+faces+'张人脸，其中'+noMask+'人未戴口罩。');
       if(blob){
         inspectHistory.push({kind:'mask', label:e.label, url:URL.createObjectURL(blob),
           person_count:faces, no_mask:noMask, summary:result.summary, time:new Date()});

@@ -57,22 +57,31 @@
   SRS 已开 `rtc_to_rtmp`/`rtmp_to_rtc` 自动桥接，浏览器侧全程只使用 WebRTC。
 - 告警场景（摔倒/闯入/口罩）对亚秒级延迟不敏感；方案因此设计为"平时本地流、巡检才切 SRS"。
 
-**流命名约定（多路按 camSlots 序号）**
+**流命名约定（多路按摄像头分配序号）**
 
 | 流名 | 内容 | 产生者 | 消费者 |
 |---|---|---|---|
 | `usb1`、`usb2`… | 原始流 | 浏览器 WHIP 推流 | 8771 拉流分析；前端"原始视角" |
 | `usb1_labeled`… | 标注流（框+骨骼+属性+行为） | 8771 ffmpeg 推回 | 前端巡检窗口（默认视角） |
 
-URL 速查（N 为摄像头序号）：
+> 序号取自**窗口自身的自增序号**（`voice-srs.js` 的 `slot._usbIdx`），不是 `camSlots.indexOf(slot)`。
+> 后者在关闭中间窗口后会重排，新开的窗口会拿到"正在被别的路推着"的流名 —— 两路推同一流会串台，
+> 8771 也会复用同一 runner 导致告警错路。序号一经分配即固定，不随开关窗口回收。
+
+**SRS 地址统一来源**：`config.json` 的 `srs_host`（当前 `10.0.20.219`）。
+8765 的 `/srs/*` 反向代理（`dashboard.py`）、前端推拉流（`/app-config` 下发）、
+8771 拉推流（`paddle_server` 读配置后经 `--srs-host` 传给 worker）**三处都从这里取**，
+换环境只需改这一处；缺失时回落到默认值。
+
+URL 速查（N 为摄像头序号，`{SRS}` = `srs_host`）：
 
 | 用途 | 地址 |
 |---|---|
-| 浏览器推流信令 | `http://10.0.20.219:1985/rtc/v1/publish/`，streamurl=`webrtc://10.0.20.219/live/usbN` |
-| 浏览器播放信令 | `http://10.0.20.219:1985/rtc/v1/play/`，streamurl=`webrtc://10.0.20.219/live/usbN_labeled` |
-| PP-Human 拉流（**实际使用**） | `http://10.0.20.219:8080/live/usbN.flv`（HTTP-FLV，见 §4.0 末条） |
-| 8771 推回标注流（**实际使用**） | `rtmp://10.0.20.219:1935/live/usbN_labeled` |
-| ffmpeg 备用拉流 | `rtmp://10.0.20.219:1935/live/usbN` |
+| 浏览器推流信令 | 走同源代理 `http://localhost:8765/srs/rtc/v1/publish/`（8765 转发到 `{SRS}:1985`，规避 Chrome PNA 拦截） |
+| 浏览器播放信令 | 走同源代理 `http://localhost:8765/srs/rtc/v1/play/` |
+| PP-Human 拉流（**实际使用**） | `http://{SRS}:8080/live/usbN.flv`（HTTP-FLV，见 §4.0 末条） |
+| 8771 推回标注流（**实际使用**） | `rtmp://{SRS}:1935/live/usbN_labeled` |
+| ffmpeg 备用拉流 | `rtmp://{SRS}:1935/live/usbN` |
 
 ---
 
@@ -396,10 +405,10 @@ libx264 默认输出 High profile，而 Chrome 的 WebRTC H.264 接收端不接�
 |---|---|
 | `GET /ready` | 8771 进程存活（worker 模型加载状态由 SSE 的 `status` 事件表达） |
 | `GET /status` | `{"streams":[{"stream","running","error","modules"}]}` |
-| `POST /analyze/start` | body `{"stream":"usb1","modules":["fall","fight","intrusion","mask"]}`，幂等 |
-| `POST /analyze/stop` | body `{"stream":"usb1"}`，立即返回，后台 join 回收 |
+| `POST /analyze/start` | body `{"stream":"usb1","modules":["fall","fight","intrusion","mask"]}`；同名+同模块幂等复用，**模块集合变更则重建 worker** |
+| `POST /analyze/stop` | body `{"stream":"usb1"}`，立即返回，后台 join 回收；回收期间该路登记为"在停" |
 | `POST /shutdown` | 需请求头 `X-Local-Shutdown: 1`（防页面 CSRF）；停全部 worker 后关服务，供 main.py 退出调用 |
-| `GET /events?stream=usbN` | **SSE**：`text/event-stream`，15s 心跳 `: heartbeat` |
+| `GET /events?stream=usbN` | **SSE**：`text/event-stream`，15s 心跳 `: heartbeat`；**首帧在 worker 已就绪时会补发 `modules`** |
 
 事件 JSON **没有 `{"type":"alert"}` 外层包装**，直接用 `type` 区分；字段为 `stream/type/timestamp`
 （不是 `ts`）：
@@ -425,6 +434,19 @@ libx264 默认输出 High profile，而 Chrome 的 WebRTC H.264 接收端不接�
 > 前端就绪判定必须用 `Array.isArray(ev.modules)` 过滤：见
 > [voice-srs.js](file:///d:/project/eyes/voiceInteractive/web/voice-srs.js) `openPaddleEvents`。
 > 若用 `running===true` 直接 resolve，`PADDLE_READY_TIMEOUT` 与"模型加载中崩溃 reject"双双失效。
+
+**编排上的三个坑（均已修，改动时勿回退）**：
+
+1. **SSE 首帧必须补发 `modules`**。worker 只在启动那一刻发一次带 `modules` 的 `status`，
+   之后不再发。页面刷新 / 同一路重复开始巡检时 runner 已在运行，若建连只发合成 status
+   （无 `modules`），前端就绪判定会白等 `PADDLE_READY_TIMEOUT=90s` 后放弃标注流。
+   见 `paddle_server._handle_sse`（用 `runner.ready_modules` 判断）。
+2. **停止同一路后立刻重启必须串行**。`stop` 的后台回收最长 25s，期间新 worker 若已起来会
+   出现两个进程拉同一路原始流、推同一路标注流（SRS 串流 + 画面闪烁）。
+   `_stop_runner` 把 runner 记入 `_stopping_runners`，`_start_runner` 先等它退出。
+3. **`Popen.wait(timeout)` 不可用于等待回收**。Windows 下它内部的 `WaitForSingleObject`
+   不可被 Ctrl+C 打断，挂起的中断延迟到 wait 返回后才抛出，实测会把一次 3s 的等待拖到
+   60s 以上。`paddle_runner._reap()` 改为轮询非阻塞的 `poll()` 自行掌握超时。
 
 - **`no_mask` 现在由 8771 直出**（PaddleHub 模型，见 §4.8）；旧的 qwen 60s 轮询口罩链路
   已从前后端删除，8770 的 `/vision` 端点仅保留给语音"看看画面里有什么"的看图对话。
@@ -475,7 +497,21 @@ KeyboardInterrupt
 | `main.py` | 8770/8771 的回收同时兜住 `KeyboardInterrupt`（它不是 `Exception` 的子类，`except Exception` 抓不到） |
 
 > 未隔离信号（`CREATE_NEW_PROCESS_GROUP`）是**有意为之**：Ctrl+C 直达子进程本身就是
-> 一道兜底（主进程被强杀时子进程还能自清理），因此只让清理过程免疫中断，不切断传播。`。
+> 一道兜底（主进程被强杀时子进程还能自清理），因此只让清理过程免疫中断，不切断传播。
+
+### 4.10 自检脚本（不加载模型也能回归）
+
+| 脚本 | 耗时 | 覆盖 |
+|---|---|---|
+| `probe_event_logic.py` | 秒级 | 口罩去抖/冷却、入侵判定、标注帧叠加、stdin 字节透传（注入假检测器，不加载模型） |
+| `probe_service_flow.py` | 秒级 | 8771 的 HTTP/SSE 编排：SSE 首帧补发 `modules`、停止后重启的串行化、模块变更重建、`/status`（worker 打桩） |
+| `probe_shutdown.py` | 数秒 | 退出路径：Ctrl+C 打断下仍回收、并发 `stop`、已退出进程立即返回 |
+| `probe_labeled_frame.py` | 需实机 | 查 SRS 流列表 + 抓标注帧/原始帧算差异，切分"未推流 / 未检出人 / 前端播放"三类原因 |
+| `probe_image.py` | 需实机 | 图片模式验证 DET+ATTR 链路与输出字段 |
+
+```powershell
+.venv-paddle\Scripts\python.exe assistant\paddle_service\probe_service_flow.py
+```
 
 - [x] 阶段三验收：前端推 `usb1` → `POST /analyze/start {"stream":"usb1"}` →
   ffmpeg 拉 `rtmp://10.0.20.219:1935/live/usb1_labeled` 有带框/骨骼/属性画面；`GET /events` 收到事件流。
@@ -670,3 +706,4 @@ KeyboardInterrupt
 | 4 | **口罩真人探针证据** | §4.8 步骤 2 | `probe_frames/` 目前只有 `lab.jpg`、`gpu_lab.jpg`（静态图）与 `overlay_probe.jpg`（叠加渲染自测）。缺真人戴/未戴/侧脸各若干张的准确率记录 |
 | 5 | **区域入侵坐标标定** | §4.9 | `conf/regions.json` 的 `usb1` 是 1280×720 示例矩形，需按现场机位实画；多路需补 `usb2`… 或 `"*"` |
 | 6 | DVR 录像 | §1/§6 | `srs.conf` 无 `dvr` 段，可选未开 |
+| 7 | **浏览器直接关闭后的残留 worker** | §4.6 | 直接关页面不会走 `endSrsInspect`，8771 里该路 worker 会继续拉流、推标注流，直到 8771 进程退出。可加前端 `beforeunload` 兜底或 `/analyze/start` 心跳超时回收 |

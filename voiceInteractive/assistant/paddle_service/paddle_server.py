@@ -18,10 +18,31 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from .paddle_runner import PaddleRunner
+from .paddle_runner import PaddleRunner, VOICE_DIR
 
 _PORT = 8771
+_DEFAULT_SRS_HOST = "10.0.20.219"
+
+
+def _load_srs_host() -> str:
+    """8771 是独立进程，不加载 Config 对象，直接读 config.json 的 srs_host。
+
+    与 8765 反向代理、前端推拉流共用同一配置源，避免三处硬编码各自漂移。
+    """
+    try:
+        with open(VOICE_DIR / "config.json", encoding="utf-8") as f:
+            host = str(json.load(f).get("srs_host", "")).strip()
+        return host or _DEFAULT_SRS_HOST
+    except Exception:  # noqa: BLE001  配置缺失/损坏时退回默认，不阻断服务启动
+        return _DEFAULT_SRS_HOST
+
+
+SRS_HOST = _load_srs_host()
 _runners: dict[str, PaddleRunner] = {}
+# 正在后台回收的 runner：停止同一路后立刻重启时，"旧 worker 还没死、新 worker 已起"
+# 会让两个进程同时拉同一路原始流、推同一路标注流（SRS 串流、画面闪烁），
+# 所以 start 前必须先等它回收完成
+_stopping_runners: dict[str, PaddleRunner] = {}
 _runners_lock = threading.Lock()
 _ALLOWED_MODULES = {"fall", "fight", "mask", "intrusion"}
 # 口罩需 mask_engine=paddlehub 才加入；区域入侵需 conf/regions.json 配了该路禁区才真正生效
@@ -32,22 +53,35 @@ def _get_runner(stream: str, modules: list[str] | None = None) -> PaddleRunner:
     with _runners_lock:
         runner = _runners.get(stream)
         if runner is None:
-            runner = PaddleRunner(stream, modules)
+            runner = PaddleRunner(stream, modules, SRS_HOST)
             _runners[stream] = runner
         return runner
 
 
 def _start_runner(stream: str, modules: list[str]) -> dict:
     with _runners_lock:
+        pending = _stopping_runners.get(stream)
+    if pending is not None:
+        print(f"[start] {stream} 上一次回收未完成，等待其退出", flush=True)
+        pending.wait_stopped(timeout=_SHUTDOWN_WAIT_SECONDS)
+    with _runners_lock:
         runner = _runners.get(stream)
-        already = bool(runner and runner.running)
-    if already:
-        return {"ok": True, "stream": stream, "already_running": True}
+        if runner is not None and runner.running:
+            # 已在运行且模块一致 → 幂等复用。模块不一致（改了 mask_engine、补了
+            # regions.json、页面刷新）必须重建：复用旧 worker 会沿用旧模块
+            if set(getattr(runner, "requested_modules", runner.modules)) == set(modules):
+                return {"ok": True, "stream": stream, "already_running": True}
+            stale = _runners.pop(stream)
+        else:
+            stale = None
+    if stale is not None:
+        print(f"[start] {stream} 模块变更，重建分析进程", flush=True)
+        stale.request_stop()
     # 已停止的旧 runner 直接替换（stop_flag 已置位，后台 join 回收中）
     with _runners_lock:
         runner = _runners.get(stream)
         if runner is None or not runner.running:
-            runner = PaddleRunner(stream, modules)
+            runner = PaddleRunner(stream, modules, SRS_HOST)
             _runners[stream] = runner
     runner.start()
     return {"ok": True, "stream": stream}
@@ -56,9 +90,20 @@ def _start_runner(stream: str, modules: list[str]) -> dict:
 def _stop_runner(stream: str) -> dict:
     with _runners_lock:
         runner = _runners.pop(stream, None)
-    if runner is None:
-        return {"ok": True, "stream": stream, "not_running": True}
-    runner.request_stop()  # 立即返回，后台线程 join
+        if runner is None:
+            return {"ok": True, "stream": stream, "not_running": True}
+        _stopping_runners[stream] = runner
+
+    def _reap() -> None:
+        try:
+            runner.stop()
+        except Exception as error:  # noqa: BLE001
+            print(f"[stop] {stream} 回收失败: {error}", flush=True)
+        finally:
+            with _runners_lock:
+                _stopping_runners.pop(stream, None)
+
+    threading.Thread(target=_reap, name=f"stop-{stream}", daemon=True).start()
     return {"ok": True, "stream": stream}
 
 
@@ -72,6 +117,7 @@ def _stop_all_runners() -> None:
     """停掉并回收全部 runner（幂等：已清空则为空操作）。"""
     with _runners_lock:
         runners = list(_runners.values())
+        runners += list(_stopping_runners.values())  # 正在回收的也等它结束
         _runners.clear()
     for runner in runners:
         try:
@@ -208,10 +254,16 @@ class PaddleHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self._sse_write({
+            status = {
                 "type": "status", "running": runner.running,
                 "stream": stream, "timestamp": time.time(),
-            })
+            }
+            # worker 已在运行（页面刷新 / 同一路重复开始巡检）：必须补发实际模块，
+            # 否则前端的就绪判定（要求带 modules）永远等不到 —— worker 只在启动那
+            # 一刻发一次 status，前端会白等 PADDLE_READY_TIMEOUT 后放弃标注流
+            if runner.running and runner.ready_modules:
+                status["modules"] = list(runner.ready_modules)
+            self._sse_write(status)
             while True:
                 try:
                     event = q.get(timeout=15)

@@ -5,7 +5,9 @@
 // 依赖（先加载的脚本提供）：camSlots, waitForIceGathering（index-cam.js）；
 //   inspectStates, stopInspect, serverLog（index-inspect.js / voice-utils.js）
 
-const SRS_HOST = '10.0.20.219';
+// SRS 媒体服务器地址：来自 8765 /app-config（config.json 的 srs_host），
+// 与后端反向代理、飞桨 worker 拉推流共用同一个来源，换环境只改 config.json 一处。
+let SRS_HOST = '10.0.20.219';
 // 飞桨 PP-Human 分析服务（本机独立进程，8771）：拉 usbN 原始流分析，推 usbN_labeled 标注流
 const PADDLE_API = 'http://localhost:8771';
 
@@ -17,7 +19,10 @@ function loadAppConfig(){
   if(_appConfigPromise) return _appConfigPromise;
   _appConfigPromise = fetch('app-config', {cache:'no-store'})
     .then(r => r.ok ? r.json() : {})
-    .then(d => { MASK_ENGINE = (d && (d.mask_engine==='paddlehub'||d.mask_engine==='off')) ? d.mask_engine : 'paddlehub'; })
+    .then(d => {
+      MASK_ENGINE = (d && (d.mask_engine==='paddlehub'||d.mask_engine==='off')) ? d.mask_engine : 'paddlehub';
+      if(d && typeof d.srs_host === 'string' && d.srs_host.trim()) SRS_HOST = d.srs_host.trim();
+    })
     .catch(() => { MASK_ENGINE = 'paddlehub'; })
     .then(() => MASK_ENGINE);
   return _appConfigPromise;
@@ -28,9 +33,15 @@ loadAppConfig();
 // WebRTC 媒体面仍直连 SRS（UDP 8000，candidate 由 SRS 配置提供）。
 const SRS_SIGNAL = (location.origin || `http://${location.host}`) + '/srs/rtc/v1';
 
-// 按 camSlots 序号生成稳定流名：1号摄像头 -> usb1
+// 按摄像头窗口分配流名：1号摄像头 -> usb1
+// 用 slot 上的自增序号而非 camSlots.indexOf：关闭中间窗口后 camSlots 会重排，
+// 用索引会让新开的窗口拿到"正在被别的路推着"的流名（两路推同一流 -> 串台 +
+// 8771 复用同一 runner -> 告警错路）。序号一经分配即固定，不随开关窗口回收。
+let _usbSeq = 0;
 function usbStreamName(slot){
-  return 'usb' + (camSlots.indexOf(slot) + 1);
+  if(!slot) return 'usb1';
+  if(!slot._usbIdx) slot._usbIdx = ++_usbSeq;
+  return 'usb' + slot._usbIdx;
 }
 
 // WHIP 推流（SRS 私有信令 /rtc/v1/publish/，与现有播放信令 /rtc/v1/play/ 对称）
@@ -124,6 +135,35 @@ async function startSrsPlayback(slot, name){
   }
   if(!data || data.code !== 0) throw new Error((data && data.message) || `SRS play 错误 code=${data && data.code}`);
   await conn.setRemoteDescription({type: 'answer', sdp: data.sdp});
+  // 必须等到真的解出画面：SRS 对"尚不存在"的流也会返回 code=0，只看信令成功会在
+  // 标注流还没注册时误判为切换成功，表现为"已切标注流"但画面全黑
+  await _waitFirstFrame(video, 5000);
+}
+
+// 等待 video 真正拿到一帧（readyState>=2 且有宽高）；超时抛错由调用方决定是否重试
+function _waitFirstFrame(video, ms){
+  if(!video) return Promise.reject(new Error('video 元素不存在'));
+  const done = () => video.videoWidth > 0 && video.readyState >= 2;
+  if(done()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    let timer = null;
+    const finish = (fn, arg) => {
+      if(timer) clearTimeout(timer);
+      video.removeEventListener('loadedmetadata', onLoaded);
+      fn(arg);
+    };
+    const onLoaded = () => { if(done()) finish(resolve); };
+    video.addEventListener('loadedmetadata', onLoaded);
+    const tick = () => {
+      if(done()) return finish(resolve);
+      if(Date.now() - t0 > ms){
+        return finish(reject, new Error('等待首帧超时（流已建立但无媒体）'));
+      }
+      timer = setTimeout(tick, 150);
+    };
+    tick();
+  });
 }
 
 // 窗口画面切到 SRS 回拉流
@@ -305,15 +345,18 @@ async function beginSrsInspect(slot){
     return;
   }
   openPaddleEvents(slot, name);
-  // 等 worker 模型加载完成（status running:true 带 modules）
+  // 等 worker 模型加载完成（status running:true 带 modules）。
+  // 先取局部引用：等待期间若巡检被停止，closePaddleEvents 会把 slot._paddleReady 置 null，
+  // 而 Promise.race([null, ...]) 会立刻 resolve(null) —— 后面读 readyEv.modules 将抛 TypeError
+  const readyPromise = slot._paddleReady;
   let readyEv = null;
   try{
-    readyEv = await _withTimeout(slot._paddleReady, PADDLE_READY_TIMEOUT, 'ready timeout');
+    readyEv = await _withTimeout(readyPromise, PADDLE_READY_TIMEOUT, 'ready timeout');
   }catch(err){
     serverLog('[SRS] 飞桨分析未就绪，保持原始流:', err && err.message ? err.message : err);
     return;
   }
-  if(!inspectStates.has(slot.deviceId)) return;
+  if(!readyEv || !inspectStates.has(slot.deviceId)) return;
   // 标注流在首批帧处理后才注册：轮询回拉，成功后替换视角按钮
   for(let i = 0; i < LABELED_RETRY_TIMES; i++){
     if(!inspectStates.has(slot.deviceId)) return;

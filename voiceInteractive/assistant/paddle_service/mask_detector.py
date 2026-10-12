@@ -127,15 +127,18 @@ class MaskDetector:
         det = self._run_face(blob)
         faces: list[dict] = []
         for row in det:
-            # 每行: [label, confidence, left, top, right, bottom]（归一化到缩放后尺寸）
+            # 每行: [label, confidence, left, top, right, bottom]
+            # 坐标已实测确认为**归一化 0~1**（放开阈值后跑满 89 行：left/top/right/bottom
+            # 值域 ~0~1.0，偶有 1.0x 溢出），故直接乘原图宽高。这里不沿 _SHRINK 反推，
+            # 避免 w1=int(w0*_SHRINK) 在奇数分辨率取整时引入偏移。
             if float(row[1]) <= _FACE_THRESH:
                 continue
             face = {
                 "confidence": float(row[1]),
-                "left": int(max(min(w1 * float(row[2]) / _SHRINK, w0), 0.0)),
-                "top": int(max(min(h1 * float(row[3]) / _SHRINK, h0), 0.0)),
-                "right": int(max(min(w1 * float(row[4]) / _SHRINK, w0), 0.0)),
-                "bottom": int(max(min(h1 * float(row[5]) / _SHRINK, h0), 0.0)),
+                "left": int(max(min(w0 * float(row[2]), w0), 0.0)),
+                "top": int(max(min(h0 * float(row[3]), h0), 0.0)),
+                "right": int(max(min(w0 * float(row[4]), w0), 0.0)),
+                "bottom": int(max(min(h0 * float(row[5]), h0), 0.0)),
             }
             # 过滤退化框
             if face["right"] - face["left"] < 8 or face["bottom"] - face["top"] < 8:

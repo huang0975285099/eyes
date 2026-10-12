@@ -28,7 +28,9 @@ from .paths import APP_DIR
 # 浏览器页面在 localhost（local 级）直连 10.0.20.x（private 级）会被 Chrome PNA 策略拦截，
 # 由本机 8765 服务把 /srs/* 转发到 SRS 的 1985，浏览器侧即为同源请求。
 # WebRTC 媒体面（UDP 8000）不经过此代理，浏览器仍直连 SRS。
-SRS_PROXY_TARGET = "http://10.0.20.219:1985"
+# 目标地址由 config.json 的 srs_host 决定（DEFAULT_SRS_HOST 仅作兜底），
+# 见 dashboard 内的 _srs_proxy_target()
+DEFAULT_SRS_HOST = "10.0.20.219"
 SRS_PROXY_PREFIX = "/srs/"
 _SRS_PROXY_ALLOWED_METHODS = {"GET", "POST", "OPTIONS"}
 _SRS_PROXY_TIMEOUT = 10
@@ -80,7 +82,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # 前端只读的少量运行配置（口罩检测引擎等）
             cfg = getattr(self.server, "config", None)
             payload = json.dumps(
-                {"mask_engine": getattr(cfg, "mask_engine", "paddlehub")},
+                {"mask_engine": getattr(cfg, "mask_engine", "paddlehub"),
+                 "srs_host": getattr(cfg, "srs_host", DEFAULT_SRS_HOST)},
                 ensure_ascii=False).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -126,7 +129,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
             return
         rest = self.path[len(SRS_PROXY_PREFIX):]
-        target = f"{SRS_PROXY_TARGET}/{rest}"
+        host = getattr(getattr(self.server, "config", None), "srs_host", "") or DEFAULT_SRS_HOST
+        target = f"http://{host}:1985/{rest}"
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length > _SRS_PROXY_MAX_BODY:
             self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)

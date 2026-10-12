@@ -38,8 +38,20 @@ def _resolve_ffmpeg() -> str:
     return "ffmpeg"
 
 FFMPEG = _resolve_ffmpeg()
+# SRS 地址由 8771 依据 config.json 的 srs_host 通过 --srs-host 注入（换环境只改配置）
+SRS_HOST = "10.0.20.219"
 SRS_HTTP = "http://10.0.20.219:8080/live"
 SRS_RTMP = "rtmp://10.0.20.219:1935/live"
+
+
+def set_srs_host(host: str) -> None:
+    global SRS_HOST, SRS_HTTP, SRS_RTMP
+    host = (host or "").strip()
+    if not host:
+        return
+    SRS_HOST = host
+    SRS_HTTP = f"http://{host}:8080/live"
+    SRS_RTMP = f"rtmp://{host}:1935/live"
 
 sys.path.insert(0, str(ROOT / "deploy" / "pipeline"))
 sys.path.insert(0, str(ROOT / "deploy"))
@@ -229,6 +241,7 @@ class PaddleAnalyzer:
         self._pushstream = None
         self._emit_lock = threading.Lock()
         self._mask_det = None
+        self._mask_thread: int | None = None  # predictor 的创建线程（见 on_frame）
         self._last_mask_check = 0.0
         # 口罩去抖/冷却状态（on_frame 在捕获线程，draw 在主线程，共用一把锁）
         self._mask_streak = 0
@@ -275,6 +288,12 @@ class PaddleAnalyzer:
 
     def _mark_intrusion(self, key: tuple, region_name: str, box, now: float) -> None:
         with self._draw_lock:
+            # MOT 的 track_id 会随目标离开/重入不断变化，长期运行会让字典无限增长，
+            # 而 render_frame 每帧都要遍历它 —— 顺手清掉已过期的高亮项
+            if len(self._intrusion_draw) >= 16:
+                for old_key, item in list(self._intrusion_draw.items()):
+                    if item["until"] <= now:
+                        self._intrusion_draw.pop(old_key, None)
             self._intrusion_draw[key] = {
                 "box": box, "region": region_name, "until": now + self.INTRUSION_DRAW_TTL}
 
@@ -381,6 +400,7 @@ class PaddleAnalyzer:
             from .mask_detector import MaskDetector
             t0 = time.time()
             self._mask_det = MaskDetector()
+            self._mask_thread = threading.get_ident()
             print(f"[worker] {self.stream_name} 口罩检测模型就绪 "
                   f"({time.time() - t0:.1f}s)", flush=True)
         except Exception as error:  # noqa: BLE001
@@ -397,6 +417,17 @@ class PaddleAnalyzer:
             return
         self._last_mask_check = now
         try:
+            tid = threading.get_ident()
+            if self._mask_thread is not None and tid != self._mask_thread:
+                # FLV 断线重连后 capturevideo 线程会重建：paddle 的 GPU predictor 与创建
+                # 它的线程绑定（CUDA context），换线程直接调用可能挂死或显存错乱，这里
+                # 惰性重建（约 1.7s，仅在重连后发生，不影响常态帧率）
+                print(f"[worker] {self.stream_name} 捕获线程已重建，重新加载口罩检测器",
+                      flush=True)
+                self._mask_det = None
+                self._build_mask_detector()
+                if self._mask_det is None:
+                    return
             faces = self._mask_det.detect(frame_bgr)
         except Exception as error:  # noqa: BLE001
             # 单次推理异常不杀主管线；持续异常时恢复后自动继续
@@ -507,7 +538,9 @@ def main() -> int:
     parser.add_argument("--stream", default="usb1")
     parser.add_argument("--modules", default="fall,fight,intrusion",
                         help="逗号分隔：fall/fight/mask/intrusion")
+    parser.add_argument("--srs-host", default="", help="SRS 服务器地址（来自 config.json）")
     args = parser.parse_args()
+    set_srs_host(args.srs_host)
     modules = {m.strip() for m in args.modules.split(",") if m.strip()}
     modules &= {"fall", "fight", "mask", "intrusion"}
 

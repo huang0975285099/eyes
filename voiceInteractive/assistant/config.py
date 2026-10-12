@@ -34,6 +34,7 @@ class Config:
     remote_camera_account: str
     remote_camera_password: str
     remote_camera_srs_host: str
+    srs_host: str
     vision_api_enabled: bool
     vision_api_base: str
     vision_api_model: str
@@ -64,6 +65,9 @@ def load_config(path: Path) -> Config:
         remote_camera_account=str(raw.get("remote_camera_account", "")),
         remote_camera_password=str(raw.get("remote_camera_password", "")),
         remote_camera_srs_host=str(raw.get("remote_camera_srs_host", "")),
+        # SRS 媒体服务器地址（信令 1985 / HTTP-FLV 8080 / RTMP 1935 同一台）。
+        # 8765 反向代理、前端推拉流、飞桨 worker 三处都从这里取，换环境只改这一处。
+        srs_host=str(raw.get("srs_host", "10.0.20.219")).strip() or "10.0.20.219",
         vision_api_enabled=bool(raw.get("vision_api_enabled", False)),
         vision_api_base=str(raw.get("vision_api_base", "")).rstrip("/"),
         vision_api_model=str(raw.get("vision_api_model", "qwen3-vl-8b")),
