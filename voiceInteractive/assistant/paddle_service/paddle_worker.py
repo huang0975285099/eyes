@@ -48,7 +48,10 @@ import pipeline.pipeline as P  # noqa: E402
 from datacollector import Result  # noqa: E402
 
 # 主线程内的当前分析器（Result.update 拦截回调）+ 该路 labeled 推流地址
+# _current 为 thread-local（initcmd/update 发生在主线程）；capturevideo 运行在管线
+# 捕获子线程，读不到 thread-local，故另用进程级全局（worker 单流单进程，无并发歧义）
 _current = threading.local()
+_active_analyzer = None
 _push_url: str | None = None
 _patches_applied = False
 _patches_lock = threading.Lock()
@@ -110,6 +113,9 @@ def _apply_patches():
             ret, frame = capture.read()
             if not ret:
                 return
+            analyzer = _active_analyzer
+            if analyzer is not None:
+                analyzer.on_frame(frame)  # 节流执行口罩检测（口罩 predictor 在本线程调用）
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             framequeue.put(frame_rgb)
 
@@ -156,15 +162,21 @@ class PaddleAnalyzer:
 
     FALL_COOLDOWN = 10.0   # 同一 track_id 摔倒事件告警冷却（秒）
     FIGHT_COOLDOWN = 10.0  # 打架事件告警冷却（秒）
+    MASK_INTERVAL = 3.0    # 口罩检测节流：捕获线程每 3s 跑一次（人脸模型 GPU 约 10~60ms）
 
-    def __init__(self, stream_name: str, stop_flag: threading.Event):
+    def __init__(self, stream_name: str, stop_flag: threading.Event,
+                 modules: set[str] | None = None):
         self.stream_name = stream_name
         self.pull_url = f"{SRS_HTTP}/{stream_name}.flv"
         self.stop_flag = stop_flag
+        # 实际生效模块（口罩模型加载失败会从集合中移除并通过 status 事件告知前端）
+        self.modules: set[str] = set(modules or ())
         self._last_fall: dict[str, float] = {}
         self._last_fight = 0.0
         self._pushstream = None
         self._emit_lock = threading.Lock()
+        self._mask_det = None
+        self._last_mask_check = 0.0
 
     def emit(self, event: dict) -> None:
         """事件以 EVENT 行写 stdout（父进程逐行解析）；加锁防与管线 print 交织。"""
@@ -207,10 +219,52 @@ class PaddleAnalyzer:
         except Exception as error:  # noqa: BLE001
             print(f"[worker] {self.stream_name} 事件提取异常: {error}", flush=True)
 
+    def _build_mask_detector(self) -> None:
+        """加载 PaddleHub 口罩双模型（失败仅降级，不影响摔倒/打架主管线）。"""
+        if "mask" not in self.modules:
+            return
+        try:
+            from .mask_detector import MaskDetector
+            t0 = time.time()
+            self._mask_det = MaskDetector()
+            print(f"[worker] {self.stream_name} 口罩检测模型就绪 "
+                  f"({time.time() - t0:.1f}s)", flush=True)
+        except Exception as error:  # noqa: BLE001
+            self.modules.discard("mask")
+            print(f"[worker] {self.stream_name} 口罩模型加载失败，降级为不检测口罩: "
+                  f"{error}", flush=True)
+
+    def on_frame(self, frame_bgr) -> None:
+        """管线捕获线程每帧回调（capturevideo 内）；口罩检测按 MASK_INTERVAL 节流。"""
+        if self._mask_det is None or self.stop_flag.is_set():
+            return
+        now = time.time()
+        if now - self._last_mask_check < self.MASK_INTERVAL:
+            return
+        self._last_mask_check = now
+        try:
+            faces = self._mask_det.detect(frame_bgr)
+        except Exception as error:  # noqa: BLE001
+            # 单次推理异常不杀主管线；持续异常时恢复后自动继续
+            print(f"[worker] {self.stream_name} 口罩检测异常: {error}", flush=True)
+            return
+        if not faces:
+            return  # 无人脸不发事件：避免把"镜头没人"误判为口罩正常
+        no_mask = [f for f in faces if f["label"] == "no_mask"]
+        self.emit({
+            "type": "mask",
+            "stream": self.stream_name,
+            "faces": len(faces),
+            "no_mask": len(no_mask),
+            "boxes": faces,
+            "timestamp": now,
+        })
+
     def run(self) -> None:
-        global _push_url
+        global _push_url, _active_analyzer
         _push_url = f"{SRS_RTMP}/{self.stream_name}_labeled"
         _current.analyzer = self
+        _active_analyzer = self
         with open(VOICE_DIR / "assistant" / "paddle_service" / "pphuman_eyes.yml",
                   encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
@@ -219,7 +273,10 @@ class PaddleAnalyzer:
         predictor = P.PipePredictor(_make_args(), cfg, is_video=True)
         predictor.set_file_name(None)
         predictor._eyes_stop = self.stop_flag
+        # 口罩模型在 PP-Human 主管线之后加载（约 1.6s）；失败自动从 modules 降级
+        self._build_mask_detector()
         self.emit({"type": "status", "running": True,
+                   "modules": sorted(self.modules),
                    "stream": self.stream_name, "timestamp": time.time()})
         while not self.stop_flag.is_set():
             predictor.run(self.pull_url)  # 阻塞；流结束/断开时返回
@@ -268,14 +325,18 @@ def main() -> int:
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--stream", default="usb1")
+    parser.add_argument("--modules", default="fall,fight",
+                        help="逗号分隔：fall/fight/mask")
     args = parser.parse_args()
+    modules = {m.strip() for m in args.modules.split(",") if m.strip()}
+    modules &= {"fall", "fight", "mask"}
 
     _apply_patches()
     stop_flag = threading.Event()
     threading.Thread(target=_watch_stdin, args=(stop_flag,),
                      name="stdin-watch", daemon=True).start()
 
-    analyzer = PaddleAnalyzer(args.stream, stop_flag)
+    analyzer = PaddleAnalyzer(args.stream, stop_flag, modules)
     error = None
     try:
         print(f"[worker] {args.stream} 开始拉流分析", flush=True)
@@ -284,6 +345,8 @@ def main() -> int:
         error = str(e)
         print(f"[worker] {args.stream} 异常退出: {error}", flush=True)
     finally:
+        global _active_analyzer
+        _active_analyzer = None
         analyzer.close_pushstream()
         analyzer.emit({"type": "status", "running": False,
                        "stream": args.stream, "error": error,

@@ -22,18 +22,19 @@ from .paddle_runner import PaddleRunner
 _PORT = 8771
 _runners: dict[str, PaddleRunner] = {}
 _runners_lock = threading.Lock()
+_ALLOWED_MODULES = {"fall", "fight", "mask"}
 
 
-def _get_runner(stream: str) -> PaddleRunner:
+def _get_runner(stream: str, modules: list[str] | None = None) -> PaddleRunner:
     with _runners_lock:
         runner = _runners.get(stream)
         if runner is None:
-            runner = PaddleRunner(stream)
+            runner = PaddleRunner(stream, modules)
             _runners[stream] = runner
         return runner
 
 
-def _start_runner(stream: str) -> dict:
+def _start_runner(stream: str, modules: list[str]) -> dict:
     with _runners_lock:
         runner = _runners.get(stream)
         already = bool(runner and runner.running)
@@ -43,7 +44,7 @@ def _start_runner(stream: str) -> dict:
     with _runners_lock:
         runner = _runners.get(stream)
         if runner is None or not runner.running:
-            runner = PaddleRunner(stream)
+            runner = PaddleRunner(stream, modules)
             _runners[stream] = runner
     runner.start()
     return {"ok": True, "stream": stream}
@@ -89,7 +90,8 @@ class PaddleHandler(BaseHTTPRequestHandler):
         if path == "/status":
             with _runners_lock:
                 streams = [
-                    {"stream": name, "running": runner.running, "error": runner.error}
+                    {"stream": name, "running": runner.running,
+                     "error": runner.error, "modules": list(runner.modules)}
                     for name, runner in _runners.items()
                 ]
             self._respond({"streams": streams})
@@ -103,23 +105,29 @@ class PaddleHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path == "/analyze/start":
-            self._respond(_start_runner(self._read_stream()))
+            stream, modules = self._read_body()
+            self._respond(_start_runner(stream, modules))
             return
         if path == "/analyze/stop":
-            self._respond(_stop_runner(self._read_stream()))
+            stream, _modules = self._read_body()
+            self._respond(_stop_runner(stream))
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
-    def _read_stream(self) -> str:
+    def _read_body(self) -> tuple[str, list[str]]:
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > 65536:
-                return "usb1"
+                return "usb1", ["fall", "fight"]
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            stream = str(payload.get("stream", "usb1")).strip()
-            return stream or "usb1"
+            stream = str(payload.get("stream", "usb1")).strip() or "usb1"
+            raw_modules = payload.get("modules", ["fall", "fight"])
+            if not isinstance(raw_modules, list):
+                raw_modules = ["fall", "fight"]
+            modules = [m for m in raw_modules if isinstance(m, str) and m in _ALLOWED_MODULES]
+            return stream, modules or ["fall", "fight"]
         except Exception:
-            return "usb1"
+            return "usb1", ["fall", "fight"]
 
     def _respond(self, payload: dict, status: int = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

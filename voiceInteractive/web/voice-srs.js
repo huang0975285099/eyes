@@ -8,6 +8,22 @@
 const SRS_HOST = '10.0.20.219';
 // 飞桨 PP-Human 分析服务（本机独立进程，8771）：拉 usbN 原始流分析，推 usbN_labeled 标注流
 const PADDLE_API = 'http://localhost:8771';
+
+// 口罩检测引擎（来自 8765 /app-config）：paddlehub=飞桨实时（默认）/ off=关闭。
+// 配置接口不可达时按 paddlehub（不阻断巡检）；旧 qwen 60s 轮询链路已移除。
+let MASK_ENGINE = 'paddlehub';
+let _appConfigPromise = null;
+function loadAppConfig(){
+  if(_appConfigPromise) return _appConfigPromise;
+  _appConfigPromise = fetch('app-config', {cache:'no-store'})
+    .then(r => r.ok ? r.json() : {})
+    .then(d => { MASK_ENGINE = (d && (d.mask_engine==='paddlehub'||d.mask_engine==='off')) ? d.mask_engine : 'paddlehub'; })
+    .catch(() => { MASK_ENGINE = 'paddlehub'; })
+    .then(() => MASK_ENGINE);
+  return _appConfigPromise;
+}
+loadAppConfig();
+
 // 信令走 8765 同源反向代理（/srs/* → 219:1985），规避 Chrome localhost→私网的 PNA 拦截；
 // WebRTC 媒体面仍直连 SRS（UDP 8000，candidate 由 SRS 配置提供）。
 const SRS_SIGNAL = (location.origin || `http://${location.host}`) + '/srs/rtc/v1';
@@ -170,20 +186,35 @@ function removeSrsViewBtn(slot){
   if(btn) btn.remove();
 }
 
-// ---- 飞桨 8771 事件订阅（SSE）：摔倒/打架/状态事件交给 index-inspect.js 统一告警 ----
+// ---- 飞桨 8771 事件订阅（SSE）：摔倒/打架/口罩/状态事件交给 index-inspect.js 统一告警 ----
+// 同时在 slot._paddleReady 上产出 Promise：worker 模型全部加载完（running:true 带 modules）
+// 时 resolve；模型加载前异常退出则 reject（前端据此决定是否回退 qwen / 原始流）。
 function openPaddleEvents(slot, name){
   closePaddleEvents(slot);
+  slot._paddleReady = new Promise((resolve, reject) => { slot._paddleReadyResolve = resolve; slot._paddleReadyReject = reject; });
   let es;
   try{
     es = new EventSource(PADDLE_API + '/events?stream=' + encodeURIComponent(name));
   }catch(err){
     serverLog('[飞桨] SSE 订阅失败:', err && err.message ? err.message : err);
+    slot._paddleReadyReject(err);
     return;
   }
   slot.paddleES = es;
   es.onmessage = (msg) => {
     let ev = null;
     try{ ev = JSON.parse(msg.data); }catch(_){ return; }
+    if(ev && ev.type==='status'){
+      if(ev.running===true && slot._paddleReadyResolve){
+        const fn = slot._paddleReadyResolve;
+        slot._paddleReadyResolve = null; slot._paddleReadyReject = null;
+        fn(ev);
+      }else if(ev.running===false && ev.error && slot._paddleReadyReject){
+        const fn = slot._paddleReadyReject;
+        slot._paddleReadyResolve = null; slot._paddleReadyReject = null;
+        fn(new Error(ev.error));
+      }
+    }
     if(typeof handlePaddleEvent === 'function') handlePaddleEvent(slot, ev);
   };
   // 断开时 EventSource 自动重连，无需手动处理；服务重启后会重新收到 status 事件
@@ -193,14 +224,15 @@ function closePaddleEvents(slot){
     try{ slot.paddleES.close(); }catch(_){}
     slot.paddleES = null;
   }
+  if(slot){ slot._paddleReady = null; slot._paddleReadyResolve = null; slot._paddleReadyReject = null; }
 }
 
 // 通知 8771 启动/停止分析；start 失败返回 false（调用方回退原始流，不阻断巡检）
-async function paddleAnalyzeStart(name){
+async function paddleAnalyzeStart(name, modules){
   try{
     const resp = await fetchWithTimeout(PADDLE_API + '/analyze/start',
       {method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({stream:name})}, 10000);
+        body:JSON.stringify({stream:name, modules:modules||['fall','fight']})}, 10000);
     const data = await resp.json();
     return !!(data && data.ok);
   }catch(err){
@@ -218,12 +250,27 @@ function paddleAnalyzeStop(name){
 }
 
 // ---- 巡检生命周期对接（由 index-inspect.js 的 _startOne / _stopOne 调用）----
-// 开始：推流 -> 启动飞桨分析 -> 回拉标注流（8771 不可用/失败则回退原始流）-> SSE 订阅。
+// 开始：推流 -> 启动飞桨分析 -> 先回拉原始流（模型加载约 25s，不黑屏等待）
+//   -> SSE 等 worker 就绪 -> 标注流注册后自动切到 usbN_labeled。
+// 8771 不可用 / 就绪前崩溃 / 标注流始终拉不到：保持原始流（口罩由 qwen 60s 轮询兜底）。
 // 推流失败则自动停止该路巡检并恢复本地画面。
+const PADDLE_READY_TIMEOUT = 90000;  // 含 PP-Human 模型加载（冷启动约 25s）
+const LABELED_RETRY_MS = 3000;
+const LABELED_RETRY_TIMES = 20;      // 标注流最长等 60s（含 FLV 断线重连场景）
+
+function _withTimeout(promise, ms, label){
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(label || 'timeout')), ms))
+  ]);
+}
+
 async function beginSrsInspect(slot){
   let name;
   try{
-    serverLog('[SRS] 开始推流', usbStreamName(slot));
+    await loadAppConfig();
+    if(MASK_ENGINE==='off' && typeof setMaskEngineOff==='function') setMaskEngineOff(slot, true);
+    serverLog('[SRS] 开始推流', usbStreamName(slot), '口罩引擎='+MASK_ENGINE);
     name = await startSrsPublish(slot);
   }catch(err){
     serverLog('[SRS] 推流失败，停止该路巡检:', err && err.message ? err.message : err);
@@ -238,37 +285,49 @@ async function beginSrsInspect(slot){
   }
   slot.srsName = name;
   slot.srsLabeledName = name + '_labeled';
-  // 启动飞桨分析（best effort）；标注流刚启动可能需要 1~2 秒才在 SRS 可拉
-  const labeled = await paddleAnalyzeStart(name);
+  const modules = ['fall','fight'];
+  if(MASK_ENGINE === 'paddlehub') modules.push('mask');
+  const paddleOk = await paddleAnalyzeStart(name, modules);
+  // 无论飞桨是否可用，先切 SRS 同源原始流（推流已成功）
   try{
-    if(labeled){
-      // 标注流就绪有延迟：失败重试 2 次（每次间隔 2s），仍失败则回退原始流
-      let ok = false, lastErr = null;
-      for(let i = 0; i < 3 && inspectStates.has(slot.deviceId); i++){
-        try{ await switchCamToSrsView(slot, slot.srsLabeledName); ok = true; break; }
-        catch(err){ lastErr = err; await new Promise(r=>setTimeout(r,2000)); }
-      }
-      if(!ok) throw lastErr || new Error('标注流回拉失败');
-      openPaddleEvents(slot, name);
-      addSrsViewBtn(slot, true);
-      serverLog('[SRS] 推流+飞桨分析成功，巡检画面已切到', slot.srsLabeledName);
-    }else{
-      await switchCamToSrsView(slot, name);
-      addSrsViewBtn(slot, false);
-      serverLog('[SRS] 推流成功（无飞桨标注），巡检画面为原始流', name);
-    }
+    await switchCamToSrsView(slot, name);
   }catch(err){
-    serverLog('[SRS] 标注流回拉失败，尝试回退原始流:', err && err.message ? err.message : err);
+    serverLog('[SRS] 原始流回拉失败，停止该路巡检:', err && err.message ? err.message : err);
+    endSrsInspect(slot);
+    if(inspectStates.has(slot.deviceId)) stopInspect(slot, true);
+    return;
+  }
+  addSrsViewBtn(slot, false);
+  if(!paddleOk){
+    serverLog('[SRS] 推流成功（无飞桨标注），巡检画面为原始流', name);
+    return;
+  }
+  openPaddleEvents(slot, name);
+  // 等 worker 模型加载完成（status running:true 带 modules）
+  let readyEv = null;
+  try{
+    readyEv = await _withTimeout(slot._paddleReady, PADDLE_READY_TIMEOUT, 'ready timeout');
+  }catch(err){
+    serverLog('[SRS] 飞桨分析未就绪，保持原始流:', err && err.message ? err.message : err);
+    return;
+  }
+  if(!inspectStates.has(slot.deviceId)) return;
+  // 标注流在首批帧处理后才注册：轮询回拉，成功后替换视角按钮
+  for(let i = 0; i < LABELED_RETRY_TIMES; i++){
+    if(!inspectStates.has(slot.deviceId)) return;
     try{
-      await switchCamToSrsView(slot, name);
-      addSrsViewBtn(slot, false);
-      serverLog('[SRS] 已回退原始流', name);
-    }catch(err2){
-      serverLog('[SRS] 原始流回拉也失败，停止该路巡检:', err2 && err2.message ? err2.message : err2);
-      endSrsInspect(slot);
-      if(inspectStates.has(slot.deviceId)) stopInspect(slot, true);
+      await switchCamToSrsView(slot, slot.srsLabeledName);
+      removeSrsViewBtn(slot);
+      addSrsViewBtn(slot, true);
+      serverLog('[SRS] 巡检画面已切到飞桨标注流', slot.srsLabeledName,
+        'modules=' + ((readyEv.modules || []).join(',')));
+      return;
+    }catch(err){
+      await new Promise(r => setTimeout(r, LABELED_RETRY_MS));
     }
   }
+  serverLog('[SRS] 标注流等待超时，保持原始流（事件告警仍可用）');
+  // 标注画面没切成功也不影响 fall/fight/mask 的 SSE 告警
 }
 
 // 结束：关 SSE -> 通知飞桨停分析 -> 停推 -> 移除按钮 -> 恢复本地画面（幂等）

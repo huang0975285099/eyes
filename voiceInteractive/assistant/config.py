@@ -37,6 +37,7 @@ class Config:
     vision_api_enabled: bool
     vision_api_base: str
     vision_api_model: str
+    mask_engine: str
 
 
 def load_config(path: Path) -> Config:
@@ -66,4 +67,11 @@ def load_config(path: Path) -> Config:
         vision_api_enabled=bool(raw.get("vision_api_enabled", False)),
         vision_api_base=str(raw.get("vision_api_base", "")).rstrip("/"),
         vision_api_model=str(raw.get("vision_api_model", "qwen3-vl-8b")),
+        mask_engine=_mask_engine(raw),
     )
+
+
+def _mask_engine(raw: dict) -> str:
+    # paddlehub=飞桨 8771 实时检测（失败自动回退 qwen）；qwen=60s 视觉大模型轮询；off=关闭
+    engine = str(raw.get("mask_engine", "paddlehub")).strip().lower()
+    return engine if engine in {"paddlehub", "qwen", "off"} else "paddlehub"

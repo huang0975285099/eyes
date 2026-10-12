@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import mimetypes
+import json
 import os
 import socket
 import sys
@@ -37,6 +38,10 @@ _SRS_PROXY_MAX_BODY = 512 * 1024
 class DashboardHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def __init__(self, server_address, RequestHandlerClass, config=None):
+        self.config = config
+        super().__init__(server_address, RequestHandlerClass)
 
 
 class DashboardHTTPServerV6(DashboardHTTPServer):
@@ -70,6 +75,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if request_path == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
+            return
+        if request_path == "/app-config":
+            # 前端只读的少量运行配置（口罩检测引擎等）
+            cfg = getattr(self.server, "config", None)
+            payload = json.dumps(
+                {"mask_engine": getattr(cfg, "mask_engine", "qwen")},
+                ensure_ascii=False).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
             return
         web_root = (APP_DIR / "web").resolve()
         candidate = (web_root / request_path.lstrip("/")).resolve()
@@ -169,6 +187,7 @@ class CameraDashboard:
         self.server = DashboardHTTPServer(
             (self.config.web_host, self.config.web_port),
             DashboardHandler,
+            config=self.config,
         )
         self.servers.append(self.server)
         thread = threading.Thread(
@@ -182,6 +201,7 @@ class CameraDashboard:
                 ipv6_server = DashboardHTTPServerV6(
                     ("::1", self.server.server_address[1], 0, 0),
                     DashboardHandler,
+                    config=self.config,
                 )
                 self.servers.append(ipv6_server)
                 ipv6_thread = threading.Thread(

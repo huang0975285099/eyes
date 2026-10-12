@@ -28,8 +28,9 @@ _TERMINATE_GRACE_SECONDS = 5
 
 
 class PaddleRunner:
-    def __init__(self, stream_name: str):
+    def __init__(self, stream_name: str, modules: list[str] | None = None):
         self.stream_name = stream_name
+        self.modules = list(modules or ["fall", "fight"])
         self._proc: sp.Popen | None = None
         self._reader: threading.Thread | None = None
         self._subscribers: list[queue.Queue] = []
@@ -75,6 +76,7 @@ class PaddleRunner:
                 sys.executable, "-u", "-m",
                 "assistant.paddle_service.paddle_worker",
                 "--stream", self.stream_name,
+                "--modules", ",".join(self.modules),
             ],
             cwd=str(VOICE_DIR),
             stdin=sp.PIPE,
@@ -145,6 +147,9 @@ class PaddleRunner:
                             self._running = False
                             if event.get("error"):
                                 self._error = event["error"]
+                        elif event.get("type") == "status" and event.get("modules"):
+                            # worker 实际生效模块（口罩模型加载失败时会被降级）
+                            self.modules = list(event["modules"])
                         self._emit(event)
                         continue
                     except json.JSONDecodeError:
