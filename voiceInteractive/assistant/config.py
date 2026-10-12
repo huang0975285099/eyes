@@ -72,6 +72,6 @@ def load_config(path: Path) -> Config:
 
 
 def _mask_engine(raw: dict) -> str:
-    # paddlehub=飞桨 8771 实时检测（失败自动回退 qwen）；qwen=60s 视觉大模型轮询；off=关闭
+    # paddlehub=飞桨 8771 实时检测；off=关闭（旧 qwen 轮询已移除，取 qwen 值回落 paddlehub）
     engine = str(raw.get("mask_engine", "paddlehub")).strip().lower()
-    return engine if engine in {"paddlehub", "qwen", "off"} else "paddlehub"
+    return engine if engine in {"paddlehub", "off"} else "paddlehub"

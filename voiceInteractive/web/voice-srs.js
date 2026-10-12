@@ -188,7 +188,7 @@ function removeSrsViewBtn(slot){
 
 // ---- 飞桨 8771 事件订阅（SSE）：摔倒/打架/口罩/状态事件交给 index-inspect.js 统一告警 ----
 // 同时在 slot._paddleReady 上产出 Promise：worker 模型全部加载完（running:true 带 modules）
-// 时 resolve；模型加载前异常退出则 reject（前端据此决定是否回退 qwen / 原始流）。
+// 时 resolve；模型加载前异常退出则 reject（前端据此决定是否回退原始流）。
 function openPaddleEvents(slot, name){
   closePaddleEvents(slot);
   slot._paddleReady = new Promise((resolve, reject) => { slot._paddleReadyResolve = resolve; slot._paddleReadyReject = reject; });
@@ -252,7 +252,7 @@ function paddleAnalyzeStop(name){
 // ---- 巡检生命周期对接（由 index-inspect.js 的 _startOne / _stopOne 调用）----
 // 开始：推流 -> 启动飞桨分析 -> 先回拉原始流（模型加载约 25s，不黑屏等待）
 //   -> SSE 等 worker 就绪 -> 标注流注册后自动切到 usbN_labeled。
-// 8771 不可用 / 就绪前崩溃 / 标注流始终拉不到：保持原始流（口罩由 qwen 60s 轮询兜底）。
+// 8771 不可用 / 就绪前崩溃 / 标注流始终拉不到：保持原始流（SSE 已断，无告警事件）。
 // 推流失败则自动停止该路巡检并恢复本地画面。
 const PADDLE_READY_TIMEOUT = 90000;  // 含 PP-Human 模型加载（冷启动约 25s）
 const LABELED_RETRY_MS = 3000;
@@ -269,7 +269,6 @@ async function beginSrsInspect(slot){
   let name;
   try{
     await loadAppConfig();
-    if(MASK_ENGINE==='off' && typeof setMaskEngineOff==='function') setMaskEngineOff(slot, true);
     serverLog('[SRS] 开始推流', usbStreamName(slot), '口罩引擎='+MASK_ENGINE);
     name = await startSrsPublish(slot);
   }catch(err){

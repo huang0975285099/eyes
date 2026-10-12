@@ -80,7 +80,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # 前端只读的少量运行配置（口罩检测引擎等）
             cfg = getattr(self.server, "config", None)
             payload = json.dumps(
-                {"mask_engine": getattr(cfg, "mask_engine", "qwen")},
+                {"mask_engine": getattr(cfg, "mask_engine", "paddlehub")},
                 ensure_ascii=False).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json; charset=utf-8")
